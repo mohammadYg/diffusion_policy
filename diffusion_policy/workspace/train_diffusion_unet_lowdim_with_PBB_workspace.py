@@ -33,7 +33,7 @@ from diffusers.training_utils import EMAModel
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 # %%
-class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
+class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
@@ -63,13 +63,27 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
-        # resume training
+        # Resume training
         if cfg.training.resume:
-            lastest_ckpt_path = self.get_checkpoint_path()
-            if lastest_ckpt_path.is_file():
-                print(f"Resuming from checkpoint {lastest_ckpt_path}")
-                self.load_checkpoint(path=lastest_ckpt_path)
+            latest_ckpt_path = self.get_checkpoint_path()
+            if latest_ckpt_path.is_file():
+                print("Resuming from checkpoint:", latest_ckpt_path)
+                self.load_checkpoint(path=latest_ckpt_path)
 
+        # Retrain from a specific checkpoint
+        elif cfg.training.retrain:
+            if cfg.training.desired_ckpt_path is None:
+                raise ValueError("desired_ckpt_path must be set when retraining.")
+            desired_ckpt_path = cfg.training.desired_ckpt_path
+            if not os.path.isfile(desired_ckpt_path):
+                raise ValueError(f"No such file: {desired_ckpt_path}")
+            print("Retraining from checkpoint:", desired_ckpt_path)
+            self.load_checkpoint(path=desired_ckpt_path)
+            
+        # Otherwise start fresh
+        else:
+            print("Starting training from scratch.")
+            
         # configure dataset
         dataset: BaseLowdimDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
@@ -156,24 +170,34 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 step_log = dict()
                 # ========= train for this epoch ==========
                 train_losses = list()
-                train_lips_const_prod = 0
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
                         leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     
                     # random batch for computing Lipschitz Constant
                     rand_batch = np.random.randint(0, len(train_dataloader))
-
+                    
                     for batch_idx, batch in enumerate(tepoch):
                         # device transfer
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
-
-                        # compute loss
-                        raw_loss = self.model.compute_loss(batch)
-                        loss = raw_loss / cfg.training.gradient_accumulate_every
+                        
+                        #losses = []
+                        timestep = torch.randint(0, cfg.policy.noise_scheduler.num_train_timesteps,(1,), device=device).long()
+                        #for _ in range (cfg.training.num_expect):
+                        if cfg.training.random_timestep:
+                            # set timestep to a random noising step for each image
+                            raw_loss = self.model.compute_reconst_loss_t(batch, timestep, cfg.training.PAC_loss_type) 
+                        else:
+                            raw_loss = self.model.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
+                        
+                        #losses.append(raw_loss.item())
+        
+                        loss = raw_loss / (cfg.training.num_expect*cfg.training.gradient_accumulate_every)
                         loss.backward()
 
+                        #loss = torch.stack(losses).mean()
+                        #loss.backward()
                         # step optimizer
                         if self.global_step % cfg.training.gradient_accumulate_every == 0:
                             self.optimizer.step()
@@ -185,7 +209,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             ema.step(self.model)
 
                         # logging
-                        raw_loss_cpu = raw_loss.item()
+                        #raw_loss_cpu = np.mean(losses)
+                        raw_loss_cpu = loss.item()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
                         train_losses.append(raw_loss_cpu)
                         step_log = {
@@ -195,17 +220,17 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             'lr': lr_scheduler.get_last_lr()[0]
                         }
 
-                        if rand_batch == batch_idx:
-                            # 2 random samples from the random batch to compute Lipschitz Constant
-                            rand_sample1 = np.random.randint(0, len(batch))
-                            #rand_sample2 = np.random.randint(0, len(batch))
-                            obs1 = batch["obs"][rand_sample1]
-                            obs2 = batch['obs'][rand_sample1]
-                            obs = torch.stack((obs1, obs2))
-                            with torch.no_grad():
-                                train_lips_const, train_lips_const_prod = self.model.lip_const(obs)
-                                step_log['train_lips_const_prod'] = train_lips_const_prod.item()
-                            
+                        # if rand_batch == batch_idx:
+                        #     # 2 random samples from the random batch to compute Lipschitz Constant
+                        #     rand_sample1 = np.random.randint(0, len(batch))
+                        #     #rand_sample2 = np.random.randint(0, len(batch))
+                        #     obs1 = batch["obs"][rand_sample1]
+                        #     obs2 = batch['obs'][rand_sample1]
+                        #     obs = torch.stack((obs1, obs2))
+                        #     with torch.no_grad():
+                        #         train_lips_const, train_lips_const_prod = self.model.lip_const(obs)
+                        #         step_log['train_lips_const_prod'] = train_lips_const_prod.item()
+
                         is_last_batch = (batch_idx == (len(train_dataloader)-1))
                         if not is_last_batch:
                             # log of last step is combined with validation and rollout
@@ -246,13 +271,21 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             rand_batch = np.random.randint(0, len(val_dataloader))
 
                             for batch_idx, batch in enumerate(tepoch):
+                                # device transfer
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                loss = self.model.compute_loss(batch)
-                                val_losses.append(loss)
+                                loss_val = 0
+                                timestep = torch.randint(0, cfg.policy.noise_scheduler.num_train_timesteps,(1,), device=device).long()
+                                for _ in range (cfg.training.num_expect):
+                                    if cfg.training.random_timestep:
+                                        # set timestep to a random noising step for each image
+                                        loss_val += self.model.compute_reconst_loss_t(batch, timestep, cfg.training.PAC_loss_type) 
+                                    else:
+                                        loss_val += self.model.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
+                                val_losses.append(loss_val/cfg.training.num_expect)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
                                     break
-                                
+
                                 if rand_batch == batch_idx:
                                     # 2 random samples from the random batch to compute Lipschitz Constant
                                     rand_sample1 = np.random.randint(0, len(batch))
@@ -261,17 +294,14 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                     obs2 = batch['obs'][rand_sample1]
                                     obs = torch.stack((obs1, obs2))
                                     val_lips_const, val_lips_const_prod = self.model.lip_const(obs)
-                                    
 
                         if len(val_losses) > 0:
                             val_loss = torch.mean(torch.tensor(val_losses)).item()
                             # log epoch average validation loss
                             step_log['val_loss'] = val_loss
                             step_log['val_lips_const_prod'] = val_lips_const_prod.item()
-                            #step_log['lips_const'] = lips_const.cpu().tolist()
-                            #print (len(step_log['lips_const']))
 
-                # run diffusion sampling on a training batch
+                                # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:
                     with torch.no_grad():
                         # sample trajectory from training set, and evaluate difference
@@ -298,6 +328,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         del pred_action
                         del mse
                 
+                #TODO compute the PAC-Bayes Bounds
                 # checkpoint
                 if (self.epoch % cfg.training.checkpoint_every) == 0:
                     # checkpointing
@@ -329,6 +360,35 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 self.global_step += 1
                 self.epoch += 1
 
+    # def PAC_Bayes_bounds(self, data_loader):
+    #     def reconstruct_loss (data_loader):
+    #         for batch_idx, batch in enumerate(data_loader):               
+    #             # device transfer
+    #             device = cfg.training.device
+    #             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+    #             obs_dict = {"obs": batch["obs"]}
+    #             gt_action = batch["action"]
+                
+    #             loss = 0
+    #             for _ in range (cfg.training.num_expect):
+    #                 result = self.model.predict_action(obs_dict)
+    #                 if cfg.pred_action_steps_only:
+    #                     pred_action = result["action"]
+    #                     start = cfg.n_obs_steps - 1
+    #                     end = start + cfg.n_action_steps
+    #                     gt_action = gt_action[:, start:end]
+    #                 else:
+    #                     pred_action = result["action_pred"]
+                    
+    #                 # compute loss
+    #                 if cfg.training.loss_type == "MSE":
+    #                     loss += torch.nn.functional.mse_loss(pred_action, gt_action)
+    #                 else:
+    #                     loss += torch.linalg.norm(pred_action - gt_action, ord=2, dim=(1, 2)).mean()
+    #             val_losses.append(loss/cfg.training.num_expect)
+        
+
+
 @hydra.main(
     version_base=None,
     config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")), 
@@ -339,5 +399,3 @@ def main(cfg):
 
 if __name__ == "__main__":
     main()
-
-# %%

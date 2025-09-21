@@ -37,7 +37,9 @@ class PushTKeypointsRunner(BaseLowdimRunner):
             agent_keypoints=False,
             past_action=False,
             tqdm_interval_sec=5.0,
-            n_envs=None
+            n_envs=None,  
+            out_of_dist=False,
+            ofst=0
         ):
         super().__init__(output_dir)
 
@@ -60,6 +62,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                         legacy=legacy_test,
                         keypoint_visible_rate=keypoint_visible_rate,
                         agent_keypoints=agent_keypoints,
+                        offset = ofst,
                         **kp_kwargs
                     ),
                     video_recoder=VideoRecorder.create_h264(
@@ -155,6 +158,8 @@ class PushTKeypointsRunner(BaseLowdimRunner):
         self.past_action = past_action
         self.max_steps = max_steps
         self.tqdm_interval_sec = tqdm_interval_sec
+        self.offset = ofst
+        self.out_of_dist  = out_of_dist
     
     def run(self, policy: BaseLowdimPolicy):
         device = policy.device
@@ -214,6 +219,10 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                     lambda x: torch.from_numpy(x).to(
                         device=device))
 
+                if self.out_of_dist:
+                    # no need for normalization
+                    obs_dict["obs"] = obs_dict['obs'] - self.offset
+
                 # run policy
                 with torch.no_grad():
                     action_dict = policy.predict_action(obs_dict)
@@ -226,6 +235,8 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 # to simulate latency
                 action = np_action_dict['action'][:,self.n_latency_steps:]
 
+                if self.out_of_dist:
+                    action = action + self.offset
                 # step env
                 obs, reward, done, info = env.step(action)
                 done = np.all(done)
