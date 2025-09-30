@@ -29,6 +29,7 @@ from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from diffusers.training_utils import EMAModel
+from diffusion_policy.policy.diffusion_model_for_NLL_IT import DiffusionModel_IT
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -63,12 +64,26 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
-        # resume training
+        # Resume training
         if cfg.training.resume:
-            lastest_ckpt_path = self.get_checkpoint_path()
-            if lastest_ckpt_path.is_file():
-                print(f"Resuming from checkpoint {lastest_ckpt_path}")
-                self.load_checkpoint(path=lastest_ckpt_path)
+            latest_ckpt_path = self.get_checkpoint_path()
+            if latest_ckpt_path.is_file():
+                print("Resuming from checkpoint:", latest_ckpt_path)
+                self.load_checkpoint(path=latest_ckpt_path)
+
+        # Retrain from a specific checkpoint
+        elif cfg.training.retrain:
+            if cfg.training.desired_ckpt_path is None:
+                raise ValueError("desired_ckpt_path must be set when retraining.")
+            desired_ckpt_path = cfg.training.desired_ckpt_path
+            if not os.path.isfile(desired_ckpt_path):
+                raise ValueError(f"No such file: {desired_ckpt_path}")
+            print("Retraining from checkpoint:", desired_ckpt_path)
+            self.load_checkpoint(path=desired_ckpt_path)
+            
+        # Otherwise start fresh
+        else:
+            print("Starting training from scratch.")
 
         # configure dataset
         dataset: BaseLowdimDataset
@@ -81,6 +96,10 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
+        ## configure dataset for covariance_spectrum
+        print ("length of the training dataset: ", dataset)
+        cov_dataloader = DataLoader(dataset, batch_size=len(dataset), num_workers=1,   pin_memory = True, persistent_workers = False)
+        
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
@@ -148,7 +167,18 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
-
+        
+        # set up intial diffusion model and data statistics for approximating NLL (need to be updated)
+        diffusion_model = DiffusionModel_IT(DP_model = self.model.model)
+        batch = next(iter(cov_dataloader))
+        # device transfer
+        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+        # normalize the data
+        nbatch = normalizer.normalize(batch)
+        data = nbatch["action"]
+        # compute covariance_spectrum of the training data
+        diffusion_model.dataset_info(data, covariance_spectrum=None, diagonal=False)
+        
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         with JsonLogger(log_path) as json_logger:
@@ -170,9 +200,24 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             train_sampling_batch = batch
 
                         # compute loss
+                        # if (self.epoch % cfg.training.PAC_Bayes_every) == 0:
+                        #     losses = []
+                        #     for _ in range (cfg.training.num_expect):
+                        #         if cfg.training.random_timestep:
+                        #             # set timestep to a random noising step for each image
+                        #             raw_loss = self.model.compute_reconst_loss_t(batch, timestep, cfg.training.PAC_loss_type) 
+                        #         else:
+                        #             raw_loss = self.model.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
+                        
+                        #         losses.append(raw_loss.item())
+                        #         loss = raw_loss / (cfg.training.num_expect*cfg.training.gradient_accumulate_every)
+                        #         loss.backward()
+                        #     raw_loss_cpu = np.mean(losses)
+                        # else:
                         raw_loss = self.model.compute_loss(batch)
                         loss = raw_loss / cfg.training.gradient_accumulate_every
                         loss.backward()
+                        raw_loss_cpu = raw_loss.item()
 
                         # step optimizer
                         if self.global_step % cfg.training.gradient_accumulate_every == 0:
@@ -185,7 +230,6 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             ema.step(self.model)
 
                         # logging
-                        raw_loss_cpu = raw_loss.item()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
                         train_losses.append(raw_loss_cpu)
                         step_log = {
@@ -239,6 +283,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     with torch.no_grad():
                         val_losses = list()
                         val_lips_const_prod = 0
+                        NLL = 0
+                        toral_num_samples = 0
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             
@@ -247,7 +293,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
                             for batch_idx, batch in enumerate(tepoch):
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                loss = self.model.compute_loss(batch)
+                                loss = policy.compute_loss(batch)
                                 val_losses.append(loss)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
@@ -260,14 +306,20 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                     obs1 = batch["obs"][rand_sample1]
                                     obs2 = batch['obs'][rand_sample1]
                                     obs = torch.stack((obs1, obs2))
-                                    val_lips_const, val_lips_const_prod = self.model.lip_const(obs)
+                                    val_lips_const, val_lips_const_prod = policy.lip_const(obs)
                                     
+                                # Approximating NLL
+                                n_samples = len(batch["obs"])
+                                toral_num_samples += n_samples
+                                diffusion_model.update_model(policy.model)
+                                NLL += policy.NLL_with_IT(diffusion_model, batch) * n_samples
 
                         if len(val_losses) > 0:
                             val_loss = torch.mean(torch.tensor(val_losses)).item()
                             # log epoch average validation loss
                             step_log['val_loss'] = val_loss
                             step_log['val_lips_const_prod'] = val_lips_const_prod.item()
+                            step_log['NLL'] = NLL/toral_num_samples
                             #step_log['lips_const'] = lips_const.cpu().tolist()
                             #print (len(step_log['lips_const']))
 

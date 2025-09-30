@@ -182,19 +182,18 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
                         
-                        #losses = []
+                        losses = []
                         timestep = torch.randint(0, cfg.policy.noise_scheduler.num_train_timesteps,(1,), device=device).long()
-                        #for _ in range (cfg.training.num_expect):
-                        if cfg.training.random_timestep:
-                            # set timestep to a random noising step for each image
-                            raw_loss = self.model.compute_reconst_loss_t(batch, timestep, cfg.training.PAC_loss_type) 
-                        else:
-                            raw_loss = self.model.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
+                        for _ in range (cfg.training.num_expect):
+                            if cfg.training.random_timestep:
+                                # set timestep to a random noising step for each image
+                                raw_loss = self.model.compute_reconst_loss_t(batch, timestep, cfg.training.PAC_loss_type) 
+                            else:
+                                raw_loss = self.model.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
                         
-                        #losses.append(raw_loss.item())
-        
-                        loss = raw_loss / (cfg.training.num_expect*cfg.training.gradient_accumulate_every)
-                        loss.backward()
+                            losses.append(raw_loss.item())
+                            loss = raw_loss / (cfg.training.num_expect*cfg.training.gradient_accumulate_every)
+                            loss.backward()
 
                         #loss = torch.stack(losses).mean()
                         #loss.backward()
@@ -209,8 +208,8 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
                             ema.step(self.model)
 
                         # logging
-                        #raw_loss_cpu = np.mean(losses)
-                        raw_loss_cpu = loss.item()
+                        raw_loss_cpu = np.mean(losses)
+                        #raw_loss_cpu = loss.item()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
                         train_losses.append(raw_loss_cpu)
                         step_log = {
@@ -273,15 +272,14 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
                             for batch_idx, batch in enumerate(tepoch):
                                 # device transfer
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                loss_val = 0
                                 timestep = torch.randint(0, cfg.policy.noise_scheduler.num_train_timesteps,(1,), device=device).long()
-                                for _ in range (cfg.training.num_expect):
-                                    if cfg.training.random_timestep:
-                                        # set timestep to a random noising step for each image
-                                        loss_val += self.model.compute_reconst_loss_t(batch, timestep, cfg.training.PAC_loss_type) 
-                                    else:
-                                        loss_val += self.model.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
-                                val_losses.append(loss_val/cfg.training.num_expect)
+                                #for _ in range (cfg.training.num_expect):
+                                if cfg.training.random_timestep:
+                                    # set timestep to a random noising step for each image
+                                    loss_val = self.model.compute_reconst_loss_t(batch, timestep, cfg.training.PAC_loss_type) 
+                                else:
+                                    loss_val = self.model.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
+                                val_losses.append(loss_val)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
                                     break

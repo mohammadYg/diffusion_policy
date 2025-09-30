@@ -11,6 +11,7 @@ from diffusion_policy.policy.base_lowdim_policy import BaseLowdimPolicy
 from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from diffusion_policy.common.pytorch_util import dict_apply
+
 from omegaconf import OmegaConf
 import collections
 import numpy as np
@@ -376,7 +377,8 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
             #  loss = reduce(loss, 'b ... -> b (...)', 'mean')
             #  loss = loss.mean()
         else:
-            loss = torch.linalg.norm(naction_pred - trajectory[...,:Da], ord=2, dim=(1, 2)).mean()
+            loss = torch.sqrt(F.mse_loss(naction_pred, trajectory[...,:Da]))
+            #loss = torch.linalg.norm(naction_pred - trajectory[...,:Da], ord=2, dim=(1, 2)).mean()
             # loss_lips = torch.linalg.norm(train_lips_const - self.noise_scheduler.k_lip_t[1:].to(device))
 
             # loss = (naction_pred - naction) ** 2   # squared error
@@ -538,7 +540,6 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
 
     # ========= Lipschitz Constant of the Denoising ============
     def lip_const(self, obs):
-        
         nobs = self.normalizer['obs'].normalize(obs)
         B, _, Do = nobs.shape
         To = self.n_obs_steps
@@ -624,6 +625,66 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         k_theta_prod = torch.prod(k_theta)
         
         return torch.flip(k_theta, dims=[0]), k_theta_prod
+    
+
+    # ========= PAC-Bayes Bounds ============
+    def NLL_with_IT(self, model, batch):
+        nbatch = self.normalizer.normalize(batch)
+        nobs = nbatch['obs']
+        naction = nbatch['action']
+
+        B, _, Do = nobs.shape
+        To = self.n_obs_steps
+        assert Do == self.obs_dim
+        T = self.horizon
+        Da = self.action_dim
+
+        # build input
+        device = self.device
+        dtype = self.dtype
+
+        # handle different ways of passing observation
+        local_cond = None
+        global_cond = None
+        trajectory = naction
+
+        if self.obs_as_local_cond:
+            # condition through local feature
+            # all zero except first To timesteps
+            local_cond = torch.zeros(size=(B,T,Do), device=device, dtype=dtype)
+            local_cond[:,:To] = nobs[:,:To]
+            shape = (B, T, Da)
+            cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
+            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+
+        elif self.obs_as_global_cond:
+            # condition throught global feature
+            global_cond = nobs[:,:To].reshape(nobs.shape[0], -1)
+            shape = (B, T, Da)
+            if self.pred_action_steps_only:
+                shape = (B, self.n_action_steps, Da)
+                start = To
+                if self.oa_step_convention:
+                    start = To - 1
+                end = start + self.n_action_steps
+                trajectory = naction[:,start:end]
+            cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
+            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+        else:
+            # condition through impainting
+            shape = (B, T, Da+Do)
+            cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
+            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+            cond_data[:,:To,Da:] = nobs[:,:To]
+            cond_mask[:,:To,Da:] = True
+            trajectory = torch.cat([naction, nobs], dim=-1)
+
+        # construct a batch of data in the form that diffusion model of IT expects
+        batch_data = [trajectory, local_cond, global_cond, cond_data, cond_mask]
+        model.model.set_alphas_cumprod(self.noise_scheduler.alphas_cumprod)
+        NLL = model.nll(batch_data, xinterval = (-1,1))
+
+        return NLL
     
     # ========= PAC-Bayes Bounds ============
     # def PAC_Bayes_Bounds(self, data_loader, cfg: OmegaConf):

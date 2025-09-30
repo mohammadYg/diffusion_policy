@@ -2,8 +2,8 @@ defaults:
   - _self_
   - task: pusht_lowdim
 
-name: train_diffusion_unet_lowdim
-_target_: diffusion_policy.workspace.train_diffusion_unet_lowdim_workspace.TrainDiffusionUnetLowdimWorkspace
+name: train_diffusion_unet_lowdim_with_PAC_Bayes_bounds
+_target_: diffusion_policy.workspace.train_diffusion_unet_lowdim_with_PBB_workspace.TrainDiffusionUnetLowdimWithPBBWorkspace
 
 obs_dim: ${task.obs_dim}
 action_dim: ${task.action_dim}
@@ -92,22 +92,21 @@ training:
   device: "cuda:0"
   seed: 42
   debug: False
-  resume: True
+  resume: False
   retrain: True
-  desired_ckpt_path: "data/outputs/2025.09.24/23.00.59_train_diffusion_unet_lowdim_with_PAC_Bayes_bounds_pusht_lowdim/checkpoints/epoch=0090-test_mean_score=0.621.ckpt"
+  desired_ckpt_path: "data/outputs/2025.09.22/10.57.22_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/latest.ckpt"
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 5000
+  num_epochs: 200
   gradient_accumulate_every: 1
   use_ema: True
   # training loop control
   # in epochs
-  rollout_every: 50
-  checkpoint_every: 50
-  val_every: 1
-  sample_every: 5
-  PAC_Bayes_every: 8000
+  rollout_every: 10
+  checkpoint_every: 10
+  val_every: 10
+  sample_every: 10
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
