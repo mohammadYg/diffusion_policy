@@ -127,14 +127,24 @@ class PushTEnv(gym.Env):
             ws = self.offset
             while not valid:
                 if ws>0.0:
-                    x_agent, y_agent = random_outside_point(rs, ws, agent = True)
-                    x_block, y_block = random_outside_point(rs, ws, agent = False)
+                    # x_agent, y_agent = random_outside_point(rs, ws, agent = True)
+                    # x_block, y_block = random_outside_point(rs, ws, agent = False)
 
-                    state = np.array([
-                        x_agent, y_agent,
-                        x_block, y_block,
-                        rs.uniform(-np.pi, np.pi + 1e-10)
-                    ])
+                    # state = np.array([
+                    #     x_agent, y_agent,
+                    #     x_block, y_block,
+                    #     rs.uniform(-np.pi, np.pi + 1e-10)
+                    # ])
+
+                    state = np.array(
+                        [
+                            rs.uniform(50 + ws, 450 + ws),
+                            rs.uniform(50 + ws, 450 + ws),
+                            rs.uniform(100 + ws, 400 + ws),
+                            rs.uniform(100 + ws, 400 + ws),
+                            rs.uniform(-np.pi, np.pi + 1e-10)
+                        ]
+                    )
 
                 else:
                     state = np.array(

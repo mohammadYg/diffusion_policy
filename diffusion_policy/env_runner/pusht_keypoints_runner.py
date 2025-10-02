@@ -39,7 +39,9 @@ class PushTKeypointsRunner(BaseLowdimRunner):
             tqdm_interval_sec=5.0,
             n_envs=None,  
             out_of_dist=False,
-            ofst=0
+            ofst=0,
+            add_noise = False,
+            n_add_dis = 10
         ):
         super().__init__(output_dir)
 
@@ -160,6 +162,8 @@ class PushTKeypointsRunner(BaseLowdimRunner):
         self.tqdm_interval_sec = tqdm_interval_sec
         self.offset = ofst
         self.out_of_dist  = out_of_dist
+        self.add_noise = add_noise
+        self.n_add_dis = n_add_dis
     
     def run(self, policy: BaseLowdimPolicy):
         device = policy.device
@@ -201,6 +205,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
             pbar = tqdm.tqdm(total=self.max_steps, desc=f"Eval PushtKeypointsRunner {chunk_idx+1}/{n_chunks}", 
                 leave=False, mininterval=self.tqdm_interval_sec)
             done = False
+            consecutive_step = 0
             while not done:
                 Do = obs.shape[-1] // 2
                 # create obs dict
@@ -237,6 +242,14 @@ class PushTKeypointsRunner(BaseLowdimRunner):
 
                 if self.out_of_dist:
                     action = action + self.offset
+                
+                # apply noise to the actions for a couple of consecutive steps
+                if self.add_noise:
+                    if consecutive_step <= self.n_add_dis:
+                        noise = np.random.randn(*action.shape)
+                        action = action + noise
+                        consecutive_step += 1
+                
                 # step env
                 obs, reward, done, info = env.step(action)
                 done = np.all(done)

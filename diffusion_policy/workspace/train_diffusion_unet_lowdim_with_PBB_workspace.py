@@ -29,7 +29,7 @@ from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from diffusers.training_utils import EMAModel
-
+from diffusion_policy.policy.diffusion_model_for_NLL_IT import DiffusionModel_IT
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 # %%
@@ -95,6 +95,10 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
+        ## configure dataset for covariance_spectrum
+        print ("length of the training dataset: ", len(dataset))
+        cov_dataloader = DataLoader(dataset, batch_size=len(dataset), num_workers=1,   pin_memory = True, persistent_workers = False)
+        
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
@@ -162,7 +166,17 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
-
+        
+        # set up intial diffusion model and data statistics for approximating NLL (need to be updated)
+        diffusion_model = DiffusionModel_IT(DP_model = self.model.model, device = device )
+        batch = next(iter(cov_dataloader))
+        
+        # normalize the data
+        nbatch = normalizer.normalize(batch)
+        data = nbatch["action"].to(device)
+        # compute covariance_spectrum of the training data
+        diffusion_model.dataset_info(data, covariance_spectrum=None, diagonal=False)
+        
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         with JsonLogger(log_path) as json_logger:
@@ -170,12 +184,13 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
                 step_log = dict()
                 # ========= train for this epoch ==========
                 train_losses = list()
+                train_lips_const_prod = 0
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
                         leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     
                     # random batch for computing Lipschitz Constant
                     rand_batch = np.random.randint(0, len(train_dataloader))
-                    
+
                     for batch_idx, batch in enumerate(tepoch):
                         # device transfer
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
@@ -183,14 +198,23 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
                             train_sampling_batch = batch
                         
                         losses = []
-                        timestep = torch.randint(0, cfg.policy.noise_scheduler.num_train_timesteps,(1,), device=device).long()
+                        # Sample the noise for reconstruction (refer to the PAC-Bayes paper for the reconstruction loss definition)
+                        if cfg.obs_as_local_cond:
+                            shape = batch["action"].shape
+
+                        elif cfg.obs_as_global_cond:
+                            # condition throught global feature
+                            shape = batch["action"].shape
+                            if cfg.pred_action_steps_only:
+                                shape = (batch["action"].shape[0], cfg.n_action_steps, cfg.action_dim)
+                        else:
+                            shape = (batch["action"].shape[0], cfg.horizon, cfg.action_dim + cfg.obs_dim)
+
+                        # Sample noise that we'll add to the input
+                        noise = torch.randn(shape, device=batch["action"].device)
+
                         for _ in range (cfg.training.num_expect):
-                            if cfg.training.random_timestep:
-                                # set timestep to a random noising step for each image
-                                raw_loss = self.model.compute_reconst_loss_t(batch, timestep, cfg.training.PAC_loss_type) 
-                            else:
-                                raw_loss = self.model.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
-                        
+                            raw_loss = self.model.compute_reconst_loss_T(batch, noise, cfg.training.PAC_loss_type) 
                             losses.append(raw_loss.item())
                             loss = raw_loss / (cfg.training.num_expect*cfg.training.gradient_accumulate_every)
                             loss.backward()
@@ -257,7 +281,7 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
                     runner_log = env_runner.run(policy)
                     # log all
                     step_log.update(runner_log)
-
+                
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0:
                     with torch.no_grad():
@@ -272,18 +296,26 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
                             for batch_idx, batch in enumerate(tepoch):
                                 # device transfer
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                timestep = torch.randint(0, cfg.policy.noise_scheduler.num_train_timesteps,(1,), device=device).long()
-                                #for _ in range (cfg.training.num_expect):
-                                if cfg.training.random_timestep:
-                                    # set timestep to a random noising step for each image
-                                    loss_val = self.model.compute_reconst_loss_t(batch, timestep, cfg.training.PAC_loss_type) 
+                                # Sample the noise for reconstruction (refer to the PAC-Bayes paper for the reconstruction loss definition)
+                                if cfg.obs_as_local_cond:
+                                    shape = batch["action"].shape
+
+                                elif cfg.obs_as_global_cond:
+                                    # condition throught global feature
+                                    shape = batch["action"].shape
+                                    if cfg.pred_action_steps_only:
+                                        shape = (batch["action"].shape[0], cfg.n_action_steps, cfg.action_dim)
                                 else:
-                                    loss_val = self.model.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
+                                    shape = (batch["action"].shape[0], cfg.horizon, cfg.action_dim + cfg.obs_dim)
+
+                                # Sample noise that we'll add to the input
+                                noise = torch.randn(shape, device=batch["action"].device)
+                                loss_val = policy.compute_reconst_loss_T(batch, noise, cfg.training.PAC_loss_type) 
                                 val_losses.append(loss_val)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
                                     break
-
+                                
                                 if rand_batch == batch_idx:
                                     # 2 random samples from the random batch to compute Lipschitz Constant
                                     rand_sample1 = np.random.randint(0, len(batch))
@@ -291,7 +323,12 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
                                     obs1 = batch["obs"][rand_sample1]
                                     obs2 = batch['obs'][rand_sample1]
                                     obs = torch.stack((obs1, obs2))
-                                    val_lips_const, val_lips_const_prod = self.model.lip_const(obs)
+                                    val_lips_const, val_lips_const_prod = policy.lip_const(obs)
+                                    
+                        if (self.epoch % cfg.training.nll_every)==0:
+                            diffusion_model.update_model(policy.model)
+                            NLL = policy.test_nll(diffusion_model, val_dataloader, self.epoch, npoints=100, xinterval=None)
+                            step_log['nll (bpd)'] = NLL
 
                         if len(val_losses) > 0:
                             val_loss = torch.mean(torch.tensor(val_losses)).item()
@@ -299,7 +336,7 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
                             step_log['val_loss'] = val_loss
                             step_log['val_lips_const_prod'] = val_lips_const_prod.item()
 
-                                # run diffusion sampling on a training batch
+                # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:
                     with torch.no_grad():
                         # sample trajectory from training set, and evaluate difference

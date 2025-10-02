@@ -17,12 +17,15 @@ import dill
 import wandb
 import json
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
+from omegaconf import OmegaConf
 
 @click.command()
 @click.option('-c', '--checkpoint', required=True)
 @click.option('-o', '--output_dir', required=True)
 @click.option('-d', '--device', default='cuda:0')
-def main(checkpoint, output_dir, device):
+@click.option('--override', multiple=True,
+              help="Hydra-style config overrides, e.g. task.env_runner.n_test=300")
+def main(checkpoint, output_dir, device, override):
     if os.path.exists(output_dir):
         click.confirm(f"Output path {output_dir} already exists! Overwrite?", abort=True)
     pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -30,6 +33,12 @@ def main(checkpoint, output_dir, device):
     # load checkpoint
     payload = torch.load(open(checkpoint, 'rb'), pickle_module=dill)
     cfg = payload['cfg']
+    
+    # apply overrides (if any)
+    if override:
+        override_cfg = OmegaConf.from_dotlist(override)
+        cfg = OmegaConf.merge(cfg, override_cfg)
+
     cls = hydra.utils.get_class(cfg._target_)
     workspace = cls(cfg, output_dir=output_dir)
     workspace: BaseWorkspace

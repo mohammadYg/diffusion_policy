@@ -25,6 +25,8 @@ env_runner:
   # validation outside the working space
   out_of_dist: False
   ofst: 0
+  add_noise: False
+  n_add_dis: 10
 
 dataset:
   _target_: diffusion_policy.dataset.pusht_dataset.PushTLowdimDataset
@@ -34,4 +36,4 @@ dataset:
   pad_after: ${eval:'${n_action_steps}-1'}
   seed: 42
   val_ratio: 0.02
-  max_train_episodes: 50
+  max_train_episodes: 90

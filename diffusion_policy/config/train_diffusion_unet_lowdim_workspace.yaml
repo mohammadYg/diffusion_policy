@@ -108,6 +108,7 @@ training:
   val_every: 1
   sample_every: 5
   PAC_Bayes_every: 8000
+  nll_every: 10
   # steps per epoch
   max_train_steps: null
   max_val_steps: null

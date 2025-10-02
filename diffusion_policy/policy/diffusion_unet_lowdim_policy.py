@@ -15,6 +15,8 @@ from diffusion_policy.common.pytorch_util import dict_apply
 from omegaconf import OmegaConf
 import collections
 import numpy as np
+import math 
+import tqdm
 
 class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
     def __init__(self, 
@@ -258,7 +260,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         return loss
 
     # ========= Compute Reconstruction Loss of PAC-Bayes Bounds for case where we do inference from last step ============
-    def compute_reconst_loss_T(self, batch, loss_type):
+    def compute_reconst_loss_T(self, batch, noise, loss_type):
         
         nbatch = self.normalizer.normalize(batch)
         nobs = nbatch['obs']
@@ -306,16 +308,18 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
             cond_mask[:,:To,Da:] = True
             trajectory = torch.cat([naction, nobs], dim=-1)
 
-        # Sample noise that we'll add to the input
-        noise = torch.randn(trajectory.shape, device=trajectory.device)
+        # # Sample noise that we'll add to the input
+        # noise = torch.randn(trajectory.shape, device=trajectory.device)
         
-        # set timestep to last noising step for each image
-        timestep = self.noise_scheduler.timesteps[0]
+        # # set timestep to last noising step for each image
+        # timestep = self.noise_scheduler.timesteps[0]
 
-        # Add noise to the clean images according to the noise magnitude at each timestep
-        # (this is the forward diffusion process)
-        noisy_trajectory = self.noise_scheduler.add_noise(
-            trajectory, noise, timestep)
+        # # Add noise to the clean images according to the noise magnitude at each timestep
+        # # (this is the forward diffusion process)
+        # noisy_trajectory = self.noise_scheduler.add_noise(
+        #     trajectory, noise, timestep)
+
+        noisy_trajectory = noise.clone()
         
         # set step values
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
@@ -376,7 +380,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
             #  loss = loss * loss_mask.type(loss.dtype)
             #  loss = reduce(loss, 'b ... -> b (...)', 'mean')
             #  loss = loss.mean()
-        else:
+        elif loss_type == "RMSE":
             loss = torch.sqrt(F.mse_loss(naction_pred, trajectory[...,:Da]))
             #loss = torch.linalg.norm(naction_pred - trajectory[...,:Da], ord=2, dim=(1, 2)).mean()
             # loss_lips = torch.linalg.norm(train_lips_const - self.noise_scheduler.k_lip_t[1:].to(device))
@@ -386,8 +390,8 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
             # loss = torch.sqrt(loss.sum(dim=(1, 2)))   # L2 norm over dims (1,2)
             # loss = loss.mean()  # average over batch
 
-        
-        
+        else: 
+            loss = torch.linalg.norm(naction_pred - trajectory[...,:Da], ord=2, dim=(1, 2)).mean()
         # loss_sum = 0
         # for t in self.noise_scheduler.timesteps:
             
@@ -628,63 +632,128 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
     
 
     # ========= PAC-Bayes Bounds ============
-    def NLL_with_IT(self, model, batch):
-        nbatch = self.normalizer.normalize(batch)
-        nobs = nbatch['obs']
-        naction = nbatch['action']
+    def test_nll(self, IT_model, dataloader, epoch, npoints=100, xinterval=None):
+        """Calculate expected NLL on data at test time.  Main difference is that we can clamp the integration
+        range, because negative values of MMSE gap we can switch to Gaussian decoder to get zero.
+        npoints - number of points to use in integration
+        delta - if the data is discrete, delta is the gap between discrete values.
+        E.g. delta = 1/127.5 for CIFAR data (0, 255) scaled to -1, 1 range
+        xinterval - a tuple of the range of the discrete values, e.g. (-1, 1) for CIFAR10 normalized
+        soft -  using soft discretization if True.
+        """
+        IT_model.set_noise_scheduler(self.noise_scheduler)
+        if IT_model.model.training:
+            print("Warning - estimating test NLL but model is in train mode")
+        results = {}  # Return multiple forms of results in a dictionary
+        clip = IT_model.clip
+        loc, scale = IT_model.loc_scale
+        logsnr, w = IT_model.logistic_integrate(npoints, loc=loc, scale=scale, clip=clip, device=self.device, deterministic=True)
 
-        B, _, Do = nobs.shape
-        To = self.n_obs_steps
-        assert Do == self.obs_dim
-        T = self.horizon
-        Da = self.action_dim
+        # sort logsnrs along with weights
+        logsnr, idx = logsnr.sort()
+        w = w[idx].to('cpu')
 
-        # build input
-        device = self.device
-        dtype = self.dtype
+        results['logsnr'] = logsnr.to('cpu')
+        results['w'] = w
+        mses = []  # Store all MSEs, per sample, logsnr, in an array
+        total_samples = 0
+        val_loss = 0
+        with tqdm.tqdm(dataloader, desc=f"NLL computation {epoch}", 
+                        leave=False) as tepoch:
+            for batch in tepoch:
+                batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
+                nbatch = self.normalizer.normalize(batch)
+                nobs = nbatch['obs']
+                naction = nbatch['action']
 
-        # handle different ways of passing observation
-        local_cond = None
-        global_cond = None
-        trajectory = naction
+                B, _, Do = nobs.shape
+                To = self.n_obs_steps
+                assert Do == self.obs_dim
+                T = self.horizon
+                Da = self.action_dim
 
-        if self.obs_as_local_cond:
-            # condition through local feature
-            # all zero except first To timesteps
-            local_cond = torch.zeros(size=(B,T,Do), device=device, dtype=dtype)
-            local_cond[:,:To] = nobs[:,:To]
-            shape = (B, T, Da)
-            cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
-            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+                # build input
+                device = self.device
+                dtype = self.dtype
 
-        elif self.obs_as_global_cond:
-            # condition throught global feature
-            global_cond = nobs[:,:To].reshape(nobs.shape[0], -1)
-            shape = (B, T, Da)
-            if self.pred_action_steps_only:
-                shape = (B, self.n_action_steps, Da)
-                start = To
-                if self.oa_step_convention:
-                    start = To - 1
-                end = start + self.n_action_steps
-                trajectory = naction[:,start:end]
-            cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
-            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-        else:
-            # condition through impainting
-            shape = (B, T, Da+Do)
-            cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
-            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-            cond_data[:,:To,Da:] = nobs[:,:To]
-            cond_mask[:,:To,Da:] = True
-            trajectory = torch.cat([naction, nobs], dim=-1)
+                # handle different ways of passing observation
+                local_cond = None
+                global_cond = None
+                trajectory = naction
 
-        # construct a batch of data in the form that diffusion model of IT expects
-        batch_data = [trajectory, local_cond, global_cond, cond_data, cond_mask]
-        model.model.set_alphas_cumprod(self.noise_scheduler.alphas_cumprod)
-        NLL = model.nll(batch_data, xinterval = (-1,1))
+                if self.obs_as_local_cond:
+                    # condition through local feature
+                    # all zero except first To timesteps
+                    local_cond = torch.zeros(size=(B,T,Do), device=device, dtype=dtype)
+                    local_cond[:,:To] = nobs[:,:To]
+                    shape = (B, T, Da)
+                    cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
+                    cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
 
-        return NLL
+                elif self.obs_as_global_cond:
+                    # condition throught global feature
+                    global_cond = nobs[:,:To].reshape(nobs.shape[0], -1)
+                    shape = (B, T, Da)
+                    if self.pred_action_steps_only:
+                        shape = (B, self.n_action_steps, Da)
+                        start = To
+                        if self.oa_step_convention:
+                            start = To - 1
+                        end = start + self.n_action_steps
+                        trajectory = naction[:,start:end]
+                    cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
+                    cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+                else:
+                    # condition through impainting
+                    shape = (B, T, Da+Do)
+                    cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
+                    cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+                    cond_data[:,:To,Da:] = nobs[:,:To]
+                    cond_mask[:,:To,Da:] = True
+                    trajectory = torch.cat([naction, nobs], dim=-1)
+
+                # construct a batch of data in the form that diffusion model of IT expects
+                batch = [trajectory, local_cond, global_cond, cond_data, cond_mask]
+                data = batch[0].to(batch[0].device)
+                n_samples = len(data)
+                total_samples += n_samples
+
+                val_loss += IT_model.nll([data, ] + batch[1:], xinterval=xinterval) * n_samples
+
+                mses.append(torch.zeros(n_samples, len(logsnr)))
+                for j, this_logsnr in enumerate(logsnr):
+                    this_logsnr_broadcast = this_logsnr * torch.ones(len(data), device=device)
+
+                    # Regular MSE, clamps predictions, but does not discretize
+                    this_mse = IT_model.mse([data, ] + batch[1:], this_logsnr_broadcast, mse_type='epsilon',
+                                        xinterval=xinterval).cpu()
+                    mses[-1][:, j] = this_mse
+
+        val_loss /= total_samples
+
+        mses = torch.cat(mses, dim=0)  # Concatenate the batches together across axis 0
+        results['mses-all'] = mses  # Store array of mses for each sample, logsnr
+        mses = mses.mean(dim=0)  # Average across samples, giving MMSE(logsnr)
+
+        results['mses'] = mses
+        results['mmse_g'] = IT_model.mmse_g(logsnr.to(device)).to('cpu')
+
+        # here the results of the integral is clamped to 0 if the MMSE is negative
+        results['nll (nats)'] = torch.mean(IT_model.h_g - 0.5 * w * torch.clamp(results['mmse_g'] - mses, 0.))
+        results['nll (bpd)'] = results['nll (nats)'] / math.log(2) / IT_model.d
+        
+        ## Variance (of the mean) calculation - via CLT, it's the variance of the samples (over epsilon, x, logsnr) / n samples.
+        ## n_samples is number of x samples * number of logsnr samples per x
+        inds = (results['mmse_g'] - results[
+            'mses']) > 0  # we only give nonzero estimates in this region (for continuous estimators)
+        n_samples = results['mses-all'].numel()
+        wp = w[inds]
+        results['nll (nats) - var'] = torch.var(
+            0.5 * wp * (results['mmse_g'][inds] - results['mses-all'][:, inds])) / n_samples
+        
+        results['nll (bpd) - std'] = torch.sqrt(results['nll (nats) - var']) / math.log(2) / IT_model.d
+        
+        return results['nll (bpd)']
     
     # ========= PAC-Bayes Bounds ============
     # def PAC_Bayes_Bounds(self, data_loader, cfg: OmegaConf):

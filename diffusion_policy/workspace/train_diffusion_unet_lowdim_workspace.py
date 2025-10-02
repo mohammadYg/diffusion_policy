@@ -97,7 +97,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
         ## configure dataset for covariance_spectrum
-        print ("length of the training dataset: ", dataset)
+        print ("length of the training dataset: ", len(dataset))
         cov_dataloader = DataLoader(dataset, batch_size=len(dataset), num_workers=1,   pin_memory = True, persistent_workers = False)
         
         self.model.set_normalizer(normalizer)
@@ -169,13 +169,12 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             cfg.training.sample_every = 1
         
         # set up intial diffusion model and data statistics for approximating NLL (need to be updated)
-        diffusion_model = DiffusionModel_IT(DP_model = self.model.model)
+        diffusion_model = DiffusionModel_IT(DP_model = self.model.model, device = device )
         batch = next(iter(cov_dataloader))
-        # device transfer
-        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+
         # normalize the data
         nbatch = normalizer.normalize(batch)
-        data = nbatch["action"]
+        data = nbatch["action"].to(device)
         # compute covariance_spectrum of the training data
         diffusion_model.dataset_info(data, covariance_spectrum=None, diagonal=False)
         
@@ -283,8 +282,6 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     with torch.no_grad():
                         val_losses = list()
                         val_lips_const_prod = 0
-                        NLL = 0
-                        toral_num_samples = 0
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             
@@ -308,18 +305,17 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                     obs = torch.stack((obs1, obs2))
                                     val_lips_const, val_lips_const_prod = policy.lip_const(obs)
                                     
-                                # Approximating NLL
-                                n_samples = len(batch["obs"])
-                                toral_num_samples += n_samples
-                                diffusion_model.update_model(policy.model)
-                                NLL += policy.NLL_with_IT(diffusion_model, batch) * n_samples
+                        if (self.epoch % cfg.training.nll_every)==0:
+                            diffusion_model.update_model(policy.model)
+                            NLL = policy.test_nll(diffusion_model, val_dataloader, self.epoch, npoints=100, xinterval=None)
+                            step_log['nll (bpd)'] = NLL
 
                         if len(val_losses) > 0:
                             val_loss = torch.mean(torch.tensor(val_losses)).item()
                             # log epoch average validation loss
                             step_log['val_loss'] = val_loss
                             step_log['val_lips_const_prod'] = val_lips_const_prod.item()
-                            step_log['NLL'] = NLL/toral_num_samples
+                            #step_log['nll (bpd)'] = NLL/toral_num_samples
                             #step_log['lips_const'] = lips_const.cpu().tolist()
                             #print (len(step_log['lips_const']))
 
