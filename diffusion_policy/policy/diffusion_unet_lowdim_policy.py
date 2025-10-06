@@ -324,6 +324,25 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         # set step values
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
 
+        # for t in self.noise_scheduler.timesteps:
+            
+        #     # 1. apply conditioning
+        #     noisy_trajectory[cond_mask] = trajectory[cond_mask]
+    
+        #     # 2. predict model output
+        #     model_output = self.model(noisy_trajectory, t, 
+        #         local_cond=local_cond, global_cond=global_cond)
+
+        #     # 3. compute previous image: x_t -> x_t-1
+        #     noisy_trajectory = self.noise_scheduler.step(
+        #         model_output, t, noisy_trajectory,
+        #         generator = None,
+        #         **self.kwargs
+        #         ).prev_sample
+            
+        # compute loss mask
+        loss_mask = ~cond_mask
+        loss_sum = 0
         for t in self.noise_scheduler.timesteps:
             
             # 1. apply conditioning
@@ -333,13 +352,27 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
             model_output = self.model(noisy_trajectory, t, 
                 local_cond=local_cond, global_cond=global_cond)
 
-            # 3. compute previous image: x_t -> x_t-1
-            noisy_trajectory = self.noise_scheduler.step(
-                model_output, t, noisy_trajectory,
-                generator = None,
-                **self.kwargs
-                ).prev_sample
+            # 3.compute loss
+            if loss_type == "MSE":
+                loss = F.mse_loss(model_output, noise, reduction='none')
+                loss = loss * loss_mask.type(loss.dtype)
+                loss = reduce(loss, 'b ... -> b (...)', 'mean')
+                loss = loss.mean()
 
+            elif loss_type == "RMSE":
+                loss = F.mse_loss(model_output, noise, reduction='none')
+                loss = loss * loss_mask.type(loss.dtype)
+                loss = reduce(loss, 'b ... -> b (...)', 'mean')
+                loss = torch.sqrt(loss.mean())
+            else:
+                loss = (model_output - noise)**2
+                loss = loss * loss_mask.type(loss.dtype)
+                loss = torch.sum(loss, dim=(1,2))
+                loss = torch.sqrt(loss)
+                loss = loss.mean()
+
+            loss_sum +=loss
+        return loss_sum
         # # finally make sure conditioning is enforced
         #noisy_trajectory[cond_mask] = trajectory[cond_mask]
         
@@ -349,7 +382,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         #! the actions. if I only consider the actions, then I can simply consider 
         #! the predicted actions and then compute the loss, there is no need for 
         #! loss_mask
-        naction_pred = noisy_trajectory[...,:Da]
+        #naction_pred = noisy_trajectory[...,:Da]
         
         # get action
         # if self.pred_action_steps_only:
@@ -373,25 +406,25 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         # train_lips_const, train_lips_const_prod = self.lip_const(obs)
 
         # # compute loss
-        if loss_type == "MSE":
-            loss = F.mse_loss(naction_pred, trajectory[...,:Da])
-            # loss_lips = F.mse_loss(train_lips_const, self.noise_scheduler.k_lip_t[1:].to(device))
-            #  loss = F.mse_loss(noisy_trajectory, trajectory, reduction='none')
-            #  loss = loss * loss_mask.type(loss.dtype)
-            #  loss = reduce(loss, 'b ... -> b (...)', 'mean')
-            #  loss = loss.mean()
-        elif loss_type == "RMSE":
-            loss = torch.sqrt(F.mse_loss(naction_pred, trajectory[...,:Da]))
-            #loss = torch.linalg.norm(naction_pred - trajectory[...,:Da], ord=2, dim=(1, 2)).mean()
-            # loss_lips = torch.linalg.norm(train_lips_const - self.noise_scheduler.k_lip_t[1:].to(device))
+        # if loss_type == "MSE":
+        #     loss = F.mse_loss(naction_pred, trajectory[...,:Da])
+        #     # loss_lips = F.mse_loss(train_lips_const, self.noise_scheduler.k_lip_t[1:].to(device))
+        #     #  loss = F.mse_loss(noisy_trajectory, trajectory, reduction='none')
+        #     #  loss = loss * loss_mask.type(loss.dtype)
+        #     #  loss = reduce(loss, 'b ... -> b (...)', 'mean')
+        #     #  loss = loss.mean()
+        # elif loss_type == "RMSE":
+        #     loss = torch.sqrt(F.mse_loss(naction_pred, trajectory[...,:Da]))
+        #     #loss = torch.linalg.norm(naction_pred - trajectory[...,:Da], ord=2, dim=(1, 2)).mean()
+        #     # loss_lips = torch.linalg.norm(train_lips_const - self.noise_scheduler.k_lip_t[1:].to(device))
 
-            # loss = (naction_pred - naction) ** 2   # squared error
-            # #loss = loss * loss_mask.type(loss.dtype)
-            # loss = torch.sqrt(loss.sum(dim=(1, 2)))   # L2 norm over dims (1,2)
-            # loss = loss.mean()  # average over batch
+        #     # loss = (naction_pred - naction) ** 2   # squared error
+        #     # #loss = loss * loss_mask.type(loss.dtype)
+        #     # loss = torch.sqrt(loss.sum(dim=(1, 2)))   # L2 norm over dims (1,2)
+        #     # loss = loss.mean()  # average over batch
 
-        else: 
-            loss = torch.linalg.norm(naction_pred - trajectory[...,:Da], ord=2, dim=(1, 2)).mean()
+        # else: 
+        #     loss = torch.linalg.norm(naction_pred - trajectory[...,:Da], ord=2, dim=(1, 2)).mean()
         # loss_sum = 0
         # for t in self.noise_scheduler.timesteps:
             
@@ -433,7 +466,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
 
         #     loss_sum += loss
         
-        return loss 
+        # return loss 
     
     # ========= Compute Reconstruction Loss of PAC-Bayes Bounds for case where we do inference from random step ============
     def compute_reconst_loss_t(self, batch, timestep, loss_type):

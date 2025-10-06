@@ -40,7 +40,7 @@ class PushTEnv(gym.Env):
         self._seed = None
         self.seed()
         self.offset = offset   # the offset to enlarge the working space
-        self.window_size = ws = 512  + 2*offset # The size of the PyGame window
+        self.window_size = ws = 512  + offset # The size of the PyGame window
         self.render_size = render_size
         self.sim_hz = 100
         # Local controller params.
@@ -138,10 +138,10 @@ class PushTEnv(gym.Env):
 
                     state = np.array(
                         [
-                            rs.uniform(50 + ws, 450 + ws),
-                            rs.uniform(50 + ws, 450 + ws),
-                            rs.uniform(100 + ws, 400 + ws),
-                            rs.uniform(100 + ws, 400 + ws),
+                            rs.uniform(500, 450+ws),
+                            rs.uniform(500, 450+ws),
+                            rs.uniform(500, 400+ws),
+                            rs.uniform(500, 400+ws),
                             rs.uniform(-np.pi, np.pi + 1e-10)
                         ]
                     )
@@ -361,19 +361,30 @@ class PushTEnv(gym.Env):
         self.render_buffer = list()
         
         # Add walls.
+        # walls = [
+        #     self._add_segment((5, 506 + 2*self.offset), (5, 5), 2),
+        #     self._add_segment((5, 5), (506 + 2*self.offset, 5), 2),
+        #     self._add_segment((506 + 2*self.offset, 5), (506 + 2*self.offset, 506 + 2*self.offset), 2),
+        #     self._add_segment((5, 506 + 2*self.offset), (506 + 2*self.offset, 506 + 2*self.offset), 2)
+        # ]
         walls = [
-            self._add_segment((5, 506 + 2*self.offset), (5, 5), 2),
-            self._add_segment((5, 5), (506 + 2*self.offset, 5), 2),
-            self._add_segment((506 + 2*self.offset, 5), (506 + 2*self.offset, 506 + 2*self.offset), 2),
-            self._add_segment((5, 506 + 2*self.offset), (506 + 2*self.offset, 506 + 2*self.offset), 2)
+            self._add_segment((5, 506 + self.offset), (5, 5), 2),
+            self._add_segment((5, 5), (506 + self.offset, 5), 2),
+            self._add_segment((506 + self.offset, 5), (506 + self.offset, 506 + self.offset), 2),
+            self._add_segment((5, 506 + self.offset), (506 + self.offset, 506 + self.offset), 2)
         ]
         self.space.add(*walls)
 
         # Add agent, block, and goal zone.
-        self.agent = self.add_circle((256 + self.offset, 400 + self.offset), 15)
-        self.block = self.add_tee((256 + self.offset, 300 + self.offset), 0)
+        # self.agent = self.add_circle((256 + self.offset, 400 + self.offset), 15)
+        # self.block = self.add_tee((256 + self.offset, 300 + self.offset), 0)
+        # self.goal_color = pygame.Color('LightGreen')
+        # self.goal_pose = np.array([256 + self.offset, 256 + self.offset, np.pi/4])  # x, y, theta (in radians)
+
+        self.agent = self.add_circle((256, 400), 15)
+        self.block = self.add_tee((256, 300), 0)
         self.goal_color = pygame.Color('LightGreen')
-        self.goal_pose = np.array([256 + self.offset, 256 + self.offset, np.pi/4])  # x, y, theta (in radians)
+        self.goal_pose = np.array([256, 256, np.pi/4])  # x, y, theta (in radians)
 
         # Add collision handling
         self.collision_handeler = self.space.add_collision_handler(0, 0)

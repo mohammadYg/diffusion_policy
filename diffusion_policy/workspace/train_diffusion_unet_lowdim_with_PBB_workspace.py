@@ -285,8 +285,11 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0:
                     with torch.no_grad():
-                        val_losses = list()
+                        val_losses_noise_pred = 0
+                        val_losses_reconstruction = 0
                         val_lips_const_prod = 0
+                        n_total_samples = 0
+
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             
@@ -294,8 +297,15 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
                             rand_batch = np.random.randint(0, len(val_dataloader))
 
                             for batch_idx, batch in enumerate(tepoch):
+                                n_samples = len(batch["obs"])
+                                n_total_samples += n_samples
                                 # device transfer
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                                
+                                # noise prediction loss
+                                loss_noise_pred = policy.compute_loss(batch)
+                                val_losses_noise_pred += loss_noise_pred.item() * n_samples
+                                
                                 # Sample the noise for reconstruction (refer to the PAC-Bayes paper for the reconstruction loss definition)
                                 if cfg.obs_as_local_cond:
                                     shape = batch["action"].shape
@@ -310,8 +320,9 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
 
                                 # Sample noise that we'll add to the input
                                 noise = torch.randn(shape, device=batch["action"].device)
-                                loss_val = policy.compute_reconst_loss_T(batch, noise, cfg.training.PAC_loss_type) 
-                                val_losses.append(loss_val)
+                                loss_reconstruct = policy.compute_reconst_loss_T(batch, noise, cfg.training.PAC_loss_type) 
+                                val_losses_reconstruction += loss_reconstruct.item() * n_samples
+
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
                                     break
@@ -330,11 +341,13 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
                             NLL = policy.test_nll(diffusion_model, val_dataloader, self.epoch, npoints=100, xinterval=None)
                             step_log['nll (bpd)'] = NLL
 
-                        if len(val_losses) > 0:
-                            val_loss = torch.mean(torch.tensor(val_losses)).item()
-                            # log epoch average validation loss
-                            step_log['val_loss'] = val_loss
-                            step_log['val_lips_const_prod'] = val_lips_const_prod.item()
+                        #if len(val_losses) > 0:
+                        val_loss_noise_pred = val_losses_noise_pred/n_total_samples
+                        val_loss_reconstruction = val_losses_reconstruction/n_total_samples
+                        # log epoch average validation loss
+                        step_log['val_loss_reconstruct'] = val_loss_reconstruction
+                        step_log['val_loss_noise_pred'] = val_loss_noise_pred
+                        step_log['val_lips_const_prod'] = val_lips_const_prod.item()
 
                 # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:

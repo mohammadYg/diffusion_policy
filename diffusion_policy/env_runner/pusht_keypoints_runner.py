@@ -224,9 +224,9 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                     lambda x: torch.from_numpy(x).to(
                         device=device))
 
-                if self.out_of_dist:
-                    # no need for normalization
-                    obs_dict["obs"] = obs_dict['obs'] - self.offset
+                # if self.out_of_dist:
+                #     # no need for normalization
+                #     obs_dict["obs"] = obs_dict['obs'] - self.offset
 
                 # run policy
                 with torch.no_grad():
@@ -240,13 +240,14 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 # to simulate latency
                 action = np_action_dict['action'][:,self.n_latency_steps:]
 
-                if self.out_of_dist:
-                    action = action + self.offset
+                # if self.out_of_dist:
+                #     action = action + self.offset
                 
                 # apply noise to the actions for a couple of consecutive steps
                 if self.add_noise:
+                    rng = np.random.default_rng(seed=42 + consecutive_step)
                     if consecutive_step <= self.n_add_dis:
-                        noise = np.random.randn(*action.shape)
+                        noise = 50*rng.random(action.shape)
                         action = action + noise
                         consecutive_step += 1
                 

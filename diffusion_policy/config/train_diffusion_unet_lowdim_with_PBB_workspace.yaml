@@ -94,7 +94,7 @@ training:
   debug: False
   resume: False
   retrain: True
-  desired_ckpt_path: "data/outputs/2025.10.01/15.03.27_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0100-test_mean_score=0.876.ckpt"
+  desired_ckpt_path: "data/outputs/2025.10.02/22.21.49_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=2100-test_mean_score=0.953.ckpt"
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
@@ -103,11 +103,11 @@ training:
   use_ema: True
   # training loop control
   # in epochs
-  rollout_every: 10
-  checkpoint_every: 10
-  val_every: 5
-  sample_every: 10
-  nll_every: 10  
+  rollout_every: 1
+  checkpoint_every: 1
+  val_every: 1
+  sample_every: 1
+  nll_every: 1  
   max_train_steps: null
   max_val_steps: null
   # misc

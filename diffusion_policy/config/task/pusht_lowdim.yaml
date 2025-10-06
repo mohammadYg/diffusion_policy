@@ -26,7 +26,7 @@ env_runner:
   out_of_dist: False
   ofst: 0
   add_noise: False
-  n_add_dis: 10
+  n_add_dis: 15
 
 dataset:
   _target_: diffusion_policy.dataset.pusht_dataset.PushTLowdimDataset
