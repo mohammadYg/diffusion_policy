@@ -23,8 +23,8 @@ env_runner:
   past_action: ${past_action_visible}
   n_envs: null
   # validation outside the working space
-  out_of_dist: False
-  ofst: 0
+  out_of_dist: ${out_of_dist}
+  offset: ${offset}
   add_noise: False
   n_add_dis: 15
 
@@ -37,3 +37,5 @@ dataset:
   seed: 42
   val_ratio: 0.02
   max_train_episodes: 90
+  out_of_dist: ${out_of_dist}
+  offset: ${offset}

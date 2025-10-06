@@ -39,7 +39,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
             tqdm_interval_sec=5.0,
             n_envs=None,  
             out_of_dist=False,
-            ofst=0,
+            offset=0,
             add_noise = False,
             n_add_dis = 10
         ):
@@ -160,7 +160,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
         self.past_action = past_action
         self.max_steps = max_steps
         self.tqdm_interval_sec = tqdm_interval_sec
-        self.offset = ofst
+        self.offset = offset
         self.out_of_dist  = out_of_dist
         self.add_noise = add_noise
         self.n_add_dis = n_add_dis
