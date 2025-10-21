@@ -23,10 +23,10 @@ env_runner:
   past_action: ${past_action_visible}
   n_envs: null
   # validation outside the working space
-  out_of_dist: ${out_of_dist}
-  offset: ${offset}
+  out_of_dist: False
+  ofst: 0
   add_noise: False
-  n_add_dis: 15
+  n_add_dis: 0
 
 dataset:
   _target_: diffusion_policy.dataset.pusht_dataset.PushTLowdimDataset
@@ -35,7 +35,7 @@ dataset:
   pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
   pad_after: ${eval:'${n_action_steps}-1'}
   seed: 42
+  seed_pac: 123
   val_ratio: 0.02
-  max_train_episodes: 90
-  out_of_dist: ${out_of_dist}
-  offset: ${offset}
+  max_train_episodes: 100
+  train_episodes_for_PAC_Bayes: 0        # This is selected from training data.

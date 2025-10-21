@@ -1,4 +1,5 @@
 from typing import Dict
+from matplotlib.pyplot import cla
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,22 +8,20 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 from diffusion_policy.model.common.normalizer import LinearNormalizer
-from diffusion_policy.policy.base_lowdim_policy import BaseLowdimPolicy
-from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
+from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
+from diffusion_policy.model.diffusion.conditional_prob_unet1d import ProbConditionalResidualBlock1D
 from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
-from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.common.SDE import VPSDE
 from diffusion_policy.common.likelihood import get_likelihood_fn
 
-from omegaconf import OmegaConf
 import collections
-import numpy as np
 import math 
 import tqdm
+import numpy as np
 
-class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
+class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     def __init__(self, 
-            model: ConditionalUnet1D,
+            model: ProbConditionalResidualBlock1D,
             noise_scheduler: DDPMScheduler,
             horizon, 
             obs_dim, 
@@ -69,6 +68,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
     def conditional_sample(self, 
             condition_data, condition_mask,
             local_cond=None, global_cond=None,
+            stochastic = False, clamping = True,
             generator=None,
             # keyword arguments to scheduler.step
             **kwargs
@@ -91,7 +91,8 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
 
             # 2. predict model output
             model_output = model(trajectory, t, 
-                local_cond=local_cond, global_cond=global_cond)
+                local_cond=local_cond, global_cond=global_cond, 
+                stochastic = stochastic, clamping = clamping)
 
             # 3. compute previous image: x_t -> x_t-1
             trajectory = scheduler.step(
@@ -106,7 +107,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         return trajectory
 
 
-    def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def predict_action(self, obs_dict: Dict[str, torch.Tensor], stochastic=False, clamping=True) -> Dict[str, torch.Tensor]:
         """
         obs_dict: must include "obs" key
         result: must include "action" key
@@ -158,6 +159,8 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
             cond_mask,
             local_cond=local_cond,
             global_cond=global_cond,
+            stochastic=stochastic,
+            clamping = clamping,
             **self.kwargs)
         
         # unnormalize prediction
@@ -190,7 +193,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def compute_loss(self, batch):
+    def compute_bound(self, batch, n_bound, delta, mc_sampling=1000, stochastic = True, clamping = False, bounded = False):
         # normalize input
         assert 'valid_mask' not in batch
         nbatch = self.normalizer.normalize(batch)
@@ -244,25 +247,54 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         noisy_trajectory[condition_mask] = trajectory[condition_mask]
         
         # Predict the noise residual
-        pred = self.model(noisy_trajectory, timesteps, 
-            local_cond=local_cond, global_cond=global_cond)
+        if not self.model.training:
+            error_mc = 0.0
+            for _ in range (mc_sampling):
+                pred = self.model(noisy_trajectory, timesteps, 
+                    local_cond=local_cond, global_cond=global_cond,
+                    stochastic = stochastic, clamping = clamping)
 
-        pred_type = self.noise_scheduler.config.prediction_type 
-        if pred_type == 'epsilon':
-            target = noise
-        elif pred_type == 'sample':
-            target = trajectory
+                pred_type = self.noise_scheduler.config.prediction_type 
+                if pred_type == 'epsilon':
+                    target = noise
+                elif pred_type == 'sample':
+                    target = trajectory
+                else:
+                    raise ValueError(f"Unsupported prediction type {pred_type}")
+
+                loss_dm = F.mse_loss(pred, target, reduction='none')
+                loss_dm = loss_dm * loss_mask.type(loss_dm.dtype)
+                loss_dm = reduce(loss_dm, 'b ... -> b (...)', 'mean')
+                loss_dm = loss_dm.mean()
+                error_mc += loss_dm
+            loss_emp = error_mc/mc_sampling
         else:
-            raise ValueError(f"Unsupported prediction type {pred_type}")
+            pred = self.model(noisy_trajectory, timesteps, 
+                local_cond=local_cond, global_cond=global_cond,
+                stochastic = stochastic, clamping = clamping)
 
-        loss = F.mse_loss(pred, target, reduction='none')
-        loss = loss * loss_mask.type(loss.dtype)
-        loss = reduce(loss, 'b ... -> b (...)', 'mean')
-        loss = loss.mean()
-        return loss
+            pred_type = self.noise_scheduler.config.prediction_type 
+            if pred_type == 'epsilon':
+                target = noise
+            elif pred_type == 'sample':
+                target = trajectory
+            else:
+                raise ValueError(f"Unsupported prediction type {pred_type}")
+
+            loss_dm = F.mse_loss(pred, target, reduction='none')
+            loss_dm = loss_dm * loss_mask.type(loss_dm.dtype)
+            loss_dm = reduce(loss_dm, 'b ... -> b (...)', 'mean')
+            loss_dm = loss_dm.mean()
+            loss_emp = loss_dm
+        
+        kl = self.model.compute_kl()
+        loss_kl = torch.div(
+                kl + np.log((2*np.sqrt(n_bound))/delta), 2*n_bound)
+        loss_sum = loss_emp + loss_kl
+        return loss_sum
 
     # ========= Compute Reconstruction Loss of PAC-Bayes Bounds for case where we do inference from last step ============
-    def compute_reconst_loss_T(self, batch, loss_type):
+    def compute_reconst_loss_T(self, batch, loss_type, stochastic=False, clamping=False):
         
         nbatch = self.normalizer.normalize(batch)
         nobs = nbatch['obs']
@@ -322,10 +354,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         
         # set step values
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
-        
-        loss_lips = 0
-        # loss_mask = ~cond_mask
-        
+    
         for t in self.noise_scheduler.timesteps:
             
             # 1. apply conditioning
@@ -333,8 +362,9 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
     
             # 2. predict model output
             model_output = self.model(noisy_trajectory, t, 
-                local_cond=local_cond, global_cond=global_cond)
-
+                local_cond=local_cond, global_cond=global_cond,
+                stochastic = stochastic, clamping = clamping)
+            
             # 3. compute previous image: x_t -> x_t-1
             noisy_trajectory = self.noise_scheduler.step(
                 model_output, t, noisy_trajectory,
@@ -348,81 +378,18 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         # prediction
         naction_pred = noisy_trajectory[...,:Da]
 
-        #Loss of Lipshicts
-        # rand_sample1 = np.random.randint(0, len(batch))
-        # #rand_sample2 = np.random.randint(0, len(batch))
-        # obs1 = batch["obs"][rand_sample1]
-        # obs2 = batch['obs'][rand_sample1]
-        # obs = torch.stack((obs1, obs2))
-        # train_lips_const, train_lips_const_prod = self.lip_const(obs)
-
         # # compute loss
         if loss_type == "MSE":
             loss = F.mse_loss(naction_pred, trajectory[...,:Da])
-            # loss_lips = F.mse_loss(train_lips_const, self.noise_scheduler.k_lip_t[1:].to(device))
-        #     #  loss = F.mse_loss(noisy_trajectory, trajectory, reduction='none')
-        #     #  loss = loss * loss_mask.type(loss.dtype)
-        #     #  loss = reduce(loss, 'b ... -> b (...)', 'mean')
-        #     #  loss = loss.mean()
         elif loss_type == "RMSE":
             loss = torch.sqrt(F.mse_loss(naction_pred, trajectory[...,:Da]))
-            # loss_lips = torch.sqrt(F.mse_loss(train_lips_const, self.noise_scheduler.k_lip_t[1:].to(device)))
-
-        #     # loss = (naction_pred - naction) ** 2   # squared error
-        #     # #loss = loss * loss_mask.type(loss.dtype)
-        #     # loss = torch.sqrt(loss.sum(dim=(1, 2)))   # L2 norm over dims (1,2)
-        #     # loss = loss.mean()  # average over batch
-
         else: 
             loss = torch.linalg.norm(naction_pred - trajectory[...,:Da], ord=2, dim=(1, 2)).mean()
-            # loss_lips = torch.linalg.norm(train_lips_const - self.noise_scheduler.k_lip_t[1:].to(device))
         
-        # loss_sum = 0
-        # for t in self.noise_scheduler.timesteps:
-            
-        #     # 1. Compute the GroundTruth denoising
-        #     GT_denoised = self.noise_scheduler.groundT_denoise(
-        #         noisy_trajectory, t, trajectory)
-            
-        #     # 2.2 apply conditioning
-        #     GT_denoised[cond_mask] = trajectory[cond_mask]
-        
-        #     # 3. predict model output
-        #     model_output = self.model(noisy_trajectory, t, 
-        #         local_cond=local_cond, global_cond=global_cond)
-
-        #     # 4. compute previous image: x_t -> x_t-1
-        #     noisy_trajectory = self.noise_scheduler.step(
-        #         model_output, t, noisy_trajectory,
-        #         generator = None,
-        #         **self.kwargs
-        #         ).prev_sample
-
-        #     # 5. apply conditioning
-        #     noisy_trajectory[cond_mask] = trajectory[cond_mask]
-
-        #     # 6.compute loss mask
-        #     loss_mask = ~cond_mask
-
-        #     # 7.compute loss
-        #     if loss_type == "MSE":
-        #         loss = F.mse_loss(noisy_trajectory, GT_denoised, reduction='none')
-        #         loss = loss * loss_mask.type(loss.dtype)
-        #         loss = reduce(loss, 'b ... -> b (...)', 'mean')
-        #         loss = loss.mean()
-        #     else:
-        #         loss = (noisy_trajectory - GT_denoised) ** 2   # squared error
-        #         loss = loss * loss_mask.type(loss.dtype)
-        #         loss = torch.sqrt(loss.sum(dim=(1, 2)))   # L2 norm over dims (1,2)
-        #         loss = loss.mean()  # average over batch
-
-        #     loss_sum += loss
-        
-        return loss + loss_lips
-        # return loss_sum
+        return loss 
     
-    # ========= Lipschitz Constant of the Denoising ============
-    def lip_const(self, obs):
+    # ========================== Lipschitz Constant of the Denoising ==========================
+    def lip_const(self, obs, stochastic=False, clamping=False):
         nobs = self.normalizer['obs'].normalize(obs)
         B, _, Do = nobs.shape
         To = self.n_obs_steps
@@ -485,7 +452,8 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
             
             # 2. predict model output
             model_output = model(trajectory, t, 
-                local_cond=local_cond, global_cond=global_cond)
+                local_cond=local_cond, global_cond=global_cond,
+                stochastic= stochastic, clamping=clamping)
 
             # 3. compute previous image: x_t -> x_t-1
             trajectory = scheduler.step(
@@ -509,275 +477,8 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         
         return torch.flip(k_theta, dims=[0]), k_theta_prod
     
-    # ========= Compute Reconstruction Loss of PAC-Bayes Bounds for case where we do inference from random step ============
-    def compute_reconst_loss_Tt(self, batch, timestep, loss_type):
-        
-        nbatch = self.normalizer.normalize(batch)
-        nobs = nbatch['obs']
-        naction = nbatch['action']
 
-        B, _, Do = nobs.shape
-        To = self.n_obs_steps
-        assert Do == self.obs_dim
-        T = self.horizon
-        Da = self.action_dim
-
-        # build input
-        device = self.device
-        dtype = self.dtype
-
-        # handle different ways of passing observation
-        local_cond = None
-        global_cond = None
-        trajectory = naction
-
-        if self.obs_as_local_cond:
-            # condition through local feature. all zero except first To timesteps
-            local_cond = torch.zeros(size=(B,T,Do), device=device, dtype=dtype)
-            local_cond[:,:To] = nobs[:,:To]
-            shape = (B, T, Da)
-            cond_mask = torch.zeros(size=shape, device=device, dtype=torch.bool)
-        
-        elif self.obs_as_global_cond:
-            # condition throught global feature
-            global_cond = nobs[:,:To].reshape(nobs.shape[0], -1)
-            shape = (B, T, Da)
-            if self.pred_action_steps_only:
-                shape = (B, self.n_action_steps, Da)
-                start = To
-                if self.oa_step_convention:
-                    start = To - 1
-                end = start + self.n_action_steps
-                trajectory = naction[:,start:end]
-            cond_mask = torch.zeros(size=shape, device=device, dtype=torch.bool)
-        else:
-            # condition through impainting
-            shape = (B, T, Da+Do)
-            cond_mask = torch.zeros(size=shape, device=device, dtype=torch.bool)
-            cond_mask[:,:To,Da:] = True
-            trajectory = torch.cat([naction, nobs], dim=-1)
-
-        # Sample noise that we'll add to the input
-        noise = torch.randn(trajectory.shape, device=trajectory.device)
-        
-        # Add noise to clean data to construct reference noisy data at chosen t
-        noisy_trajectory_ref = self.noise_scheduler.add_noise(trajectory, noise, timestep)
-        noisy_trajectory_ref[cond_mask] = trajectory[cond_mask]
-
-        # set step values
-        self.noise_scheduler.set_timesteps(self.noise_scheduler.config.num_train_timesteps)
-
-        # Reconstruction loss from T to t
-        noisy_trajectory = self.noise_scheduler.add_noise(trajectory, noise, self.noise_scheduler.timesteps[0])
-        
-        i=0
-        loss_T = 0
-
-        while not self.noise_scheduler.timesteps[i]==timestep:
-            # 1. apply conditioning
-            noisy_trajectory[cond_mask] = trajectory[cond_mask]
-        
-            t = self.noise_scheduler.timesteps[i]
-
-            model_output = self.model(noisy_trajectory, t, 
-                local_cond=local_cond, global_cond=global_cond)
-
-            # 3. compute previous image: x_t -> x_t-1
-            noisy_trajectory = self.noise_scheduler.step(
-                model_output, t, noisy_trajectory,
-                generator = None,
-                **self.kwargs
-                ).prev_sample
-            
-            i+=1
-        
-        # finally make sure conditioning is enforced
-        noisy_trajectory[cond_mask] = trajectory[cond_mask]
-        naction_pred = noisy_trajectory[...,:Da]
-
-        # compute loss
-        if loss_type == "MSE":
-            loss_T = F.mse_loss(naction_pred, noisy_trajectory_ref[...,:Da])
-        else:
-            loss_T = torch.linalg.norm(naction_pred - noisy_trajectory_ref[...,:Da], ord=2, dim=(1, 2)).mean()
-
-        # Reconstruction loss from t to 0
-        timesteps = torch.arange(timestep.item(), -1, -1, device=timestep.device)
-        noisy_trajectory = noisy_trajectory_ref.clone()
-        
-        loss_t=0
-        for t in timesteps:
-
-            # 1. apply conditioning
-            noisy_trajectory[cond_mask] = trajectory[cond_mask]
-        
-            # 2. predict model output
-            model_output = self.model(noisy_trajectory, t, 
-                local_cond=local_cond, global_cond=global_cond)
-
-            # 3. compute previous image: x_t -> x_t-1
-            noisy_trajectory = self.noise_scheduler.step(
-                model_output, t, noisy_trajectory,
-                generator = None,
-                **self.kwargs
-                ).prev_sample
-        
-        # finally make sure conditioning is enforced
-        noisy_trajectory[cond_mask] = trajectory[cond_mask]
-        
-        naction_pred = noisy_trajectory[...,:Da]
-
-        # compute loss
-        if loss_type == "MSE":
-            loss_t = F.mse_loss(naction_pred, trajectory[...,:Da])
-        else:
-            loss_t = torch.linalg.norm(naction_pred - trajectory[...,:Da], ord=2, dim=(1, 2)).mean()
-
-        return loss_t + loss_T
-    
-    # ========= Compute Reconstruction Loss of PAC-Bayes Bounds for case where we do inference from random step ============
-    def compute_reconst_loss_t(self, batch, timestep, loss_type):
-        
-        nbatch = self.normalizer.normalize(batch)
-        nobs = nbatch['obs']
-        naction = nbatch['action']
-
-        B, _, Do = nobs.shape
-        To = self.n_obs_steps
-        assert Do == self.obs_dim
-        T = self.horizon
-        Da = self.action_dim
-
-        # build input
-        device = self.device
-        dtype = self.dtype
-
-        # handle different ways of passing observation
-        local_cond = None
-        global_cond = None
-        trajectory = naction
-
-        if self.obs_as_local_cond:
-            # condition through local feature
-            # all zero except first To timesteps
-            local_cond = torch.zeros(size=(B,T,Do), device=device, dtype=dtype)
-            local_cond[:,:To] = nobs[:,:To]
-            shape = (B, T, Da)
-            cond_mask = torch.zeros(size=shape, device=device, dtype=torch.bool)
-        
-        elif self.obs_as_global_cond:
-            # condition throught global feature
-            global_cond = nobs[:,:To].reshape(nobs.shape[0], -1)
-            shape = (B, T, Da)
-            if self.pred_action_steps_only:
-                shape = (B, self.n_action_steps, Da)
-                start = To
-                if self.oa_step_convention:
-                    start = To - 1
-                end = start + self.n_action_steps
-                trajectory = naction[:,start:end]
-            cond_mask = torch.zeros(size=shape, device=device, dtype=torch.bool)
-        else:
-            # condition through impainting
-            shape = (B, T, Da+Do)
-            cond_mask = torch.zeros(size=shape, device=device, dtype=torch.bool)
-            cond_mask[:,:To,Da:] = True
-            trajectory = torch.cat([naction, nobs], dim=-1)
-
-        # Sample noise that we'll add to the input
-        noise = torch.randn(trajectory.shape, device=trajectory.device)
-        
-        # Add noise to the clean images according to the noise magnitude at each timestep
-        # (this is the forward diffusion process)
-        noisy_trajectory = self.noise_scheduler.add_noise(
-            trajectory, noise, timestep)
-        
-        # set step values
-        self.noise_scheduler.set_timesteps(self.num_inference_steps)
-
-        timesteps = torch.arange(timestep.item(), -1, -1, device=timestep.device)
-        
-        for t in timesteps:
-            # 1. apply conditioning
-            noisy_trajectory[cond_mask] = trajectory[cond_mask]
-
-            # 2. Compute the GroundTruth denoising
-            GT_denoised = self.noise_scheduler.groundT_denoise(
-                noisy_trajectory, t, trajectory)
-        
-            # 2. predict model output
-            model_output = self.model(noisy_trajectory, t, 
-                local_cond=local_cond, global_cond=global_cond)
-
-            # 3. compute previous image: x_t -> x_t-1
-            noisy_trajectory = self.noise_scheduler.step(
-                model_output, t, noisy_trajectory,
-                generator = None,
-                **self.kwargs
-                ).prev_sample
-        
-        # finally make sure conditioning is enforced
-        noisy_trajectory[cond_mask] = trajectory[cond_mask]
-        
-        # prediction
-        #! what should I do for the case in which the actions and conditions are
-        #! concatenated to eachother, should I compare the whole trajectory or 
-        #! the actions
-        #naction_pred = noisy_trajectory[...,:Da]
-        
-        # compute loss mask
-        loss_mask = ~cond_mask
-
-        # compute loss
-        if loss_type == "MSE":
-            loss = F.mse_loss(noisy_trajectory, trajectory, reduction='none')
-            loss = loss * loss_mask.type(loss.dtype)
-            loss = reduce(loss, 'b ... -> b (...)', 'mean')
-            loss = loss.mean()
-        else:
-            loss = (noisy_trajectory - trajectory) ** 2   # squared error
-            loss = loss * loss_mask.type(loss.dtype)
-            loss = torch.sqrt(loss.sum(dim=(1, 2)))   # L2 norm over dims (1,2)
-            loss = loss.mean()  # average over batch
-
-        return loss
-    
-    # ========= PAC-Bayes Bounds ============
-    # def PAC_Bayes_Bounds(self, data_loader, cfg: OmegaConf):
-        
-    #     def reconstruction_loss(data_loader):
-    #         emp_risk = 0
-    #         alpha_bar_T = self.noise_scheduler.alpha_bar[-1]
-            
-    #         for batch_idx, batch in enumerate(data_loader):               
-    #             # device transfer
-    #             device = cfg.device
-    #             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-    #             obs_dict = {"obs": batch["obs"]}
-    #             gt_action = batch["action"]
-                
-    #             loss = 0
-    #             for _ in range (cfg.training.num_expect):
-    #                 result = self.predict_action(obs_dict)
-    #                 if cfg.pred_action_steps_only:
-    #                     pred_action = result["action"]
-    #                     start = cfg.n_obs_steps - 1
-    #                     end = start + cfg.n_action_steps
-    #                     gt_action = gt_action[:, start:end]
-    #                 else:
-    #                     pred_action = result["action_pred"]
-                    
-    #                 # compute loss
-    #                 if cfg.training.loss_type == "MSE":
-    #                     loss += torch.nn.functional.mse_loss(pred_action, gt_action) * gt_action.shape[0]
-    #                 else:
-    #                     loss += torch.linalg.norm(pred_action - gt_action, ord=2, dim=(1, 2))
-                    
-    #                 emp_risk +=  torch.sum(loss)
-
-    #         return emp_risk.item() / (num_expect * (batch_idx+1))
-
-
+# ========================== Compute upper bound on nll ==========================
     def noisy_channel(self, x, logsnr):
         '''
         The noise channel is working as the forward process of the DDPM
@@ -792,7 +493,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         noisy_data = self.noise_scheduler.add_noise(x, eps, timestep)
         return noisy_data, timestep, eps
 
-    def mse(self, batch, logsnr, mse_type='epsilon', xinterval=None):
+    def mse(self, batch, logsnr, mse_type='epsilon', xinterval=None, stochastic=False, clamping = False):
         """Return MSE curve either conditioned or not on y.
         x_hat = z/sqrt(snr) - eps_hat(z, snr)/sqrt(snr),
         so x_hat - x = (eps - eps_hat(z, snr))/sqrt(snr).
@@ -814,7 +515,8 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
 
         z[cond_mask] = cond_data[cond_mask]
 
-        eps_hat = self.model(z, timesteps, local_cond=local_cond, global_cond=global_cond)
+        eps_hat = self.model(z, timesteps, local_cond=local_cond, global_cond=global_cond,
+                             stochastic = stochastic, clamping= clamping)
         
         err_eps = (eps - eps_hat).flatten(start_dim=1) 
         mse_eps = torch.einsum('ij,ij->i', err_eps, err_eps)  # MSE for epsilon
@@ -834,12 +536,12 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         #     return mse_x
         return mse_eps
 
-    def nll(self, batch, logsnr_samples_per_x=1, xinterval=None):
+    def nll(self, batch, logsnr_samples_per_x=1, xinterval=None, stochastic = False, clamping = False):
         """-log p(x) (or -log p(x|y) if y is provided) estimated for a batch."""
         nll = 0
         for _ in range(logsnr_samples_per_x):
             logsnr, w = self.logistic_integrate(len(batch[0]), *self.loc_scale, device=self.device)
-            mses = self.mse(batch, logsnr, mse_type='epsilon', xinterval=xinterval)
+            mses = self.mse(batch, logsnr, mse_type='epsilon', xinterval=xinterval, stochastic=stochastic, clamping=clamping)
             nll += self.loss(mses, logsnr, w) / logsnr_samples_per_x
         return nll
 
@@ -858,7 +560,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         return loss  # *logsnr integration, see paper
 
     @torch.no_grad()
-    def test_nll(self, dataloader, epoch, npoints=100, xinterval=None):
+    def test_nll(self, dataloader, epoch, npoints=100, xinterval=None, stocastic = False, clamping=False):
         """Calculate expected NLL on data at test time.  Main difference is that we can clamp the integration
         range, because negative values of MMSE gap we can switch to Gaussian decoder to get zero.
         npoints - number of points to use in integration
@@ -942,7 +644,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
                 n_samples = len(data)
                 total_samples += n_samples
 
-                val_loss += self.nll([data, ] + batch[1:], xinterval=xinterval).cpu() * n_samples
+                val_loss += self.nll([data, ] + batch[1:], xinterval=xinterval, stochastic=stocastic, clamping=clamping).cpu() * n_samples
 
                 mses.append(torch.zeros(n_samples, len(logsnr)))
                 for j, this_logsnr in enumerate(logsnr):
@@ -950,7 +652,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
 
                     # Regular MSE, clamps predictions, but does not discretize
                     this_mse = self.mse([data, ] + batch[1:], this_logsnr_broadcast, mse_type='epsilon',
-                                        xinterval=xinterval).cpu()
+                                        xinterval=xinterval, stochastic=stocastic, clamping=clamping).cpu()
                     mses[-1][:, j] = this_mse
 
         val_loss /= total_samples

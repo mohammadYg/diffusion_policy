@@ -9,6 +9,7 @@ if __name__ == "__main__":
 
 import os
 import hydra
+from hydra.utils import get_class, instantiate
 import torch
 from omegaconf import OmegaConf
 import pathlib
@@ -19,10 +20,11 @@ import random
 import wandb
 import tqdm
 import shutil
+import dill
 
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from diffusion_policy.policy.diffusion_unet_lowdim_policy import DiffusionUnetLowdimPolicy
+from diffusion_policy.policy.diffusion_unet_lowdim_prob_policy import DiffusionUnetLowdimProbPolicy
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
@@ -33,7 +35,7 @@ from diffusers.training_utils import EMAModel
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 # %%
-class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
+class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
@@ -45,11 +47,10 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         np.random.seed(seed)
         random.seed(seed)
 
-        # configure model
-        self.model: DiffusionUnetLowdimPolicy
-        self.model = hydra.utils.instantiate(cfg.policy)
+        self.model: DiffusionUnetLowdimProbPolicy
+        self.model = hydra.utils.instantiate(cfg.policy_prob)
 
-        self.ema_model: DiffusionUnetLowdimPolicy = None
+        self.ema_model: DiffusionUnetLowdimProbPolicy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
 
@@ -95,12 +96,15 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
-        # configure seperate dataset for PAC-Bayes
+        ## configure seperate dataset for PAC-Bayes
         pac_bayes_dataset = dataset.get_pac_bayes_dataset()
         pac_dataloader = DataLoader(pac_bayes_dataset, **cfg.pac_dataloader) if len (pac_bayes_dataset) > 0 else None
         
         ## configure dataset for covariance_spectrum
-        cov_dataloader = DataLoader(dataset, batch_size=len(dataset), num_workers=1, pin_memory = True, persistent_workers = False)
+        print ("length of the training dataset: ", len(pac_dataloader.dataset))
+        cov_dataloader = DataLoader(pac_bayes_dataset, batch_size=len(pac_dataloader.dataset), 
+                                    num_workers=1,   pin_memory = True, 
+                                    persistent_workers = False)
         
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
@@ -189,10 +193,10 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 step_log = dict()
                 # ========= train for this epoch ==========
                 train_losses = list()
-                with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
-                        leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                #with tqdm.tqdm(pac_dataloader, desc=f"Training epoch {self.epoch}", 
-                    #leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                # with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
+                #         leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                with tqdm.tqdm(pac_dataloader, desc=f"Training epoch {self.epoch}", 
+                    leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     
                     for batch_idx, batch in enumerate(tepoch):
                         # device transfer
@@ -200,7 +204,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
 
-                        raw_loss = self.model.compute_loss(batch)
+                        raw_loss = self.model.compute_bound(batch, n_bound=len(pac_dataloader.dataset), delta=cfg.training.delta, mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.training.stochastic, 
+                                                           clamping=cfg.training.clamping, bounded=cfg.training.bounded)
                             
                         loss = raw_loss / cfg.training.gradient_accumulate_every
                         loss.backward()
@@ -250,7 +255,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
                 # run rollout
                 if (self.epoch % cfg.training.rollout_every) == 0:
-                    runner_log = env_runner.run(policy)
+                    runner_log = env_runner.run(policy, stochastic= cfg.eval.stochastic, clamping=cfg.eval.clapming)
                     # log all
                     step_log.update(runner_log)
 
@@ -274,10 +279,13 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 
                                 # device transfer
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                loss = policy.compute_loss(batch)
+                                loss = policy.compute_bound(batch, n_bound=len(val_dataloader.dataset), delta=cfg.eval.delta, mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.eval.stochastic,
+                                                           clamping=cfg.eval.clamping, bounded= cfg.training.bounded)
                                 val_losses_noise_pred.append(loss.item() * n_samples)
 
-                                loss_reconstruct = policy.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
+                                loss_reconstruct = policy.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type,
+                                                                                 stochastic=cfg.eval.stochastic,
+                                                                                clamping=cfg.eval.clamping) 
                                 val_losses_reconstruction.append(loss_reconstruct.item() * n_samples)
 
                                 if (cfg.training.max_val_steps is not None) \
@@ -291,10 +299,14 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                     obs1 = batch["obs"][rand_sample1]
                                     obs2 = batch['obs'][rand_sample1]
                                     obs = torch.stack((obs1, obs2))
-                                    val_lips_const, val_lips_const_prod = policy.lip_const(obs)
+                                    val_lips_const, val_lips_const_prod = policy.lip_const(obs, 
+                                                                                stochastic=cfg.eval.stochastic,
+                                                                                clamping=cfg.eval.clamping)
                                     
                         if (self.epoch % cfg.training.nll_every)==0:
-                            NLL = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None)
+                            NLL = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None,
+                                                  stochastic=cfg.eval.stochastic,
+                                                clamping=cfg.eval.clamping)
                             step_log['nll_bpd'] = NLL
 
                         if len(val_losses_noise_pred) > 0:
@@ -313,7 +325,9 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         obs_dict = {'obs': batch['obs']}
                         gt_action = batch['action']
                         
-                        result = policy.predict_action(obs_dict)
+                        result = policy.predict_action(obs_dict, 
+                                                       stochastic=cfg.eval.stochstic,
+                                                        clamping=cfg.eval.clamping)
                         if cfg.pred_action_steps_only:
                             pred_action = result['action']
                             start = cfg.n_obs_steps - 1
@@ -372,7 +386,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
     config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")), 
     config_name=pathlib.Path(__file__).stem)
 def main(cfg):
-    workspace = TrainDiffusionUnetLowdimWorkspace(cfg)
+    workspace = TrainProbDiffusionUnetLowdimWorkspace(cfg)
     workspace.run()
 
 if __name__ == "__main__":

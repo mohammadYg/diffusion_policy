@@ -2,8 +2,8 @@ defaults:
   - _self_
   - task: pusht_lowdim
 
-name: train_diffusion_unet_lowdim_with_PAC_Bayes_bounds
-_target_: diffusion_policy.workspace.train_diffusion_unet_lowdim_with_PBB_workspace.TrainDiffusionUnetLowdimWithPBBWorkspace
+name: train_prob_diffusion_unet_lowdim
+_target_: diffusion_policy.workspace.train_prob_diffusion_unet_lowdim_workspace.TrainProbDiffusionUnetLowdimWorkspace
 
 obs_dim: ${task.obs_dim}
 action_dim: ${task.action_dim}
@@ -21,11 +21,11 @@ obs_as_local_cond: False
 obs_as_global_cond: True
 pred_action_steps_only: False
 
-policy:
-  _target_: diffusion_policy.policy.diffusion_unet_lowdim_policy.DiffusionUnetLowdimPolicy
+policy_prob:
+  _target_: diffusion_policy.policy.diffusion_unet_lowdim_prob_policy.DiffusionUnetLowdimProbPolicy
 
   model:
-    _target_: diffusion_policy.model.diffusion.conditional_unet1d.ConditionalUnet1D
+    _target_: diffusion_policy.model.diffusion.conditional_prob_unet1d.BayesianConditionalUnet1D
     input_dim: "${eval: ${task.action_dim} if ${obs_as_local_cond} or ${obs_as_global_cond} else ${task.obs_dim} + ${task.action_dim}}"
     local_cond_dim: "${eval: ${task.obs_dim} if ${obs_as_local_cond} else None}"
     global_cond_dim: "${eval: ${task.obs_dim}*${n_obs_steps} if ${obs_as_global_cond} else None}"
@@ -34,7 +34,19 @@ policy:
     kernel_size: 5
     n_groups: 8
     cond_predict_scale: True
-  
+    use_dropout: False
+    # Bayesian parameters
+    rho_prior: -3.0
+    prior_dist: 'gaussian'
+    device: 'cuda'
+    init_prior: 'weights'
+    init_net: "data/outputs/2025.10.20/14.45.53_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0050-nll_bpd=-9.304.ckpt"
+    init_net_prior: ${policy_prob.model.init_net} # Separate prior initialization
+    # Output transformation parameters
+    output_transform_type: 'none'  # 'clamp', 'tanh', or 'none'
+    output_clamp_min: -1.0
+    output_clamp_max: 1.0
+
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddpm.DDPMScheduler
     num_train_timesteps: 100
@@ -44,7 +56,7 @@ policy:
     variance_type: fixed_small # Yilun's paper uses fixed_small_log instead, but easy to cause Nan
     clip_sample: True # required when predict_epsilon=False
     prediction_type: epsilon # or sample
-
+  
   horizon: ${horizon}
   obs_dim: ${obs_dim}
   action_dim: ${action_dim}
@@ -55,10 +67,7 @@ policy:
   obs_as_global_cond: ${obs_as_global_cond}
   pred_action_steps_only: ${pred_action_steps_only}
   oa_step_convention: True
-
-  # scheduler.step params
-  # predict_epsilon: True
-
+    
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
   update_after_step: 0
@@ -68,6 +77,13 @@ ema:
   max_value: 0.9999
 
 dataloader:
+  batch_size: 256
+  num_workers: 1
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+
+pac_dataloader:
   batch_size: 256
   num_workers: 1
   shuffle: True
@@ -93,21 +109,23 @@ training:
   seed: 42
   debug: False
   resume: False
-  retrain: True
-  desired_ckpt_path: "data/outputs/2025.10.10/18.50.27_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0400-test_mean_score=0.767.ckpt"
+  retrain: False
+  desired_ckpt_path: "data/outputs/2025.09.24/23.00.59_train_diffusion_unet_lowdim_with_PAC_Bayes_bounds_pusht_lowdim/checkpoints/epoch=0090-test_mean_score=0.621.ckpt"
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 200
+  num_epochs: 1000
   gradient_accumulate_every: 1
-  use_ema: True
+  use_ema: False
   # training loop control
   # in epochs
-  rollout_every: 1
-  checkpoint_every: 1
-  val_every: 1
-  sample_every: 1
-  nll_every: 10  
+  rollout_every: 50
+  checkpoint_every: 50
+  val_every: 50
+  sample_every: 50
+  PAC_Bayes_every: 2000
+  nll_every: 50
+  # steps per epoch
   max_train_steps: null
   max_val_steps: null
   # misc
@@ -118,7 +136,19 @@ training:
   # PAC-Bayes Bounds 
   num_expect: 10
   diam: 2
-  delta: 0.05
+  # Bayesian NN
+  init_net: True
+  init_net_prior: True
+  stochastic: True
+  clamping: False
+  bounded: False
+  delta: 0.025
+
+eval:
+  stochastic: True
+  clamping: False
+  eval: 0.05
+  mc_sampling: 1000
 
 logging:
   project: diffusion_policy_debug
@@ -136,6 +166,15 @@ checkpoint:
     k: 5
     format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
   save_last_ckpt: True
+  save_last_snapshot: False
+
+checkpoint_nll:
+  topk:
+    monitor_key: nll_bpd
+    mode: min
+    k: 1
+    format_str: 'epoch={epoch:04d}-nll_bpd={nll_bpd:.3f}.ckpt'
+  save_last_ckpt: False
   save_last_snapshot: False
 
 multi_run:

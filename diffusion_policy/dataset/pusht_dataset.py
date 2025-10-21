@@ -19,10 +19,10 @@ class PushTLowdimDataset(BaseLowdimDataset):
             state_key='state',
             action_key='action',
             seed=42,
+            seed_pac=123,
             val_ratio=0.0,
             max_train_episodes=None,
-            out_of_dist=False,
-            offset=0
+            train_episodes_for_PAC_Bayes= 0
             ):
         super().__init__()
         self.replay_buffer = ReplayBuffer.copy_from_path(
@@ -32,12 +32,27 @@ class PushTLowdimDataset(BaseLowdimDataset):
             n_episodes=self.replay_buffer.n_episodes, 
             val_ratio=val_ratio,
             seed=seed)
+        
         train_mask = ~val_mask
         train_mask = downsample_mask(
             mask=train_mask, 
             max_n=max_train_episodes, 
             seed=seed)
+        
+        val_mask = ~train_mask
+        pac_mask = np.zeros_like(train_mask, dtype=bool)
 
+        if train_episodes_for_PAC_Bayes>0:    
+            # Get the indices of validation episodes
+            train_indices = np.where(train_mask)[0]
+            # Reproducible random generator
+            rng = np.random.default_rng(seed_pac)
+            # Randomly choose demos from train dataset
+            n_train_pac = min(train_episodes_for_PAC_Bayes, len(train_indices))
+            train_pac_indices = rng.choice(train_indices, size=n_train_pac, replace=False)
+            pac_mask [train_pac_indices] = True
+            train_mask [train_pac_indices] = False
+        
         self.sampler = SequenceSampler(
             replay_buffer=self.replay_buffer, 
             sequence_length=horizon,
@@ -45,6 +60,7 @@ class PushTLowdimDataset(BaseLowdimDataset):
             pad_after=pad_after,
             episode_mask=train_mask
             )
+        
         self.obs_key = obs_key
         self.state_key = state_key
         self.action_key = action_key
@@ -52,8 +68,8 @@ class PushTLowdimDataset(BaseLowdimDataset):
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
-        self.out_of_dist = out_of_dist
-        self.offset = offset
+        self.val_mask = val_mask
+        self.pac_mask = pac_mask
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -62,11 +78,23 @@ class PushTLowdimDataset(BaseLowdimDataset):
             sequence_length=self.horizon,
             pad_before=self.pad_before, 
             pad_after=self.pad_after,
-            episode_mask=~self.train_mask
+            episode_mask=self.val_mask
             )
-        val_set.train_mask = ~self.train_mask
+        val_set.train_mask = self.val_mask
         return val_set
 
+    def get_pac_bayes_dataset(self):
+        pac_set = copy.copy(self)
+        pac_set.sampler = SequenceSampler(
+            replay_buffer=self.replay_buffer, 
+            sequence_length=self.horizon,
+            pad_before=self.pad_before, 
+            pad_after=self.pad_after,
+            episode_mask=self.pac_mask
+            )
+        pac_set.train_mask = self.pac_mask
+        return pac_set
+    
     def get_normalizer(self, mode='limits', **kwargs):
         data = self._sample_to_data(self.replay_buffer)
         normalizer = LinearNormalizer()
@@ -88,9 +116,8 @@ class PushTLowdimDataset(BaseLowdimDataset):
             agent_pos], axis=-1)
 
         data = {
-            "obs": obs + self.offset if self.out_of_dist else obs,  # T, D_o
-            "action": sample[self.action_key] + self.offset if self.out_of_dist
-            else sample[self.action_key],  # T, D_a
+            "obs": obs, # T, D_o
+            "action": sample[self.action_key],  # T, D_a
         }
         return data
 

@@ -53,7 +53,7 @@ policy:
   action_dim: ${action_dim}
   n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
   n_obs_steps: ${n_obs_steps}
-  num_inference_steps: 8
+  num_inference_steps: 10
   obs_as_local_cond: ${obs_as_local_cond}
   obs_as_global_cond: ${obs_as_global_cond}
   pred_action_steps_only: ${pred_action_steps_only}
@@ -78,6 +78,13 @@ dataloader:
   pin_memory: True
   persistent_workers: False
 
+pac_dataloader:
+  batch_size: 256
+  num_workers: 1
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+  
 val_dataloader:
   batch_size: 256
   num_workers: 1
@@ -96,11 +103,13 @@ training:
   device: "cuda:1"
   seed: 42
   debug: False
-  resume: True
+  resume: False
+  retrain: False
+  desired_ckpt_path: "data/outputs/2025.10.12/11.33.45_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0400-test_mean_score=0.780.ckpt"
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 8000
+  num_epochs: 1000
   gradient_accumulate_every: 1
   use_ema: True
   # training loop control
@@ -109,11 +118,19 @@ training:
   checkpoint_every: 50
   val_every: 1
   sample_every: 5
+  PAC_Bayes_every: 10
+  nll_every: 50
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
   # misc
   tqdm_interval_sec: 1.0
+  PAC_loss_type: "norm2"
+  random_timestep: False
+  # PAC-Bayes Bounds 
+  num_expect: 10
+  diam: 2
+  delta: 0.05
 
 logging:
   project: diffusion_policy_debug

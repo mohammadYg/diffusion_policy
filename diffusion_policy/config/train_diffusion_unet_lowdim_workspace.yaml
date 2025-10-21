@@ -20,8 +20,6 @@ keypoint_visible_rate: 1.0
 obs_as_local_cond: False
 obs_as_global_cond: True
 pred_action_steps_only: False
-out_of_dist: False
-offset: 0
 
 policy:
   _target_: diffusion_policy.policy.diffusion_unet_lowdim_policy.DiffusionUnetLowdimPolicy
@@ -76,6 +74,13 @@ dataloader:
   pin_memory: True
   persistent_workers: False
 
+pac_dataloader:
+  batch_size: 256
+  num_workers: 1
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+
 val_dataloader:
   batch_size: 256
   num_workers: 1
@@ -94,30 +99,30 @@ training:
   device: "cuda:0"
   seed: 42
   debug: False
-  resume: True
-  retrain: True
+  resume: False
+  retrain: False
   desired_ckpt_path: "data/outputs/2025.09.24/23.00.59_train_diffusion_unet_lowdim_with_PAC_Bayes_bounds_pusht_lowdim/checkpoints/epoch=0090-test_mean_score=0.621.ckpt"
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 5000
+  num_epochs: 1000
   gradient_accumulate_every: 1
   use_ema: True
   # training loop control
   # in epochs
   rollout_every: 50
   checkpoint_every: 50
-  val_every: 1
-  sample_every: 5
-  PAC_Bayes_every: 8000
-  nll_every: 10
+  val_every: 50
+  sample_every: 50
+  PAC_Bayes_every: 2000
+  nll_every: 50
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
   # misc
   tqdm_interval_sec: 1.0
   # loss type for PAC_Bayse Bounds
-  PAC_loss_type: "norm2"
+  PAC_loss_type: "Norm"
   random_timestep: False
   # PAC-Bayes Bounds 
   num_expect: 10
@@ -140,6 +145,15 @@ checkpoint:
     k: 5
     format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
   save_last_ckpt: True
+  save_last_snapshot: False
+
+checkpoint_nll:
+  topk:
+    monitor_key: nll_bpd
+    mode: min
+    k: 1
+    format_str: 'epoch={epoch:04d}-nll_bpd={nll_bpd:.3f}.ckpt'
+  save_last_ckpt: False
   save_last_snapshot: False
 
 multi_run:
