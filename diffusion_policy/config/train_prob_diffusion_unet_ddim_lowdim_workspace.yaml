@@ -2,8 +2,8 @@ defaults:
   - _self_
   - task: pusht_lowdim
 
-name: train_diffusion_unet_lowdim
-_target_: diffusion_policy.workspace.train_diffusion_unet_lowdim_workspace.TrainDiffusionUnetLowdimWorkspace
+name: train_prob_diffusion_unet_lowdim
+_target_: diffusion_policy.workspace.train_prob_diffusion_unet_lowdim_workspace.TrainProbDiffusionUnetLowdimWorkspace
 
 obs_dim: ${task.obs_dim}
 action_dim: ${task.action_dim}
@@ -21,11 +21,11 @@ obs_as_local_cond: False
 obs_as_global_cond: True
 pred_action_steps_only: False
 
-policy:
-  _target_: diffusion_policy.policy.diffusion_unet_lowdim_policy.DiffusionUnetLowdimPolicy
+policy_prob:
+  _target_: diffusion_policy.policy.diffusion_unet_lowdim_prob_policy.DiffusionUnetLowdimProbPolicy
 
   model:
-    _target_: diffusion_policy.model.diffusion.conditional_unet1d.ConditionalUnet1D
+    _target_: diffusion_policy.model.diffusion.conditional_prob_unet1d.BayesianConditionalUnet1D
     input_dim: "${eval: ${task.action_dim} if ${obs_as_local_cond} or ${obs_as_global_cond} else ${task.obs_dim} + ${task.action_dim}}"
     local_cond_dim: "${eval: ${task.obs_dim} if ${obs_as_local_cond} else None}"
     global_cond_dim: "${eval: ${task.obs_dim}*${n_obs_steps} if ${obs_as_global_cond} else None}"
@@ -34,15 +34,28 @@ policy:
     kernel_size: 5
     n_groups: 8
     cond_predict_scale: True
-  
+    # Bayesian parameters
+    rho_prior: -3.0
+    prior_dist: 'gaussian'
+    init_prior: 'weights'
+    init_net: "data/outputs/2025.10.27/22.47.07_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0550-test_mean_score=0.873.ckpt"
+    init_net_prior: "data/outputs/2025.10.27/22.47.07_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0550-test_mean_score=0.873.ckpt" # Separate prior initialization
+    # Output transformation parameters
+    output_transform_type: 'none'  # 'clamp', 'tanh', or 'none'
+    output_clamp_min: -1.0
+    output_clamp_max: 1.0
+
   noise_scheduler:
-    _target_: diffusers.schedulers.scheduling_ddpm.DDPMScheduler
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
     num_train_timesteps: 100
     beta_start: 0.0001
     beta_end: 0.02
+    # beta_schedule is important
+    # this is the best we found
     beta_schedule: squaredcos_cap_v2
-    variance_type: fixed_small # Yilun's paper uses fixed_small_log instead, but easy to cause Nan
-    clip_sample: True # required when predict_epsilon=False
+    clip_sample: True
+    set_alpha_to_one: True
+    steps_offset: 0
     prediction_type: epsilon # or sample
 
   horizon: ${horizon}
@@ -58,6 +71,7 @@ policy:
 
   # scheduler.step params
   # predict_epsilon: True
+  use_clipped_model_output: True
 
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
@@ -80,7 +94,7 @@ pac_dataloader:
   shuffle: True
   pin_memory: True
   persistent_workers: False
-
+  
 val_dataloader:
   batch_size: 256
   num_workers: 1
@@ -96,12 +110,12 @@ optimizer:
   weight_decay: 1.0e-6
 
 training:
-  device: "cuda:0"
+  device: "cuda:1"
   seed: 42
   debug: False
   resume: False
   retrain: False
-  desired_ckpt_path: "data/outputs/2025.09.24/23.00.59_train_diffusion_unet_lowdim_with_PAC_Bayes_bounds_pusht_lowdim/checkpoints/epoch=0090-test_mean_score=0.621.ckpt"
+  desired_ckpt_path: "data/outputs/2025.10.12/11.33.45_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0400-test_mean_score=0.780.ckpt"
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
@@ -112,23 +126,34 @@ training:
   # in epochs
   rollout_every: 50
   checkpoint_every: 50
-  val_every: 50
+  val_every: 5000
   sample_every: 5000
-  PAC_Bayes_every: 8000
+  PAC_Bayes_every: 10000
   nll_every: 50
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
   # misc
   tqdm_interval_sec: 1.0
-  # loss type for PAC_Bayse Bounds
-  PAC_loss_type: "Norm"
+  PAC_loss_type: "norm2"
   random_timestep: False
   # PAC-Bayes Bounds 
   num_expect: 10
   diam: 2
-  delta: 0.05
+  # Bayesian NN
+  init_net: True
+  init_net_prior: True
+  stochastic: False
+  clamping: False
+  bounded: False
+  delta: 0.025
 
+eval:
+  stochastic: False
+  clamping: False
+  delta: 0.05
+  mc_sampling: 1000
+  
 logging:
   project: diffusion_policy_debug
   resume: True

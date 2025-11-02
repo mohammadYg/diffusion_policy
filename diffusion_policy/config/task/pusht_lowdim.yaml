@@ -37,5 +37,5 @@ dataset:
   seed: 42
   seed_pac: 123
   val_ratio: 0.02
-  max_train_episodes: 100
+  max_train_episodes: 40
   train_episodes_for_PAC_Bayes: 0        # This is selected from training data.

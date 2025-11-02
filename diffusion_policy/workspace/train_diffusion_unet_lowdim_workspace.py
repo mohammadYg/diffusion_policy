@@ -96,8 +96,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
         # configure seperate dataset for PAC-Bayes
-        pac_bayes_dataset = dataset.get_pac_bayes_dataset()
-        pac_dataloader = DataLoader(pac_bayes_dataset, **cfg.pac_dataloader) if len (pac_bayes_dataset) > 0 else None
+        # pac_bayes_dataset = dataset.get_pac_bayes_dataset()
+        # pac_dataloader = DataLoader(pac_bayes_dataset, **cfg.pac_dataloader) if len (pac_bayes_dataset) > 0 else None
         
         ## configure dataset for covariance_spectrum
         cov_dataloader = DataLoader(dataset, batch_size=len(dataset), num_workers=1, pin_memory = True, persistent_workers = False)
@@ -258,15 +258,15 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 if (self.epoch % cfg.training.val_every) == 0:
                     with torch.no_grad():
                         val_losses_noise_pred = list()
-                        val_losses_reconstruction = list()
-                        val_lips_const_prod = 0
+                        #val_losses_reconstruction = list()
+                        #val_lips_const_prod = 0
                         n_total_samples = 0
 
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             
-                            # random batch for computing Lipschitz Constant
-                            rand_batch = np.random.randint(0, len(val_dataloader))
+                            # # random batch for computing Lipschitz Constant
+                            # rand_batch = np.random.randint(0, len(val_dataloader))
 
                             for batch_idx, batch in enumerate(tepoch):
                                 n_samples = len(batch["obs"])
@@ -277,33 +277,35 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 loss = policy.compute_loss(batch)
                                 val_losses_noise_pred.append(loss.item() * n_samples)
 
-                                loss_reconstruct = policy.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
-                                val_losses_reconstruction.append(loss_reconstruct.item() * n_samples)
+                                # loss_reconstruct = policy.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
+                                # val_losses_reconstruction.append(loss_reconstruct.item() * n_samples)
 
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
                                     break
                                 
-                                if rand_batch == batch_idx:
-                                    # 2 random samples from the random batch to compute Lipschitz Constant
-                                    rand_sample1 = np.random.randint(0, len(batch))
-                                    #rand_sample2 = np.random.randint(0, len(batch))
-                                    obs1 = batch["obs"][rand_sample1]
-                                    obs2 = batch['obs'][rand_sample1]
-                                    obs = torch.stack((obs1, obs2))
-                                    val_lips_const, val_lips_const_prod = policy.lip_const(obs)
+                                # if rand_batch == batch_idx:
+                                #     # 2 random samples from the random batch to compute Lipschitz Constant
+                                #     rand_sample1 = np.random.randint(0, len(batch))
+                                #     #rand_sample2 = np.random.randint(0, len(batch))
+                                #     obs1 = batch["obs"][rand_sample1]
+                                #     obs2 = batch['obs'][rand_sample1]
+                                #     obs = torch.stack((obs1, obs2))
+                                #     val_lips_const, val_lips_const_prod = policy.lip_const(obs)
                                     
+                        if len(val_losses_noise_pred) > 0:
+                            #val_loss_reconstruction = torch.sum(torch.tensor(val_losses_reconstruction)).item()/n_total_samples
+                            val_loss_noise_pred = torch.sum(torch.tensor(val_losses_noise_pred)).item()/n_total_samples
+                            step_log['val_loss_noise_pred'] = val_loss_noise_pred
+                            # log epoch average validation loss
+                            #step_log['val_loss_reconstruct'] = val_loss_reconstruction
+                            
+                            #step_log['val_lips_const_prod'] = val_lips_const_prod.item()
+
+                        # Compute upper bound on NLL
                         if (self.epoch % cfg.training.nll_every)==0:
                             NLL = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None)
                             step_log['nll_bpd'] = NLL
-
-                        if len(val_losses_noise_pred) > 0:
-                            val_loss_reconstruction = torch.sum(torch.tensor(val_losses_reconstruction)).item()/n_total_samples
-                            val_loss_noise_pred = torch.sum(torch.tensor(val_losses_noise_pred)).item()/n_total_samples
-                            # log epoch average validation loss
-                            step_log['val_loss_reconstruct'] = val_loss_reconstruction
-                            step_log['val_loss_noise_pred'] = val_loss_noise_pred
-                            step_log['val_lips_const_prod'] = val_lips_const_prod.item()
 
                 # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:

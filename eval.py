@@ -17,6 +17,7 @@ import dill
 import wandb
 import json
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
+from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
 from omegaconf import OmegaConf
 
 @click.command()
@@ -42,6 +43,7 @@ def main(checkpoint, output_dir, device, override):
     cls = hydra.utils.get_class(cfg._target_)
     workspace = cls(cfg, output_dir=output_dir)
     workspace: BaseWorkspace
+    print ("initialization of init_net is before the loading the model")
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
     
     # get policy from workspace
@@ -57,8 +59,10 @@ def main(checkpoint, output_dir, device, override):
     env_runner = hydra.utils.instantiate(
         cfg.task.env_runner,
         output_dir=output_dir)
-    runner_log = env_runner.run(policy)
-    
+    if isinstance(policy, BaseLowdimProbPolicy):
+        runner_log = env_runner.run_prob(policy, cfg.eval.stochastic, cfg.eval.clamping)
+    else:
+        runner_log = env_runner.run(policy)
     # dump log to json
     json_log = dict()
     for key, value in runner_log.items():

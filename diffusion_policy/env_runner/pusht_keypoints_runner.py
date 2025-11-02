@@ -17,6 +17,7 @@ from diffusion_policy.policy.base_lowdim_policy import BaseLowdimPolicy
 from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
+import time 
 
 class PushTKeypointsRunner(BaseLowdimRunner):
     def __init__(self,
@@ -230,8 +231,12 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                     obs_dict["obs"] = obs_dict['obs'] - self.offset
 
                 # run policy
+                #start_time = time.perf_counter()
                 with torch.no_grad():
                     action_dict = policy.predict_action(obs_dict)
+                #end_time = time.perf_counter()
+                #elapsed_time = end_time - start_time
+                #print (f"Elapsed time:{elapsed_time} seconds")
 
                 # device_transfer
                 np_action_dict = dict_apply(action_dict,
@@ -299,134 +304,137 @@ class PushTKeypointsRunner(BaseLowdimRunner):
         return log_data
 
 
-def run_prob(self, policy: BaseLowdimProbPolicy, stochastic, clamping):
-        device = policy.device
-        dtype = policy.dtype
+    def run_prob(self, policy: BaseLowdimProbPolicy, stochastic=False, clamping=False):
+            device = policy.device
+            dtype = policy.dtype
 
-        env = self.env
+            env = self.env
 
-        # plan for rollout
-        n_envs = len(self.env_fns)
-        n_inits = len(self.env_init_fn_dills)
-        n_chunks = math.ceil(n_inits / n_envs)
+            # plan for rollout
+            n_envs = len(self.env_fns)
+            n_inits = len(self.env_init_fn_dills)
+            n_chunks = math.ceil(n_inits / n_envs)
 
-        # allocate data
-        all_video_paths = [None] * n_inits
-        all_rewards = [None] * n_inits
+            # allocate data
+            all_video_paths = [None] * n_inits
+            all_rewards = [None] * n_inits
 
-        for chunk_idx in range(n_chunks):
-            start = chunk_idx * n_envs
-            end = min(n_inits, start + n_envs)
-            this_global_slice = slice(start, end)
-            this_n_active_envs = end - start
-            this_local_slice = slice(0,this_n_active_envs)
-            
-            this_init_fns = self.env_init_fn_dills[this_global_slice]
-            n_diff = n_envs - len(this_init_fns)
-            if n_diff > 0:
-                this_init_fns.extend([self.env_init_fn_dills[0]]*n_diff)
-            assert len(this_init_fns) == n_envs
-
-            # init envs
-            env.call_each('run_dill_function', 
-                args_list=[(x,) for x in this_init_fns])
-
-            # start rollout
-            obs = env.reset()
-            past_action = None
-            policy.reset()
-
-            pbar = tqdm.tqdm(total=self.max_steps, desc=f"Eval PushtKeypointsRunner {chunk_idx+1}/{n_chunks}", 
-                leave=False, mininterval=self.tqdm_interval_sec)
-            done = False
-            consecutive_step = 0
-            while not done:
-                Do = obs.shape[-1] // 2
-                # create obs dict
-                np_obs_dict = {
-                    # handle n_latency_steps by discarding the last n_latency_steps
-                    'obs': obs[...,:self.n_obs_steps,:Do].astype(np.float32),
-                    'obs_mask': obs[...,:self.n_obs_steps,Do:] > 0.5
-                }
-                if self.past_action and (past_action is not None):
-                    # TODO: not tested
-                    np_obs_dict['past_action'] = past_action[
-                        :,-(self.n_obs_steps-1):].astype(np.float32)
+            for chunk_idx in range(n_chunks):
+                start = chunk_idx * n_envs
+                end = min(n_inits, start + n_envs)
+                this_global_slice = slice(start, end)
+                this_n_active_envs = end - start
+                this_local_slice = slice(0,this_n_active_envs)
                 
-                # device transfer
-                obs_dict = dict_apply(np_obs_dict, 
-                    lambda x: torch.from_numpy(x).to(
-                        device=device))
+                this_init_fns = self.env_init_fn_dills[this_global_slice]
+                n_diff = n_envs - len(this_init_fns)
+                if n_diff > 0:
+                    this_init_fns.extend([self.env_init_fn_dills[0]]*n_diff)
+                assert len(this_init_fns) == n_envs
 
-                if self.out_of_dist:
-                    ## no need for normalization
-                    obs_dict["obs"] = obs_dict['obs'] - self.offset
+                # init envs
+                env.call_each('run_dill_function', 
+                    args_list=[(x,) for x in this_init_fns])
 
-                # run policy
-                with torch.no_grad():
-                    action_dict = policy.predict_action(obs_dict, stochastic=stochastic, clamping=clamping)
+                # start rollout
+                obs = env.reset()
+                past_action = None
+                policy.reset()
 
-                # device_transfer
-                np_action_dict = dict_apply(action_dict,
-                    lambda x: x.detach().to('cpu').numpy())
+                pbar = tqdm.tqdm(total=self.max_steps, desc=f"Eval PushtKeypointsRunner {chunk_idx+1}/{n_chunks}", 
+                    leave=False, mininterval=self.tqdm_interval_sec)
+                done = False
+                consecutive_step = 0
+                while not done:
+                    Do = obs.shape[-1] // 2
+                    # create obs dict
+                    np_obs_dict = {
+                        # handle n_latency_steps by discarding the last n_latency_steps
+                        'obs': obs[...,:self.n_obs_steps,:Do].astype(np.float32),
+                        'obs_mask': obs[...,:self.n_obs_steps,Do:] > 0.5
+                    }
+                    if self.past_action and (past_action is not None):
+                        # TODO: not tested
+                        np_obs_dict['past_action'] = past_action[
+                            :,-(self.n_obs_steps-1):].astype(np.float32)
+                    
+                    # device transfer
+                    obs_dict = dict_apply(np_obs_dict, 
+                        lambda x: torch.from_numpy(x).to(
+                            device=device))
 
-                # handle latency_steps, we discard the first n_latency_steps actions
-                # to simulate latency
-                action = np_action_dict['action'][:,self.n_latency_steps:]
+                    if self.out_of_dist:
+                        ## no need for normalization
+                        obs_dict["obs"] = obs_dict['obs'] - self.offset
 
-                if self.out_of_dist:
-                    action = action + self.offset
-                
-                # apply noise to the actions for a couple of consecutive steps
-                if self.add_noise:
-                    rng = np.random.default_rng(seed=42 + consecutive_step)
-                    if consecutive_step <= self.n_add_dis:
-                        noise = 50*rng.random(action.shape)
-                        action = action + noise
-                        consecutive_step += 1
-                
-                # step env
-                obs, reward, done, info = env.step(action)
-                done = np.all(done)
-                past_action = action
+                    # run policy
+                    #start_time = time.perf_counter()
+                    with torch.no_grad():
+                        action_dict = policy.predict_action(obs_dict, stochastic=stochastic, clamping=clamping)
+                    #end_time = time.perf_counter()
+                    #elapsed_time = end_time - start_time
+                    #print (f"Elapsed time:{elapsed_time} seconds")
+                    # device_transfer
+                    np_action_dict = dict_apply(action_dict,
+                        lambda x: x.detach().to('cpu').numpy())
 
-                # update pbar
-                pbar.update(action.shape[1])
-            pbar.close()
+                    # handle latency_steps, we discard the first n_latency_steps actions
+                    # to simulate latency
+                    action = np_action_dict['action'][:,self.n_latency_steps:]
 
-            # collect data for this round
-            all_video_paths[this_global_slice] = env.render()[this_local_slice]
-            all_rewards[this_global_slice] = env.call('get_attr', 'reward')[this_local_slice]
-        # import pdb; pdb.set_trace()
+                    if self.out_of_dist:
+                        action = action + self.offset
+                    
+                    # apply noise to the actions for a couple of consecutive steps
+                    if self.add_noise:
+                        rng = np.random.default_rng(seed=42 + consecutive_step)
+                        if consecutive_step <= self.n_add_dis:
+                            noise = 50*rng.random(action.shape)
+                            action = action + noise
+                            consecutive_step += 1
+                    
+                    # step env
+                    obs, reward, done, info = env.step(action)
+                    done = np.all(done)
+                    past_action = action
 
-        # log
-        max_rewards = collections.defaultdict(list)
-        log_data = dict()
-        # results reported in the paper are generated using the commented out line below
-        # which will only report and average metrics from first n_envs initial condition and seeds
-        # fortunately this won't invalidate our conclusion since
-        # 1. This bug only affects the variance of metrics, not their mean
-        # 2. All baseline methods are evaluated using the same code
-        # to completely reproduce reported numbers, uncomment this line:
-        # for i in range(len(self.env_fns)):
-        # and comment out this line
-        for i in range(n_inits):
-            seed = self.env_seeds[i]
-            prefix = self.env_prefixs[i]
-            max_reward = np.max(all_rewards[i])
-            max_rewards[prefix].append(max_reward)
-            log_data[prefix+f'sim_max_reward_{seed}'] = max_reward
+                    # update pbar
+                    pbar.update(action.shape[1])
+                pbar.close()
 
-            # visualize sim
-            video_path = all_video_paths[i]
-            if video_path is not None:
-                sim_video = wandb.Video(video_path)
-                log_data[prefix+f'sim_video_{seed}'] = sim_video
+                # collect data for this round
+                all_video_paths[this_global_slice] = env.render()[this_local_slice]
+                all_rewards[this_global_slice] = env.call('get_attr', 'reward')[this_local_slice]
+            # import pdb; pdb.set_trace()
 
-        # log aggregate metrics
-        for prefix, value in max_rewards.items():
-            name = prefix+'mean_score'
-            value = np.mean(value)
-            log_data[name] = value
+            # log
+            max_rewards = collections.defaultdict(list)
+            log_data = dict()
+            # results reported in the paper are generated using the commented out line below
+            # which will only report and average metrics from first n_envs initial condition and seeds
+            # fortunately this won't invalidate our conclusion since
+            # 1. This bug only affects the variance of metrics, not their mean
+            # 2. All baseline methods are evaluated using the same code
+            # to completely reproduce reported numbers, uncomment this line:
+            # for i in range(len(self.env_fns)):
+            # and comment out this line
+            for i in range(n_inits):
+                seed = self.env_seeds[i]
+                prefix = self.env_prefixs[i]
+                max_reward = np.max(all_rewards[i])
+                max_rewards[prefix].append(max_reward)
+                log_data[prefix+f'sim_max_reward_{seed}'] = max_reward
 
-        return log_data
+                # visualize sim
+                video_path = all_video_paths[i]
+                if video_path is not None:
+                    sim_video = wandb.Video(video_path)
+                    log_data[prefix+f'sim_video_{seed}'] = sim_video
+
+            # log aggregate metrics
+            for prefix, value in max_rewards.items():
+                name = prefix+'mean_score'
+                value = np.mean(value)
+                log_data[name] = value
+
+            return log_data

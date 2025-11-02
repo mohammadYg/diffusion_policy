@@ -38,10 +38,9 @@ policy_prob:
     # Bayesian parameters
     rho_prior: -3.0
     prior_dist: 'gaussian'
-    device: 'cuda'
     init_prior: 'weights'
-    init_net: "data/outputs/2025.10.20/14.45.53_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0050-nll_bpd=-9.304.ckpt"
-    init_net_prior: ${policy_prob.model.init_net} # Separate prior initialization
+    init_net: "data/outputs/2025.10.30/16.25.02_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0100-test_mean_score=0.803.ckpt"
+    init_net_prior: "data/outputs/2025.10.30/16.25.02_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0100-test_mean_score=0.803.ckpt" # Separate prior initialization
     # Output transformation parameters
     output_transform_type: 'none'  # 'clamp', 'tanh', or 'none'
     output_clamp_min: -1.0
@@ -110,20 +109,20 @@ training:
   debug: False
   resume: False
   retrain: False
-  desired_ckpt_path: "data/outputs/2025.09.24/23.00.59_train_diffusion_unet_lowdim_with_PAC_Bayes_bounds_pusht_lowdim/checkpoints/epoch=0090-test_mean_score=0.621.ckpt"
+  desired_ckpt_path: "data/outputs/2025.09.28/18.20.42_train_diffusion_unet_lowdim_with_PAC_Bayes_bounds_pusht_lowdim/checkpoints/epoch=0100-test_mean_score=0.735.ckpt"
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 1000
+  num_epochs: 4500
   gradient_accumulate_every: 1
-  use_ema: False
+  use_ema: True
   # training loop control
   # in epochs
   rollout_every: 50
   checkpoint_every: 50
   val_every: 50
-  sample_every: 50
-  PAC_Bayes_every: 2000
+  sample_every: 5000
+  PAC_Bayes_every: 20000
   nll_every: 50
   # steps per epoch
   max_train_steps: null
@@ -139,15 +138,15 @@ training:
   # Bayesian NN
   init_net: True
   init_net_prior: True
-  stochastic: True
+  stochastic: False
   clamping: False
   bounded: False
   delta: 0.025
 
 eval:
-  stochastic: True
+  stochastic: False
   clamping: False
-  eval: 0.05
+  delta: 0.05
   mc_sampling: 1000
 
 logging:

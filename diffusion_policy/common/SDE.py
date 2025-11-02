@@ -90,21 +90,21 @@ class SDE(abc.ABC):
       def T(self):
         return T
 
-      def sde(self, x, t, local_cond, global_cond):
+      def sde(self, x, t, local_cond, global_cond, stochastic = False, clamping = False):
         """Create the drift and diffusion functions for the reverse SDE/ODE."""
         drift, diffusion = sde_fn(x, t)
         # print ("drift : ", drift)
         # print ("diffusion : ", diffusion)
-        score = score_fn(x, t, local_cond, global_cond)
+        score = score_fn(x, t, local_cond, global_cond, stochastic=stochastic, clamping=clamping)
         drift = drift - diffusion[:, None, None] ** 2 * score * (0.5 if self.probability_flow else 1.)
         # Set the diffusion function to zero for ODEs.
         diffusion = 0. if self.probability_flow else diffusion
         return drift, diffusion
 
-      def discretize(self, x, t, local_cond, global_cond):
+      def discretize(self, x, t, local_cond, global_cond, stochastic = False, clamping = False):
         """Create discretized iteration rules for the reverse diffusion sampler."""
         f, G = discretize_fn(x, t)
-        rev_f = f - G[:, None, None] ** 2 * score_fn(x, t, local_cond, global_cond) * (0.5 if self.probability_flow else 1.)
+        rev_f = f - G[:, None, None] ** 2 * score_fn(x, t, local_cond, global_cond, stochastic=stochastic, clamping=clamping) * (0.5 if self.probability_flow else 1.)
         rev_G = torch.zeros_like(G) if self.probability_flow else G
         return rev_f, rev_G
 
@@ -145,7 +145,7 @@ class VPSDE(SDE):
   #         return (1 - w) * betas[low] + w * betas[high]
   #     return beta_t
   
-  def beta_for_alpha_bar(self, tt, min_beta = 0.1, max_beta=100.0):
+  def beta_for_alpha_bar(self, tt, min_beta = 0.1, max_beta=200.0):
     """
     Enhanced continuous beta(t) with safety checks.
     
@@ -172,14 +172,12 @@ class VPSDE(SDE):
         raise TypeError(f"Expected t to be float or tensor, got {type(t)}")
     
     # t is already between [eps, 1-eps)
-    beta_t = self.beta_0 + t * (self.beta_1 - self.beta_0)
-    # if self.scheduler.config.beta_schedule=="linear":
-    #   beta_t = self.beta_0 + t * (self.beta_1 - self.beta_0)
-    # elif self.scheduler.config.beta_schedule=="squaredcos_cap_v2":
-    #   # print ("t: ", t)
-    #   beta_t = self.beta_for_alpha_bar(t)
-    # else:
-    #   raise ValueError("Beta scheduler is not squaredcos_cap_v2 or linear")
+    if self.scheduler.config.beta_schedule=="linear":
+      beta_t = self.beta_0 + t * (self.beta_1 - self.beta_0)
+    elif self.scheduler.config.beta_schedule=="squaredcos_cap_v2":
+      beta_t = self.beta_for_alpha_bar(t)
+    else:
+      raise ValueError("Beta scheduler is not squaredcos_cap_v2 or linear")
 
     drift = -0.5 * beta_t[:, None, None] * x
     # print ("beta:", beta_t)

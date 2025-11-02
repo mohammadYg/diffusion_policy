@@ -9,7 +9,7 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
-from diffusion_policy.model.diffusion.conditional_prob_unet1d import ProbConditionalResidualBlock1D
+from diffusion_policy.model.diffusion.conditional_prob_unet1d import BayesianConditionalUnet1D
 from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from diffusion_policy.common.SDE import VPSDE
 from diffusion_policy.common.likelihood import get_likelihood_fn
@@ -21,7 +21,7 @@ import numpy as np
 
 class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     def __init__(self, 
-            model: ProbConditionalResidualBlock1D,
+            model: BayesianConditionalUnet1D,
             noise_scheduler: DDPMScheduler,
             horizon, 
             obs_dim, 
@@ -247,51 +247,57 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         noisy_trajectory[condition_mask] = trajectory[condition_mask]
         
         # Predict the noise residual
-        if not self.model.training:
-            error_mc = 0.0
-            for _ in range (mc_sampling):
-                pred = self.model(noisy_trajectory, timesteps, 
-                    local_cond=local_cond, global_cond=global_cond,
-                    stochastic = stochastic, clamping = clamping)
+        # if not self.model.training:
+        #     error_mc = 0.0
+        #     for _ in range (mc_sampling):
+        #         pred = self.model(noisy_trajectory, timesteps, 
+        #             local_cond=local_cond, global_cond=global_cond,
+        #             stochastic = stochastic, clamping = clamping)
 
-                pred_type = self.noise_scheduler.config.prediction_type 
-                if pred_type == 'epsilon':
-                    target = noise
-                elif pred_type == 'sample':
-                    target = trajectory
-                else:
-                    raise ValueError(f"Unsupported prediction type {pred_type}")
+        #         pred_type = self.noise_scheduler.config.prediction_type 
+        #         if pred_type == 'epsilon':
+        #             target = noise
+        #         elif pred_type == 'sample':
+        #             target = trajectory
+        #         else:
+        #             raise ValueError(f"Unsupported prediction type {pred_type}")
 
-                loss_dm = F.mse_loss(pred, target, reduction='none')
-                loss_dm = loss_dm * loss_mask.type(loss_dm.dtype)
-                loss_dm = reduce(loss_dm, 'b ... -> b (...)', 'mean')
-                loss_dm = loss_dm.mean()
-                error_mc += loss_dm
-            loss_emp = error_mc/mc_sampling
+        #         loss_dm = F.mse_loss(pred, target, reduction='none')
+        #         loss_dm = loss_dm * loss_mask.type(loss_dm.dtype)
+        #         loss_dm = reduce(loss_dm, 'b ... -> b (...)', 'mean')
+        #         loss_dm = loss_dm.mean()
+        #         error_mc += loss_dm
+        #     loss_emp = error_mc/mc_sampling
+        # else:
+        pred = self.model(noisy_trajectory, timesteps, 
+            local_cond=local_cond, global_cond=global_cond,
+            stochastic = stochastic, clamping = clamping)
+
+        pred_type = self.noise_scheduler.config.prediction_type 
+        if pred_type == 'epsilon':
+            target = noise
+        elif pred_type == 'sample':
+            target = trajectory
         else:
-            pred = self.model(noisy_trajectory, timesteps, 
-                local_cond=local_cond, global_cond=global_cond,
-                stochastic = stochastic, clamping = clamping)
+            raise ValueError(f"Unsupported prediction type {pred_type}")
 
-            pred_type = self.noise_scheduler.config.prediction_type 
-            if pred_type == 'epsilon':
-                target = noise
-            elif pred_type == 'sample':
-                target = trajectory
-            else:
-                raise ValueError(f"Unsupported prediction type {pred_type}")
-
-            loss_dm = F.mse_loss(pred, target, reduction='none')
-            loss_dm = loss_dm * loss_mask.type(loss_dm.dtype)
-            loss_dm = reduce(loss_dm, 'b ... -> b (...)', 'mean')
-            loss_dm = loss_dm.mean()
-            loss_emp = loss_dm
+        loss_dm = F.mse_loss(pred, target, reduction='none')
+        loss_dm = loss_dm * loss_mask.type(loss_dm.dtype)
+        loss_dm = reduce(loss_dm, 'b ... -> b (...)', 'mean')
+        loss_dm = loss_dm.mean()
+        loss_emp = loss_dm
         
+        landa = 1.0
         kl = self.model.compute_kl()
         loss_kl = torch.div(
-                kl + np.log((2*np.sqrt(n_bound))/delta), 2*n_bound)
-        loss_sum = loss_emp + loss_kl
-        return loss_sum
+                landa*kl + np.log((2*np.sqrt(n_bound))/delta), 2*n_bound)
+        # scale the empirical risk to be inside [0,1]
+        scale = 2.0
+        if bounded:
+            loss_sum = loss_emp/scale + loss_kl
+        else:
+            loss_sum = loss_emp + loss_kl
+        return loss_sum, loss_emp, kl
 
     # ========= Compute Reconstruction Loss of PAC-Bayes Bounds for case where we do inference from last step ============
     def compute_reconst_loss_T(self, batch, loss_type, stochastic=False, clamping=False):
@@ -477,7 +483,6 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         
         return torch.flip(k_theta, dims=[0]), k_theta_prod
     
-
 # ========================== Compute upper bound on nll ==========================
     def noisy_channel(self, x, logsnr):
         '''
@@ -560,7 +565,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         return loss  # *logsnr integration, see paper
 
     @torch.no_grad()
-    def test_nll(self, dataloader, epoch, npoints=100, xinterval=None, stocastic = False, clamping=False):
+    def test_nll(self, dataloader, epoch, npoints=100, xinterval=None, stochastic = False, clamping=False):
         """Calculate expected NLL on data at test time.  Main difference is that we can clamp the integration
         range, because negative values of MMSE gap we can switch to Gaussian decoder to get zero.
         npoints - number of points to use in integration
@@ -644,7 +649,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
                 n_samples = len(data)
                 total_samples += n_samples
 
-                val_loss += self.nll([data, ] + batch[1:], xinterval=xinterval, stochastic=stocastic, clamping=clamping).cpu() * n_samples
+                val_loss += self.nll([data, ] + batch[1:], xinterval=xinterval, stochastic=stochastic, clamping=clamping).cpu() * n_samples
 
                 mses.append(torch.zeros(n_samples, len(logsnr)))
                 for j, this_logsnr in enumerate(logsnr):
@@ -652,7 +657,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
 
                     # Regular MSE, clamps predictions, but does not discretize
                     this_mse = self.mse([data, ] + batch[1:], this_logsnr_broadcast, mse_type='epsilon',
-                                        xinterval=xinterval, stochastic=stocastic, clamping=clamping).cpu()
+                                        xinterval=xinterval, stochastic=stochastic, clamping=clamping).cpu()
                     mses[-1][:, j] = this_mse
 
         val_loss /= total_samples
@@ -764,8 +769,8 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         weights = scale * torch.tanh(clip / 2) / (torch.sigmoid((logsnr - loc)/scale) * torch.sigmoid(-(logsnr - loc)/scale))
         return logsnr, weights
 
-    def nll_sde(self, dataloader):
-        SDE = VPSDE(self.noise_scheduler, beta_min=0.1, beta_max=20.0, N=100)
+    def nll_sde(self, dataloader, stochastic=False, clamping=False):
+        SDE = VPSDE(self.noise_scheduler, beta_min=0.1, beta_max=20.0, N=1000)
         logp_fn = get_likelihood_fn(SDE, continuous = False, exact = False)
 
         NLL = 0
@@ -825,7 +830,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
                     cond_mask[:,:To,Da:] = True
                     trajectory = torch.cat([naction, nobs], dim=-1)
 
-                logp, z, nfe = logp_fn (self.model, trajectory, local_cond, global_cond)
+                logp, z, nfe = logp_fn (self.model, trajectory, local_cond, global_cond, stochastic=stochastic, clamping=clamping)
                 NLL+=logp.sum()
 
         return NLL/n_samples

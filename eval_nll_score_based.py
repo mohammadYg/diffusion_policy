@@ -18,6 +18,7 @@ import wandb
 import json
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
+from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
 from torch.utils.data import DataLoader
 from omegaconf import OmegaConf
 
@@ -64,7 +65,10 @@ def main(checkpoint, output_dir, device, override):
     val_dataset = dataset.get_validation_dataset()
     val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
-    NLL = policy.nll_sde(val_dataloader)
+    if isinstance(policy, BaseLowdimProbPolicy):
+        NLL = policy.nll_sde(val_dataloader, stochastic = cfg.eval.stochastic, clamping = cfg.eval.clamping)
+    else:
+        NLL = policy.nll_sde(val_dataloader)
     print ('nll_bpd', NLL)
 
 if __name__ == '__main__':
