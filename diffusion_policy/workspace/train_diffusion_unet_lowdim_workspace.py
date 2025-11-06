@@ -302,10 +302,10 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             
                             #step_log['val_lips_const_prod'] = val_lips_const_prod.item()
 
-                        # Compute upper bound on NLL
-                        if (self.epoch % cfg.training.nll_every)==0:
-                            NLL = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None)
-                            step_log['nll_bpd'] = NLL
+                        # # Compute upper bound on NLL
+                        # if (self.epoch % cfg.training.nll_every)==0:
+                        #     NLL = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None)
+                        #     step_log['nll_bpd'] = NLL
 
                 # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:
@@ -352,13 +352,13 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     # since save_checkpoint uses threads.
                     # therefore at this point the file might have been empty!
                     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
-                    topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(metric_dict)
+                    # topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(metric_dict)
 
                     if topk_ckpt_path is not None:
                         self.save_checkpoint(path=topk_ckpt_path)
 
-                    if topk_ckpt_path_nll is not None:
-                        self.save_checkpoint(path=topk_ckpt_path_nll)
+                    # if topk_ckpt_path_nll is not None:
+                    #     self.save_checkpoint(path=topk_ckpt_path_nll)
                 # ========= eval end for this epoch ==========
                 policy.train()
 

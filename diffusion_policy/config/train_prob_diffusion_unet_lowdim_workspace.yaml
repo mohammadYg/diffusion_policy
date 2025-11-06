@@ -39,8 +39,10 @@ policy_prob:
     rho_prior: -3.0
     prior_dist: 'gaussian'
     init_prior: 'weights'
-    init_net: "data/outputs/2025.10.30/16.25.02_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0100-test_mean_score=0.803.ckpt"
+    #init_net: "data/outputs/2025.10.30/16.25.02_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0100-test_mean_score=0.803.ckpt"
+    init_net: null
     init_net_prior: "data/outputs/2025.10.30/16.25.02_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0100-test_mean_score=0.803.ckpt" # Separate prior initialization
+    #init_net_prior: null
     # Output transformation parameters
     output_transform_type: 'none'  # 'clamp', 'tanh', or 'none'
     output_clamp_min: -1.0
@@ -142,6 +144,7 @@ training:
   clamping: False
   bounded: False
   delta: 0.025
+  kl_weight: 1
 
 eval:
   stochastic: False

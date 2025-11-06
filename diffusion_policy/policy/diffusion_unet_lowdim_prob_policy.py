@@ -193,7 +193,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def compute_bound(self, batch, n_bound, delta, mc_sampling=1000, stochastic = True, clamping = False, bounded = False):
+    def compute_bound(self, batch, n_bound, delta, kl_weight, mc_sampling=1000, stochastic = True, clamping = False, bounded = False):
         # normalize input
         assert 'valid_mask' not in batch
         nbatch = self.normalizer.normalize(batch)
@@ -287,16 +287,27 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         loss_dm = loss_dm.mean()
         loss_emp = loss_dm
         
-        landa = 1.0
         kl = self.model.compute_kl()
+        
         loss_kl = torch.div(
-                landa*kl + np.log((2*np.sqrt(n_bound))/delta), 2*n_bound)
+                2*(kl_weight*kl + np.log((2*np.sqrt(n_bound))/delta)), n_bound)
+
         # scale the empirical risk to be inside [0,1]
         scale = 2.0
         if bounded:
-            loss_sum = loss_emp/scale + loss_kl
+            loss_sum = loss_emp/scale + loss_kl + torch.sqrt((loss_emp/scale)*loss_kl)
         else:
-            loss_sum = loss_emp + loss_kl
+            loss_sum = loss_emp + loss_kl + torch.sqrt(loss_emp*loss_kl)
+
+        # loss_kl = torch.div(
+        #         kl_weight*kl + np.log((2*np.sqrt(n_bound))/delta), 2*n_bound)
+        # # scale the empirical risk to be inside [0,1]
+        # scale = 2.0
+        # if bounded:
+        #     loss_sum = loss_emp/scale + torch.sqrt(loss_kl)
+        # else:
+        #     loss_sum = loss_emp + torch.sqrt(loss_kl)
+        
         return loss_sum, loss_emp, kl
 
     # ========= Compute Reconstruction Loss of PAC-Bayes Bounds for case where we do inference from last step ============

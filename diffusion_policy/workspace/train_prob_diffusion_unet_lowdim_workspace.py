@@ -89,7 +89,6 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
         dataset: BaseLowdimDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseLowdimDataset)
-        train_dataloader = DataLoader(dataset, **cfg.dataloader)
         normalizer = dataset.get_normalizer()
 
         # configure validation dataset
@@ -97,7 +96,8 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
         ## configure seperate dataset for PAC-Bayes
-        pac_bayes_dataset = dataset.get_pac_bayes_dataset()
+        #pac_bayes_dataset = dataset.get_pac_bayes_dataset()
+        pac_bayes_dataset = dataset
         pac_dataloader = DataLoader(pac_bayes_dataset, **cfg.pac_dataloader) if len (pac_bayes_dataset) > 0 else None
         
         ## configure dataset for covariance_spectrum
@@ -116,7 +116,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
             num_training_steps=(
-                len(train_dataloader) * cfg.training.num_epochs) \
+                len(pac_dataloader) * cfg.training.num_epochs) \
                     // cfg.training.gradient_accumulate_every,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
@@ -193,8 +193,6 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 step_log = dict()
                 # ========= train for this epoch ==========
                 train_losses = list()
-                # with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
-                #         leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                 with tqdm.tqdm(pac_dataloader, desc=f"Training epoch {self.epoch}", 
                     leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     
@@ -204,7 +202,9 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
 
-                        raw_loss, emp_risk_train, kl_train = self.model.compute_bound(batch, n_bound=len(pac_dataloader.dataset), delta=cfg.training.delta, mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.training.stochastic, 
+                        raw_loss, emp_risk_train, kl_train = self.model.compute_bound(batch, n_bound=len(pac_dataloader.dataset), delta=cfg.training.delta, 
+                                                                                      kl_weight=cfg.training.kl_weight, 
+                                                                                      mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.training.stochastic, 
                                                            clamping=cfg.training.clamping, bounded=cfg.training.bounded)
                             
                         loss = raw_loss / cfg.training.gradient_accumulate_every
@@ -233,7 +233,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             'lr': lr_scheduler.get_last_lr()[0]
                         }
 
-                        is_last_batch = (batch_idx == (len(train_dataloader)-1))
+                        is_last_batch = (batch_idx == (len(pac_dataloader)-1))
                         if not is_last_batch:
                             # log of last step is combined with validation and rollout
                             wandb_run.log(step_log, step=self.global_step)
@@ -283,7 +283,9 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 
                                 # device transfer
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                bound, emp_loss_test, kl_test = policy.compute_bound(batch, n_bound=len(val_dataloader.dataset), delta=cfg.eval.delta, mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.eval.stochastic,
+                                bound, emp_loss_test, kl_test = policy.compute_bound(batch, n_bound=len(val_dataloader.dataset), delta=cfg.eval.delta, 
+                                                        kl_weight=cfg.training.kl_weight,
+                                                        mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.eval.stochastic,
                                                         clamping=cfg.eval.clamping, bounded = cfg.training.bounded)
                                 val_losses_noise_pred.append(emp_loss_test.item() * n_samples)
 
@@ -317,11 +319,11 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             #step_log['emp_risk_test'] = emp_loss_test.item()
                             #step_log['kl_test'] = kl_test.item()
 
-                        if (self.epoch % cfg.training.nll_every)==0:
-                                    NLL = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None,
-                                                        stochastic=cfg.eval.stochastic,
-                                                        clamping=cfg.eval.clamping)
-                                    step_log['nll_bpd'] = NLL 
+                        # if (self.epoch % cfg.training.nll_every)==0:
+                        #             NLL = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None,
+                        #                                 stochastic=cfg.eval.stochastic,
+                        #                                 clamping=cfg.eval.clamping)
+                        #             step_log['nll_bpd'] = NLL 
 
                 # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:
@@ -370,13 +372,13 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     # since save_checkpoint uses threads.
                     # therefore at this point the file might have been empty!
                     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
-                    topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(metric_dict)
+                    #topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(metric_dict)
 
                     if topk_ckpt_path is not None:
                         self.save_checkpoint(path=topk_ckpt_path)
 
-                    if topk_ckpt_path_nll is not None:
-                        self.save_checkpoint(path=topk_ckpt_path_nll)
+                    # if topk_ckpt_path_nll is not None:
+                    #     self.save_checkpoint(path=topk_ckpt_path_nll)
                 # ========= eval end for this epoch ==========
                 policy.train()
 

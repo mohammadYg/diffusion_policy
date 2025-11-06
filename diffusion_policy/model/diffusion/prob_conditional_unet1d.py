@@ -28,19 +28,6 @@ class SinusoidalPosEmb(nn.Module):
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
     
-def regression_output_transform(x, clamping=True, min_val=-1.0, max_val=1.0):
-    """Transform output for regression with clamping between min_val and max_val"""
-    if clamping:
-        x = torch.clamp(x, min_val, max_val)
-    return x
-
-# Or use a smooth clamping function like tanh
-def tanh_output_transform(x, clamping=True):
-    """Use tanh to smoothly constrain outputs between -1 and 1"""
-    if clamping:
-        x = torch.tanh(x)
-    return x
-
 def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
     # type: (Tensor, float, float, float, float) -> Tensor
     """Fills the input Tensor with values drawn from a truncated
@@ -203,31 +190,6 @@ class Laplace(nn.Module):
         kl_div = (term1 + term2 + term3 - 1).sum()
         return kl_div
 
-class Lambda_var(nn.Module):
-    """Class for the lambda variable included in the objective
-    flambda
-
-    Parameters
-    ----------
-    lamb : float
-        initial value
-
-    n : int
-        Scaling parameter (lamb_scaled is between 1/sqrt(n) and 1)
-
-    """
-
-    def __init__(self, lamb, n):
-        super().__init__()
-        self.lamb = nn.Parameter(torch.tensor([lamb]), requires_grad=True)
-        self.min = 1/np.sqrt(n)
-
-    @property
-    def lamb_scaled(self):
-        # We restrict lamb_scaled to be between 1/sqrt(n) and 1.
-        m = nn.Sigmoid()
-        return (m(self.lamb) * (1-self.min) + self.min)
-    
 class ProbLinear(nn.Module):
     """Implementation of a Probabilistic Linear layer.
 
@@ -594,6 +556,22 @@ class ProbConvTranspose1d(nn.Module):
                                  output_padding=self.output_padding, dilation=self.dilation, 
                                  groups=self.groups)
 
+class Downsample1d(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.conv = nn.Conv1d(dim, dim, 3, 2, 1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+class Upsample1d(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.conv = nn.ConvTranspose1d(dim, dim, 4, 2, 1)
+
+    def forward(self, x):
+        return self.conv(x)
+    
 class ProbDownsample1d(nn.Module):
     ''' This class is initialized with nn.conv1D layer from a deterministic network
     the init_layer and init_layer_prior must be 'Downsample1d' layer from deterministic network
@@ -676,26 +654,22 @@ class ProbConv1dBlock(nn.Module):
     
     def compute_kl(self):
         return self.conv.kl_div
-    
+
 
 class ConditionalResidualBlock1D(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        cond_dim,
-        kernel_size=3,
-        n_groups=8,
-        cond_predict_scale=False,
-    ):
+    def __init__(self, 
+            in_channels, 
+            out_channels, 
+            cond_dim,
+            kernel_size=3,
+            n_groups=8,
+            cond_predict_scale=False):
         super().__init__()
 
-        self.blocks = nn.ModuleList(
-            [
-                Conv1dBlock(in_channels, out_channels, kernel_size, n_groups=n_groups),
-                Conv1dBlock(out_channels, out_channels, kernel_size, n_groups=n_groups),
-            ]
-        )
+        self.blocks = nn.ModuleList([
+            Conv1dBlock(in_channels, out_channels, kernel_size, n_groups=n_groups),
+            Conv1dBlock(out_channels, out_channels, kernel_size, n_groups=n_groups),
+        ])
 
         # FiLM modulation https://arxiv.org/abs/1709.07871
         # predicts per-channel scale and bias
@@ -707,37 +681,35 @@ class ConditionalResidualBlock1D(nn.Module):
         self.cond_encoder = nn.Sequential(
             nn.Mish(),
             nn.Linear(cond_dim, cond_channels),
-            Rearrange("batch t -> batch t 1"),
+            Rearrange('batch t -> batch t 1'),
         )
 
         # make sure dimensions compatible
-        self.residual_conv = (
-            nn.Conv1d(in_channels, out_channels, 1)
-            if in_channels != out_channels
-            else nn.Identity()
-        )
+        self.residual_conv = nn.Conv1d(in_channels, out_channels, 1) \
+            if in_channels != out_channels else nn.Identity()
 
     def forward(self, x, cond):
-        """
-        x : [ batch_size x in_channels x horizon ]
-        cond : [ batch_size x cond_dim]
+        '''
+            x : [ batch_size x in_channels x horizon ]
+            cond : [ batch_size x cond_dim]
 
-        returns:
-        out : [ batch_size x out_channels x horizon ]
-        """
+            returns:
+            out : [ batch_size x out_channels x horizon ]
+        '''
         out = self.blocks[0](x)
         embed = self.cond_encoder(cond)
         if self.cond_predict_scale:
-            embed = embed.reshape(embed.shape[0], 2, self.out_channels, 1)
-            scale = embed[:, 0, ...]
-            bias = embed[:, 1, ...]
+            embed = embed.reshape(
+                embed.shape[0], 2, self.out_channels, 1)
+            scale = embed[:,0,...]
+            bias = embed[:,1,...]
             out = scale * out + bias
         else:
             out = out + embed
         out = self.blocks[1](out)
         out = out + self.residual_conv(x)
         return out
-    
+        
 class ProbConditionalResidualBlock1D(nn.Module):
     def __init__(
         self,
@@ -755,58 +727,30 @@ class ProbConditionalResidualBlock1D(nn.Module):
     ):
         super().__init__()
 
-        # Handle init_layer for the convolutional blocks
-        init_conv1dblock1 = init_condresblock.blocks[0] if init_condresblock else None
+        # Extract initial Conv1dBlocks if available
         init_conv1dblock_prior1 = init_condresblock_prior.blocks[0] if init_condresblock_prior else None
-        init_conv1dblock2 = init_condresblock.blocks[1] if init_condresblock else None
         init_conv1dblock_prior2 = init_condresblock_prior.blocks[1] if init_condresblock_prior else None
-        
-        self.blocks = nn.ModuleList(
-            [
-                ProbConv1dBlock(
-                    in_channels, out_channels, kernel_size, 
-                    n_groups=n_groups, rho_prior=rho_prior,
-                    prior_dist=prior_dist,
-                    init_prior=init_prior, 
-                    init_conv1dblock=init_conv1dblock1,
-                    init_conv1dblock_prior=init_conv1dblock_prior1
-                ),
-                ProbConv1dBlock(
-                    out_channels, out_channels, kernel_size,
-                    n_groups=n_groups, rho_prior=rho_prior,
-                    prior_dist=prior_dist,
-                    init_prior=init_prior,
-                    init_conv1dblock=init_conv1dblock2,
-                    init_conv1dblock_prior=init_conv1dblock_prior2
-                ),
-            ]
-        )
+        # Create new Conv1dBlocks
+        self.blocks = nn.ModuleList([
+            Conv1dBlock(in_channels, out_channels, kernel_size, n_groups=n_groups),
+            Conv1dBlock(out_channels, out_channels, kernel_size, n_groups=n_groups),
+        ])
+        # Copy state from prior blocks if given
+        if init_conv1dblock_prior1 is not None:
+            self.blocks[0].load_state_dict(init_conv1dblock_prior1.state_dict())
 
+        if init_conv1dblock_prior2 is not None:
+            self.blocks[1].load_state_dict(init_conv1dblock_prior2.state_dict())
+   
         # FiLM modulation https://arxiv.org/abs/1709.07871
         cond_channels = out_channels
         if cond_predict_scale:
             cond_channels = out_channels * 2
         self.cond_predict_scale = cond_predict_scale
         self.out_channels = out_channels
-        
         # Handle init_layer for conditioning linear
         init_cond_encoder_linear_layer = init_condresblock.cond_encoder[1] if init_condresblock else None
         init_cond_encoder_prior_linear_layer = init_condresblock_prior.cond_encoder[1] if init_condresblock_prior else None
-
-        # # Deterministic conditioning pathway
-        # cond_linear = nn.Linear(cond_dim, cond_channels)
-        # if init_cond_encoder_prior_linear_layer is not None:
-        #     with torch.no_grad():
-        #         cond_linear.weight.copy_(init_cond_encoder_prior_linear_layer.weight)
-        #         if init_cond_encoder_prior_linear_layer.bias is not None:
-        #             cond_linear.bias.copy_(init_cond_encoder_prior_linear_layer.bias)
-
-        # self.cond_encoder = nn.Sequential(
-        #     nn.Mish(),
-        #     cond_linear,
-        #     Rearrange("batch t -> batch t 1"),
-        # )
-
         # Probabilistic conditioning pathway
         self.cond_encoder = nn.Sequential(
             nn.Mish(),
@@ -820,23 +764,33 @@ class ProbConditionalResidualBlock1D(nn.Module):
             ),
             Rearrange("batch t -> batch t 1"),
         )
-
-        # Residual connection with initialization options
-        # Handle init_layer for residual convolution
-        init_residual = init_condresblock.residual_conv if (init_condresblock and not isinstance(init_condresblock.residual_conv, nn.Identity)) else None
-        init_residual_prior = init_condresblock_prior.residual_conv if (init_condresblock_prior and not isinstance(init_condresblock_prior.residual_conv, nn.Identity)) else None
         
-        if in_channels != out_channels:
-            self.residual_conv = ProbConv1d(
-                in_channels, out_channels, kernel_size=1,
-                rho_prior=rho_prior, prior_dist=prior_dist,
-                padding=0,
-                init_prior=init_prior,
-                init_layer=init_residual,
-                init_layer_prior=init_residual_prior
-            )
-        else:
-            self.residual_conv = nn.Identity()
+        # Deterministic Residual Block
+        # make sure dimensions compatible
+        init_residual_prior = init_condresblock_prior.residual_conv if (init_condresblock_prior and not isinstance(init_condresblock_prior.residual_conv, nn.Identity)) else None
+        self.residual_conv = nn.Conv1d(in_channels, out_channels, 1) \
+            if in_channels != out_channels else nn.Identity()
+        if isinstance(init_residual_prior, nn.Conv1d) and isinstance(self.residual_conv, nn.Conv1d):
+            self.residual_conv.load_state_dict(init_residual_prior.state_dict())
+
+        
+        # # Probabilistic Residual Layer
+        # # Residual connection with initialization options
+        # # Handle init_layer for residual convolution
+        # init_residual = init_condresblock.residual_conv if (init_condresblock and not isinstance(init_condresblock.residual_conv, nn.Identity)) else None
+        # init_residual_prior = init_condresblock_prior.residual_conv if (init_condresblock_prior and not isinstance(init_condresblock_prior.residual_conv, nn.Identity)) else None
+        
+        # if in_channels != out_channels:
+        #     self.residual_conv = ProbConv1d(
+        #         in_channels, out_channels, kernel_size=1,
+        #         rho_prior=rho_prior, prior_dist=prior_dist,
+        #         padding=0,
+        #         init_prior=init_prior,
+        #         init_layer=init_residual,
+        #         init_layer_prior=init_residual_prior
+        #     )
+        # else:
+        #     self.residual_conv = nn.Identity()
 
     def forward(self, x, cond, stochastic=False):
         """
@@ -847,10 +801,7 @@ class ProbConditionalResidualBlock1D(nn.Module):
         out : [ batch_size x out_channels x horizon ]
         """
         # First convolutional block
-        out = self.blocks[0](x, stochastic=stochastic)
-        
-        # # FiLM conditioning with deterministic linear layer
-        # embed = self.cond_encoder(cond)
+        out = self.blocks[0](x)
         
         # FiLM conditioning with probabilistic linear layer
         embed = self.cond_encoder[0](cond)  # Mish activation
@@ -866,31 +817,31 @@ class ProbConditionalResidualBlock1D(nn.Module):
             out = out + embed
         
         # Second convolutional block
-        out = self.blocks[1](out, stochastic=stochastic)
+        out = self.blocks[1](out)
         
-        # Residual connection
-        if isinstance(self.residual_conv, nn.Identity):
-            residual = self.residual_conv(x)
-        else:
-            residual = self.residual_conv(x, stochastic=stochastic)
+        # Deterministic Residual connection
+        out = out + self.residual_conv(x)
+
+        ## Probabilistic Residual connection
+        # if isinstance(self.residual_conv, nn.Identity):
+        #     residual = self.residual_conv(x)
+        # else:
+        #     residual = self.residual_conv(x, stochastic=stochastic)
         
-        out = out + residual
+        # out = out + residual
+
         return out
     
     def compute_kl(self):  # Renamed for consistency
         """Get total KL divergence from all probabilistic components"""
         kl_div = 0
         
-        # KL from convolutional blocks
-        kl_div += self.blocks[0].conv.kl_div
-        kl_div += self.blocks[1].conv.kl_div
-        
         # KL from conditioning linear layer
         kl_div += self.cond_encoder[1].kl_div
         
-        # KL from residual convolution (if present)
-        if not isinstance(self.residual_conv, nn.Identity):
-            kl_div += self.residual_conv.kl_div
+        # # KL from residual convolution (if present)
+        # if not isinstance(self.residual_conv, nn.Identity):
+        #     kl_div += self.residual_conv.kl_div
             
         return kl_div
     
@@ -963,11 +914,6 @@ class BayesianConditionalUnet1D(nn.Module):
             
             init_net_prior.eval()
             del workspace
-
-        # Store output transformation parameters
-        self.output_transform_type = output_transform_type
-        self.output_clamp_min = output_clamp_min
-        self.output_clamp_max = output_clamp_max
 
         if output_dim is None:
             output_dim = input_dim
@@ -1156,7 +1102,6 @@ class BayesianConditionalUnet1D(nn.Module):
             init_condresblock_1_prior = init_down_prior[0] if init_down_prior else None
             init_condresblock_2 = init_down[1] if init_down else None
             init_condresblock_2_prior = init_down_prior[1] if init_down_prior else None
-            init_downsample = init_down[2] if init_down else None
             init_downsample_prior = init_down_prior[2] if init_down_prior else None
             
             down_modules.append(
@@ -1188,18 +1133,14 @@ class BayesianConditionalUnet1D(nn.Module):
                             init_condresblock=init_condresblock_2,
                             init_condresblock_prior=init_condresblock_2_prior,
                         ),
-                        ProbDownsample1d(
-                            dim_out, 
-                            rho_prior=rho_prior,
-                            prior_dist=prior_dist,
-                            init_prior=init_prior,
-                            init_downsample1d=init_downsample,
-                            init_downsample1d_prior=init_downsample_prior
-                        ) if not is_last else nn.Identity(),
+                        Downsample1d(dim_out) if not is_last else nn.Identity(),
                     ]
                 )
             )
-        
+            if not is_last and isinstance(init_downsample_prior, nn.Module):
+                down_modules[-1][2].load_state_dict(init_downsample_prior.state_dict())
+
+
         up_modules = nn.ModuleList([])
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
             is_last = ind >= (len(in_out) - 1)
@@ -1212,7 +1153,6 @@ class BayesianConditionalUnet1D(nn.Module):
             init_condresblock_1_prior = init_up_prior[0] if init_up_prior else None
             init_condresblock_2 = init_up[1] if init_up else None
             init_condresblock_2_prior = init_up_prior[1] if init_up_prior else None
-            init_upsample = init_up[2] if init_up else None
             init_upsample_prior = init_up_prior[2] if init_up_prior else None
             
             up_modules.append(
@@ -1244,46 +1184,27 @@ class BayesianConditionalUnet1D(nn.Module):
                             init_condresblock=init_condresblock_2,
                             init_condresblock_prior=init_condresblock_2_prior,
                         ),
-                        ProbUpsample1d(
-                            dim_in,
-                            rho_prior=rho_prior,
-                            prior_dist=prior_dist,
-                            init_prior=init_prior,
-                            init_upsample1d=init_upsample,
-                            init_upsample1d_prior=init_upsample_prior
-                        ) if not is_last else nn.Identity(),
+                        Upsample1d(dim_in) if not is_last else nn.Identity(),
                     ]
                 )
             )
+            if not is_last and isinstance(init_upsample_prior, nn.Module):
+                up_modules[-1][2].load_state_dict(init_upsample_prior.state_dict())
 
         self.dropout = nn.Dropout(0.25) if use_dropout else nn.Identity()
         
         # Replace final conv with probabilistic version
-        init_final_conv = init_net.final_conv if init_net else None
-        init_final_conv_prior = init_net_prior.final_conv if init_net_prior else None
-        
-        init_conv_block = init_final_conv[0] if init_final_conv else None
+        init_final_conv_prior = init_net_prior.final_conv if init_net_prior else None    
         init_conv_block_prior = init_final_conv_prior[0] if init_final_conv_prior else None
-        init_final_layer = init_final_conv[1] if init_final_conv else None
         init_final_layer_prior = init_final_conv_prior[1] if init_final_conv_prior else None
-        
         final_conv = nn.Sequential(
-            ProbConv1dBlock(
-                start_dim, start_dim, kernel_size=kernel_size,
-                n_groups=n_groups, rho_prior=rho_prior,
-                prior_dist=prior_dist,
-                init_prior=init_prior, 
-                init_conv1dblock=init_conv_block,
-                init_conv1dblock_prior=init_conv_block_prior
-            ),
-            ProbConv1d(
-                start_dim, output_dim, kernel_size=1,
-                rho_prior=rho_prior, prior_dist=prior_dist,
-                init_prior=init_prior,
-                init_layer=init_final_layer,
-                init_layer_prior=init_final_layer_prior
-            ),
+            Conv1dBlock(start_dim, start_dim, kernel_size=kernel_size),
+            nn.Conv1d(start_dim, input_dim, 1),
         )
+        if init_conv_block_prior is not None:
+            final_conv[0].load_state_dict(init_conv_block_prior.state_dict())
+        if isinstance(init_final_layer_prior, nn.Conv1d) and isinstance(final_conv[1], nn.Conv1d):
+            final_conv[1].load_state_dict(init_final_layer_prior.state_dict())
 
         self.diffusion_step_encoder = diffusion_step_encoder
         self.local_cond_encoder = local_cond_encoder
@@ -1336,6 +1257,7 @@ class BayesianConditionalUnet1D(nn.Module):
 
             if global_cond is not None:
                 global_feature = torch.cat([global_feature, global_cond], axis=-1)
+        
         elif global_cond is not None:
             global_feature = global_cond
         else:
@@ -1359,10 +1281,7 @@ class BayesianConditionalUnet1D(nn.Module):
                 x = x + h_local[0]
             x = resnet2(x, global_feature, stochastic=stochastic)
             h.append(x)
-            if not isinstance(downsample, nn.Identity):
-                x = downsample(x, stochastic=stochastic)
-            else:
-                x = downsample(x)
+            x = downsample(x)
 
         for mid_module in self.mid_modules:
             x = mid_module(x, global_feature, stochastic=stochastic)
@@ -1373,40 +1292,19 @@ class BayesianConditionalUnet1D(nn.Module):
             if idx == (len(self.up_modules) - 1) and len(h_local) > 0:
                 x = x + h_local[1]
             x = resnet2(x, global_feature, stochastic=stochastic)
-            if not isinstance(upsample, nn.Identity):
-                x = upsample(x, stochastic=stochastic)
-            else:
-                x = upsample(x)
+            x = upsample(x)
 
-        # This works if self.dropout flag is True
-        x = self.dropout(x)
+        #x = self.dropout(x)
         
-        # Apply final convolution with stochastic sampling
-        x = self.final_conv[0](x, stochastic=stochastic)
-        x = self.final_conv[1](x, stochastic=stochastic)
-
-        # Apply output transformation
-        if clamping:
-            x = self._apply_output_transform(x)
+        # Apply deterministic final layer
+        x = self.final_conv(x)
+        
+        # # Apply final convolution with stochastic sampling
+        # x = self.final_conv[0](x, stochastic=stochastic)
+        # x = self.final_conv[1](x, stochastic=stochastic)
 
         x = einops.rearrange(x, "b t h -> b h t")
         return x
-    
-    def _apply_output_transform(self, x):
-        """Apply the selected output transformation"""
-        if self.output_transform_type == 'clamp':
-            return regression_output_transform(
-                x, 
-                clamping=True, 
-                min_val=self.output_clamp_min, 
-                max_val=self.output_clamp_max
-            )
-        elif self.output_transform_type == 'tanh':
-            return tanh_output_transform(x, clamping=True)
-        elif self.output_transform_type == 'none':
-            return x
-        else:
-            raise ValueError(f"Unknown output_transform_type: {self.output_transform_type}")
 
     def compute_kl(self):
         """Compute total KL divergence from all probabilistic components"""
@@ -1442,13 +1340,8 @@ class BayesianConditionalUnet1D(nn.Module):
                 elif hasattr(layer, 'kl_div'):
                     kl_div += layer.kl_div
         
-        # KL from final convolution
-        kl_div += self.final_conv[0].compute_kl()
-        kl_div += self.final_conv[1].kl_div
+        # # KL from final convolution
+        # kl_div += self.final_conv[0].compute_kl()
+        # kl_div += self.final_conv[1].kl_div
         
         return kl_div
-
-    def set_stochastic(self, stochastic=True):
-        """Convenience method to set stochastic sampling mode for all layers"""
-        # This method can be used to easily toggle between sampling modes
-        self.stochastic_mode = stochastic

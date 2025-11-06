@@ -266,134 +266,135 @@ class TrainDiffusionUnetLowdimWithPBBWorkspace(BaseWorkspace):
                 step_log['train_loss'] = train_loss
 
                 # ========= eval for this epoch ==========
-                policy = self.model
-                if cfg.training.use_ema:
-                    policy = self.ema_model
-                policy.eval()
+                if self.epoch>0:
+                    policy = self.model
+                    if cfg.training.use_ema:
+                        policy = self.ema_model
+                    policy.eval()
 
-                # run rollout
-                if (self.epoch % cfg.training.rollout_every) == 0:
-                    runner_log = env_runner.run(policy)
-                    # log all
-                    step_log.update(runner_log)
-                
-                # run validation
-                if (self.epoch % cfg.training.val_every) == 0:
-                    with torch.no_grad():
-                        val_losses_noise_pred = list()
-                        val_losses_reconstruction = list()
-                        val_lips_const_prod = 0
-                        n_total_samples = 0
-
-                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
-                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                            
-                            # random batch for computing Lipschitz Constant
-                            rand_batch = np.random.randint(0, len(val_dataloader))
-
-                            for batch_idx, batch in enumerate(tepoch):
-                                n_samples = len(batch["obs"])
-                                n_total_samples += n_samples
-                                # device transfer
-                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                
-                                # noise prediction loss
-                                loss_noise_pred = policy.compute_loss(batch)
-                                val_losses_noise_pred.append(loss_noise_pred.item() * n_samples) 
-                                
-                                # Sample the noise for reconstruction (refer to the PAC-Bayes paper for the reconstruction loss definition)
-                                # if cfg.obs_as_local_cond:
-                                #     shape = batch["action"].shape
-
-                                # elif cfg.obs_as_global_cond:
-                                #     # condition throught global feature
-                                #     shape = batch["action"].shape
-                                #     if cfg.pred_action_steps_only:
-                                #         shape = (batch["action"].shape[0], cfg.n_action_steps, cfg.action_dim)
-                                # else:
-                                #     shape = (batch["action"].shape[0], cfg.horizon, cfg.action_dim + cfg.obs_dim)
-
-                                # # Sample noise that we'll add to the input
-                                # noise = torch.randn(shape, device=batch["action"].device)
-                                loss_reconstruct = policy.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
-                                val_losses_reconstruction.append(loss_reconstruct.item() * n_samples)
-
-                                if (cfg.training.max_val_steps is not None) \
-                                    and batch_idx >= (cfg.training.max_val_steps-1):
-                                    break
-                                
-                                if rand_batch == batch_idx:
-                                    # 2 random samples from the random batch to compute Lipschitz Constant
-                                    rand_sample1 = np.random.randint(0, len(batch))
-                                    #rand_sample2 = np.random.randint(0, len(batch))
-                                    obs1 = batch["obs"][rand_sample1]
-                                    obs2 = batch['obs'][rand_sample1]
-                                    obs = torch.stack((obs1, obs2))
-                                    val_lips_const, val_lips_const_prod = policy.lip_const(obs)
-                                    
-                        if (self.epoch % cfg.training.nll_every)==0:
-                            NLL = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None)
-                            step_log['nll (bpd)'] = NLL
-
-                        if len(val_losses_noise_pred) > 0:
-                            val_loss_noise_pred = torch.sum(torch.tensor(val_losses_noise_pred)).item()/n_total_samples
-                            val_loss_reconstruction = torch.sum(torch.tensor(val_losses_reconstruction)).item()/n_total_samples
-                            # log epoch average validation loss
-                            step_log['val_loss_reconstruct'] = val_loss_reconstruction
-                            step_log['val_loss_noise_pred'] = val_loss_noise_pred
-                            step_log['val_lips_const_prod'] = val_lips_const_prod.item()
-
-                # run diffusion sampling on a training batch
-                if (self.epoch % cfg.training.sample_every) == 0:
-                    with torch.no_grad():
-                        # sample trajectory from training set, and evaluate difference
-                        batch = train_sampling_batch
-                        obs_dict = {'obs': batch['obs']}
-                        gt_action = batch['action']
-                        
-                        result = policy.predict_action(obs_dict)
-                        if cfg.pred_action_steps_only:
-                            pred_action = result['action']
-                            start = cfg.n_obs_steps - 1
-                            end = start + cfg.n_action_steps
-                            gt_action = gt_action[:,start:end]
-                        else:
-                            pred_action = result['action_pred']
-                        mse = torch.nn.functional.mse_loss(pred_action, gt_action)
-                        # log
-                        step_log['train_action_mse_error'] = mse.item()
-                        # release RAM
-                        del batch
-                        del obs_dict
-                        del gt_action
-                        del result
-                        del pred_action
-                        del mse
-                
-                #TODO compute the PAC-Bayes Bounds
-                # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0:
-                    # checkpointing
-                    if cfg.checkpoint.save_last_ckpt:
-                        self.save_checkpoint()
-                    if cfg.checkpoint.save_last_snapshot:
-                        self.save_snapshot()
-
-                    # sanitize metric names
-                    metric_dict = dict()
-                    for key, value in step_log.items():
-                        new_key = key.replace('/', '_')
-                        metric_dict[new_key] = value
+                    # run rollout
+                    if (self.epoch % cfg.training.rollout_every) == 0:
+                        runner_log = env_runner.run(policy)
+                        # log all
+                        step_log.update(runner_log)
                     
-                    # We can't copy the last checkpoint here
-                    # since save_checkpoint uses threads.
-                    # therefore at this point the file might have been empty!
-                    topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+                    # run validation
+                    if (self.epoch % cfg.training.val_every) == 0:
+                        with torch.no_grad():
+                            val_losses_noise_pred = list()
+                            val_losses_reconstruction = list()
+                            val_lips_const_prod = 0
+                            n_total_samples = 0
 
-                    if topk_ckpt_path is not None:
-                        self.save_checkpoint(path=topk_ckpt_path)
-                # ========= eval end for this epoch ==========
-                policy.train()
+                            with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
+                                    leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                                
+                                # random batch for computing Lipschitz Constant
+                                rand_batch = np.random.randint(0, len(val_dataloader))
+
+                                for batch_idx, batch in enumerate(tepoch):
+                                    n_samples = len(batch["obs"])
+                                    n_total_samples += n_samples
+                                    # device transfer
+                                    batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                                    
+                                    # noise prediction loss
+                                    loss_noise_pred = policy.compute_loss(batch)
+                                    val_losses_noise_pred.append(loss_noise_pred.item() * n_samples) 
+                                    
+                                    # Sample the noise for reconstruction (refer to the PAC-Bayes paper for the reconstruction loss definition)
+                                    # if cfg.obs_as_local_cond:
+                                    #     shape = batch["action"].shape
+
+                                    # elif cfg.obs_as_global_cond:
+                                    #     # condition throught global feature
+                                    #     shape = batch["action"].shape
+                                    #     if cfg.pred_action_steps_only:
+                                    #         shape = (batch["action"].shape[0], cfg.n_action_steps, cfg.action_dim)
+                                    # else:
+                                    #     shape = (batch["action"].shape[0], cfg.horizon, cfg.action_dim + cfg.obs_dim)
+
+                                    # # Sample noise that we'll add to the input
+                                    # noise = torch.randn(shape, device=batch["action"].device)
+                                    loss_reconstruct = policy.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type) 
+                                    val_losses_reconstruction.append(loss_reconstruct.item() * n_samples)
+
+                                    if (cfg.training.max_val_steps is not None) \
+                                        and batch_idx >= (cfg.training.max_val_steps-1):
+                                        break
+                                    
+                                    if rand_batch == batch_idx:
+                                        # 2 random samples from the random batch to compute Lipschitz Constant
+                                        rand_sample1 = np.random.randint(0, len(batch))
+                                        #rand_sample2 = np.random.randint(0, len(batch))
+                                        obs1 = batch["obs"][rand_sample1]
+                                        obs2 = batch['obs'][rand_sample1]
+                                        obs = torch.stack((obs1, obs2))
+                                        val_lips_const, val_lips_const_prod = policy.lip_const(obs)
+                                        
+                            if (self.epoch % cfg.training.nll_every)==0:
+                                NLL = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None)
+                                step_log['nll (bpd)'] = NLL
+
+                            if len(val_losses_noise_pred) > 0:
+                                val_loss_noise_pred = torch.sum(torch.tensor(val_losses_noise_pred)).item()/n_total_samples
+                                val_loss_reconstruction = torch.sum(torch.tensor(val_losses_reconstruction)).item()/n_total_samples
+                                # log epoch average validation loss
+                                step_log['val_loss_reconstruct'] = val_loss_reconstruction
+                                step_log['val_loss_noise_pred'] = val_loss_noise_pred
+                                step_log['val_lips_const_prod'] = val_lips_const_prod.item()
+
+                    # run diffusion sampling on a training batch
+                    if (self.epoch % cfg.training.sample_every) == 0:
+                        with torch.no_grad():
+                            # sample trajectory from training set, and evaluate difference
+                            batch = train_sampling_batch
+                            obs_dict = {'obs': batch['obs']}
+                            gt_action = batch['action']
+                            
+                            result = policy.predict_action(obs_dict)
+                            if cfg.pred_action_steps_only:
+                                pred_action = result['action']
+                                start = cfg.n_obs_steps - 1
+                                end = start + cfg.n_action_steps
+                                gt_action = gt_action[:,start:end]
+                            else:
+                                pred_action = result['action_pred']
+                            mse = torch.nn.functional.mse_loss(pred_action, gt_action)
+                            # log
+                            step_log['train_action_mse_error'] = mse.item()
+                            # release RAM
+                            del batch
+                            del obs_dict
+                            del gt_action
+                            del result
+                            del pred_action
+                            del mse
+                    
+                    #TODO compute the PAC-Bayes Bounds
+                    # checkpoint
+                    if (self.epoch % cfg.training.checkpoint_every) == 0:
+                        # checkpointing
+                        if cfg.checkpoint.save_last_ckpt:
+                            self.save_checkpoint()
+                        if cfg.checkpoint.save_last_snapshot:
+                            self.save_snapshot()
+
+                        # sanitize metric names
+                        metric_dict = dict()
+                        for key, value in step_log.items():
+                            new_key = key.replace('/', '_')
+                            metric_dict[new_key] = value
+                        
+                        # We can't copy the last checkpoint here
+                        # since save_checkpoint uses threads.
+                        # therefore at this point the file might have been empty!
+                        topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+
+                        if topk_ckpt_path is not None:
+                            self.save_checkpoint(path=topk_ckpt_path)
+                    # ========= eval end for this epoch ==========
+                    policy.train()
 
                 # end of epoch
                 # log of last step is combined with validation and rollout
