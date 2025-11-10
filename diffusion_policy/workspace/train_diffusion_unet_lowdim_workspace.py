@@ -250,9 +250,24 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
                 # run rollout
                 if (self.epoch % cfg.training.rollout_every) == 0:
-                    runner_log = env_runner.run(policy)
-                    # log all
+                    success_rate = list()
+                    for _ in range (cfg.task.n_repeat_runner):
+                        runner_log = env_runner.run(policy)
+                        success_rate.append(runner_log["test/mean_score"])
+                    # log average success rate and variance
                     step_log.update(runner_log)
+
+                    avg_success_rate = np.mean(success_rate)
+                    var_success_rate = np.var(success_rate, ddof=1)
+                    
+                    step_log["test/avg_mean_score"] = avg_success_rate
+                    step_log["test/var_mean_score"] = var_success_rate
+
+                # # run rollout
+                # if (self.epoch % cfg.training.rollout_every) == 0:
+                #     runner_log = env_runner.run(policy)
+                #     # log all
+                #     step_log.update(runner_log)
 
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0:

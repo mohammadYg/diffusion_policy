@@ -126,36 +126,15 @@ class PushTEnv(gym.Env):
             rs = np.random.default_rng(seed=seed)
             ws = self.offset
             while not valid:
-                if ws>0.0:
-                    # x_agent, y_agent = random_outside_point(rs, ws, agent = True)
-                    # x_block, y_block = random_outside_point(rs, ws, agent = False)
-
-                    # state = np.array([
-                    #     x_agent, y_agent,
-                    #     x_block, y_block,
-                    #     rs.uniform(-np.pi, np.pi + 1e-10)
-                    # ])
-
-                    state = np.array(
-                        [
-                            rs.uniform(ws + 50, ws + 450),
-                            rs.uniform(ws + 50, ws + 450),
-                            rs.uniform(ws + 100, ws + 400),
-                            rs.uniform(ws + 100, ws + 400),
-                            rs.uniform(-np.pi, np.pi + 1e-10)
-                        ]
-                    )
-
-                else:
-                    state = np.array(
-                        [
-                            rs.uniform(50, 450),
-                            rs.uniform(50, 450),
-                            rs.uniform(100, 400),
-                            rs.uniform(100, 400),
-                            rs.uniform(-np.pi, np.pi + 1e-10)
-                        ]
-                    )
+                state = np.array(
+                    [
+                        rs.uniform(50, 450),
+                        rs.uniform(50, 450),
+                        rs.uniform(100, 400),
+                        rs.uniform(100, 400),
+                        rs.uniform(-np.pi, np.pi + 1e-10)
+                    ]
+                )
                 self._set_state(state)
                 pos_CoM_Tblock = np.array(self.block.local_to_world(self.block.center_of_gravity))
                 pos_CoM_agent = np.array(self.agent.local_to_world(self.agent.center_of_gravity))
@@ -163,13 +142,13 @@ class PushTEnv(gym.Env):
                 if distance>95.0:
                     valid = True
 
-            # rs = np.random.RandomState(seed=seed)
-            # state = np.array([
-            #     rs.randint(50, 450), rs.randint(50, 450),
-            #     rs.randint(100, 400), rs.randint(100, 400),
-            #     rs.randn() * 2 * np.pi - np.pi
-            #     ])
-            
+        #     rs = np.random.RandomState(seed=seed)
+        #     state = np.array([
+        #         rs.randint(50, 450), rs.randint(50, 450),
+        #         rs.randint(100, 400), rs.randint(100, 400),
+        #         rs.randn() * 2 * np.pi - np.pi
+        #         ])
+        # self._set_state(state)
 
         observation = self._get_obs()
         return observation

@@ -283,10 +283,11 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 
                                 # device transfer
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                bound, emp_loss_test, kl_test = policy.compute_bound(batch, n_bound=len(val_dataloader.dataset), delta=cfg.eval.delta, 
-                                                        kl_weight=cfg.training.kl_weight,
-                                                        mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.eval.stochastic,
-                                                        clamping=cfg.eval.clamping, bounded = cfg.training.bounded)
+                                # bound, emp_loss_test, kl_test = policy.compute_bound(batch, n_bound=len(val_dataloader.dataset), delta=cfg.eval.delta, 
+                                #                         kl_weight=cfg.training.kl_weight,
+                                #                         mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.eval.stochastic,
+                                #                         clamping=cfg.eval.clamping, bounded = cfg.training.bounded)
+                                emp_loss_test = policy.compute_loss(batch)
                                 val_losses_noise_pred.append(emp_loss_test.item() * n_samples)
 
                                 # loss_reconstruct = policy.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type,
@@ -326,33 +327,33 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         #             step_log['nll_bpd'] = NLL 
 
                 # run diffusion sampling on a training batch
-                if (self.epoch % cfg.training.sample_every) == 0:
-                    with torch.no_grad():
-                        # sample trajectory from training set, and evaluate difference
-                        batch = train_sampling_batch
-                        obs_dict = {'obs': batch['obs']}
-                        gt_action = batch['action']
+                # if (self.epoch % cfg.training.sample_every) == 0:
+                #     with torch.no_grad():
+                #         # sample trajectory from training set, and evaluate difference
+                #         batch = train_sampling_batch
+                #         obs_dict = {'obs': batch['obs']}
+                #         gt_action = batch['action']
                         
-                        result = policy.predict_action(obs_dict, 
-                                                    stochastic=cfg.eval.stochastic,
-                                                        clamping=cfg.eval.clamping)
-                        if cfg.pred_action_steps_only:
-                            pred_action = result['action']
-                            start = cfg.n_obs_steps - 1
-                            end = start + cfg.n_action_steps
-                            gt_action = gt_action[:,start:end]
-                        else:
-                            pred_action = result['action_pred']
-                        mse = torch.nn.functional.mse_loss(pred_action, gt_action)
-                        # log
-                        step_log['train_action_mse_error'] = mse.item()
-                        # release RAM
-                        del batch
-                        del obs_dict
-                        del gt_action
-                        del result
-                        del pred_action
-                        del mse
+                #         result = policy.predict_action(obs_dict, 
+                #                                     stochastic=cfg.eval.stochastic,
+                #                                         clamping=cfg.eval.clamping)
+                #         if cfg.pred_action_steps_only:
+                #             pred_action = result['action']
+                #             start = cfg.n_obs_steps - 1
+                #             end = start + cfg.n_action_steps
+                #             gt_action = gt_action[:,start:end]
+                #         else:
+                #             pred_action = result['action_pred']
+                #         mse = torch.nn.functional.mse_loss(pred_action, gt_action)
+                #         # log
+                #         step_log['train_action_mse_error'] = mse.item()
+                #         # release RAM
+                #         del batch
+                #         del obs_dict
+                #         del gt_action
+                #         del result
+                #         del pred_action
+                #         del mse
                 
                 # checkpoint
                 if (self.epoch % cfg.training.checkpoint_every) == 0:

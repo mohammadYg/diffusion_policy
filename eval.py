@@ -19,6 +19,8 @@ import json
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
 from omegaconf import OmegaConf
+import numpy as np
+import random
 
 @click.command()
 @click.option('-c', '--checkpoint', required=True)
@@ -34,7 +36,7 @@ def main(checkpoint, output_dir, device, override):
     # load checkpoint
     payload = torch.load(open(checkpoint, 'rb'), pickle_module=dill)
     cfg = payload['cfg']
-    
+
     # apply overrides (if any)
     if override:
         override_cfg = OmegaConf.from_dotlist(override)
@@ -57,14 +59,23 @@ def main(checkpoint, output_dir, device, override):
     
     # run eval
     env_runner = hydra.utils.instantiate(
-        cfg.task.env_runner,
-        output_dir=output_dir)
+            cfg.task.env_runner,
+            output_dir=output_dir)
+    # success_rate = list()
+    # for _ in range (cfg.task.n_repeat_runner):
     if isinstance(policy, BaseLowdimProbPolicy):
         runner_log = env_runner.run_prob(policy, cfg.eval.stochastic, cfg.eval.clamping)
     else:
         runner_log = env_runner.run(policy)
+    # success_rate.append(runner_log["test/mean_score"])
+
+    # avg_success_rate = np.mean(success_rate)
+    # var_success_rate = np.var(success_rate, ddof=1)
+                        
     # dump log to json
     json_log = dict()
+    # json_log["test/avg_mean_score"] = avg_success_rate
+    # json_log["test/var_mean_score"] = var_success_rate
     for key, value in runner_log.items():
         if isinstance(value, wandb.sdk.data_types.video.Video):
             json_log[key] = value._path
