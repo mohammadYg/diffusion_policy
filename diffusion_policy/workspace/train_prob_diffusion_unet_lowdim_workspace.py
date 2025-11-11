@@ -283,11 +283,10 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 
                                 # device transfer
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                # bound, emp_loss_test, kl_test = policy.compute_bound(batch, n_bound=len(val_dataloader.dataset), delta=cfg.eval.delta, 
-                                #                         kl_weight=cfg.training.kl_weight,
-                                #                         mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.eval.stochastic,
-                                #                         clamping=cfg.eval.clamping, bounded = cfg.training.bounded)
-                                emp_loss_test = policy.compute_loss(batch)
+                                bound, emp_loss_test, kl_test = policy.compute_bound(batch, n_bound=len(val_dataloader.dataset), delta=cfg.eval.delta, 
+                                                        kl_weight=cfg.training.kl_weight,
+                                                        mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.eval.stochastic,
+                                                        clamping=cfg.eval.clamping, bounded = cfg.training.bounded)
                                 val_losses_noise_pred.append(emp_loss_test.item() * n_samples)
 
                                 # loss_reconstruct = policy.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type,

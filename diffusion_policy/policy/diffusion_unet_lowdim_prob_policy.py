@@ -289,24 +289,24 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         
         kl = self.model.compute_kl()
         
-        loss_kl = torch.div(
-                2*(kl_weight*kl + np.log((2*np.sqrt(n_bound))/delta)), n_bound)
-
-        # scale the empirical risk to be inside [0,1]
-        scale = 2.0
-        if bounded:
-            loss_sum = loss_emp/scale + loss_kl + torch.sqrt((loss_emp/scale)*loss_kl)
-        else:
-            loss_sum = loss_emp + loss_kl + torch.sqrt(loss_emp*loss_kl)
-
         # loss_kl = torch.div(
-        #         kl_weight*kl + np.log((2*np.sqrt(n_bound))/delta), 2*n_bound)
+        #         2*(kl_weight*kl + np.log((2*np.sqrt(n_bound))/delta)), n_bound)
+
         # # scale the empirical risk to be inside [0,1]
         # scale = 2.0
         # if bounded:
-        #     loss_sum = loss_emp/scale + torch.sqrt(loss_kl)
+        #     loss_sum = loss_emp/scale + loss_kl + torch.sqrt((loss_emp/scale)*loss_kl)
         # else:
-        #     loss_sum = loss_emp + torch.sqrt(loss_kl)
+        #     loss_sum = loss_emp + loss_kl + torch.sqrt(loss_emp*loss_kl)
+
+        loss_kl = torch.div(
+                kl_weight*kl + np.log((2*np.sqrt(n_bound))/delta), 2*n_bound)
+        # scale the empirical risk to be inside [0,1]
+        scale = 2.0
+        if bounded:
+            loss_sum = loss_emp/scale + torch.sqrt(loss_kl)
+        else:
+            loss_sum = loss_emp + torch.sqrt(loss_kl)
         
         return loss_sum, loss_emp, kl
 
