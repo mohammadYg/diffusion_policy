@@ -141,17 +141,22 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             }
         )
 
-        # configure checkpoint
-        topk_manager = TopKCheckpointManager(
-            save_dir=os.path.join(self.output_dir, 'checkpoints'),
-            **cfg.checkpoint.topk
-        )
+        # # configure checkpoint
+        # topk_manager = TopKCheckpointManager(
+        #     save_dir=os.path.join(self.output_dir, 'checkpoints'),
+        #     **cfg.checkpoint.topk
+        # )
 
         # # configure checkpoint for nll
         # topk_manager_nll = TopKCheckpointManager(
         #     save_dir=os.path.join(self.output_dir, 'checkpoints'),
         #     **cfg.checkpoint_nll.topk
         # )
+
+        # configure checkpoint
+        topk_manager_every = CheckpointManager(
+            save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_every.topk
+        )
 
         # device transfer
         device = torch.device(cfg.training.device)
@@ -236,11 +241,11 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 train_loss = np.mean(train_losses)
                 step_log['train_loss'] = train_loss
 
-                # ========= eval for this epoch ==========
-                policy = self.model
-                if cfg.training.use_ema:
-                    policy = self.ema_model
-                policy.eval()
+                # # ========= eval for this epoch ==========
+                # policy = self.model
+                # if cfg.training.use_ema:
+                #     policy = self.ema_model
+                # policy.eval()
 
                 # # run rollout
                 # if (self.epoch % cfg.training.rollout_every) == 0:
@@ -257,11 +262,11 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 #     step_log["test/avg_mean_score"] = avg_success_rate
                 #     step_log["test/var_mean_score"] = var_success_rate
 
-                # run rollout
-                if (self.epoch % cfg.training.rollout_every) == 0:
-                    runner_log = env_runner.run(policy)
-                    # log all
-                    step_log.update(runner_log)
+                # # run rollout
+                # if (self.epoch % cfg.training.rollout_every) == 0:
+                #     runner_log = env_runner.run(policy)
+                #     # log all
+                #     step_log.update(runner_log)
 
                 # # run validation
                 # if (self.epoch % cfg.training.val_every) == 0:
@@ -321,33 +326,46 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 #         del pred_action
                 #         del mse
                 
+                # # checkpoint
+                # if (self.epoch % cfg.training.checkpoint_every) == 0:
+                #     # checkpointing
+                #     if cfg.checkpoint.save_last_ckpt:
+                #         self.save_checkpoint()
+                #     if cfg.checkpoint.save_last_snapshot:
+                #         self.save_snapshot()
+
+                #     # sanitize metric names
+                #     metric_dict = dict()
+                #     for key, value in step_log.items():
+                #         new_key = key.replace('/', '_')
+                #         metric_dict[new_key] = value
+                    
+                #     # We can't copy the last checkpoint here
+                #     # since save_checkpoint uses threads.
+                #     # therefore at this point the file might have been empty!
+                #     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+                #     if topk_ckpt_path is not None:
+                #         self.save_checkpoint(path=topk_ckpt_path)
+
+                #     # topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(metric_dict)
+                #     # if topk_ckpt_path_nll is not None:
+                #     #     self.save_checkpoint(path=topk_ckpt_path_nll)
+                    
                 # checkpoint
                 if (self.epoch % cfg.training.checkpoint_every) == 0:
                     # checkpointing
-                    if cfg.checkpoint.save_last_ckpt:
+                    if cfg.checkpoint_every.save_last_ckpt:
                         self.save_checkpoint()
-                    if cfg.checkpoint.save_last_snapshot:
+                    if cfg.checkpoint_every.save_last_snapshot:
                         self.save_snapshot()
 
-                    # sanitize metric names
-                    metric_dict = dict()
-                    for key, value in step_log.items():
-                        new_key = key.replace('/', '_')
-                        metric_dict[new_key] = value
-                    
-                    # We can't copy the last checkpoint here
-                    # since save_checkpoint uses threads.
-                    # therefore at this point the file might have been empty!
-                    topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+                    topk_ckpt_path = topk_manager_every.get_ckpt_path(step_log)
                     if topk_ckpt_path is not None:
                         self.save_checkpoint(path=topk_ckpt_path)
 
-                    # topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(metric_dict)
-                    # if topk_ckpt_path_nll is not None:
-                    #     self.save_checkpoint(path=topk_ckpt_path_nll)
-                    
+
                 # ========= eval end for this epoch ==========
-                policy.train()
+                # policy.train()
 
                 # end of epoch
                 # log of last step is combined with validation and rollout

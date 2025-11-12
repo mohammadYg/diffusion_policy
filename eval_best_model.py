@@ -35,24 +35,36 @@ import tqdm
 
 def main(ckpts_dir, output_dir, device, override):
     
+    if os.path.exists(output_dir):
+        click.confirm(
+            f"Output path {output_dir} already exists! Overwrite?", abort=True
+        )
+    pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
+
     # configure best checkpoint saving
     topk_manager = TopKCheckpointManager(
-        save_dir=os.path.join(output_dir, 'checkpoints'),
-        monitor_key="test_mean_score",
+        save_dir=output_dir,
+        monitor_key="test_mean_score_avg",
         mode = "max",
         k=1,
-        format_str='epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+        format_str='epoch={epoch:04d}-test_mean_score_avg={test_mean_score_avg:.3f}.ckpt'
     )
+    
+    json_log = dict()
     
     # List all .cpk files in the directory
     ckpt_files = sorted([f for f in os.listdir(ckpts_dir) if f.endswith('.ckpt')])
     for ckpt_file in ckpt_files:
         ckpt_path = os.path.join(ckpts_dir, ckpt_file)
-        epoch = int(ckpt_file.split('=')[1].split('.')[0])
-
+        
         # load checkpoint
         payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
         cfg = payload['cfg']
+
+        if ckpt_file == 'latest.ckpt':
+            epoch = cfg.training.num_epochs
+        else:
+            epoch = int(ckpt_file.split("=")[1].split(".")[0])
 
         # apply overrides (if any)
         if override:
@@ -78,64 +90,69 @@ def main(ckpts_dir, output_dir, device, override):
                 cfg.task.env_runner,
                 output_dir=output_dir)
         
-        if isinstance(policy, BaseLowdimProbPolicy):
-            runner_log = env_runner.run_prob(policy, cfg.eval.stochastic, cfg.eval.clamping)
-        else:
-            runner_log = env_runner.run(policy)
+        success_rate = list()
+        for _ in range (cfg.task.n_repeat_runner):
+            if isinstance(policy, BaseLowdimProbPolicy):
+                runner_log = env_runner.run_prob(policy, cfg.eval.stochastic, cfg.eval.clamping)
+            else:
+                runner_log = env_runner.run(policy)
+            success_rate.append(runner_log["test/mean_score"])
+
+        avg_success_rate = np.mean(success_rate)
+        var_success_rate = np.var(success_rate, ddof=0)
 
         #save best model
-        success_rate = {"test_mean_score": runner_log["test/mean_score"],
-                        "epoch": epoch}
+        success_rate = {"test_mean_score_avg": avg_success_rate, "epoch": epoch}
         topk_ckpt_path = topk_manager.get_ckpt_path(success_rate)
 
         if topk_ckpt_path is not None:
             workspace.save_checkpoint(path=topk_ckpt_path)
 
-        # # configure dataset
-        # dataset: BaseLowdimDataset
-        # dataset = hydra.utils.instantiate(cfg.task.dataset)
-        # assert isinstance(dataset, BaseLowdimDataset)
+        # configure dataset
+        dataset: BaseLowdimDataset
+        dataset = hydra.utils.instantiate(cfg.task.dataset)
+        assert isinstance(dataset, BaseLowdimDataset)
 
-        # # configure validation dataset
-        # val_dataset = dataset.get_validation_dataset()
-        # val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
+        # configure validation dataset
+        val_dataset = dataset.get_validation_dataset()
+        val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
-        # val_loss_noise_pred = list()
-        # with torch.no_grad():
-        #     for _ in range (cfg.task.n_repeat_runner):
-        #         val_losses_noise_pred = list()
-        #         n_total_samples = 0
+        val_loss_noise_pred = list()
+        with torch.no_grad():
+            for _ in range (cfg.task.n_repeat_runner):
+                val_losses_noise_pred = list()
+                n_total_samples = 0
 
-        #         with tqdm.tqdm(val_dataloader, desc=f"Noise Prediction Validation", 
-        #                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                with tqdm.tqdm(val_dataloader, desc=f"Noise Prediction Validation", 
+                        leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     
-        #             for batch in tepoch:
-        #                 n_samples = len(batch["obs"])
-        #                 n_total_samples += n_samples
+                    for batch in tepoch:
+                        n_samples = len(batch["obs"])
+                        n_total_samples += n_samples
                         
-        #                 # device transfer
-        #                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-        #                 emp_loss_test = policy.compute_loss(batch)
-        #                 val_losses_noise_pred.append(emp_loss_test.item() * n_samples)
+                        # device transfer
+                        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                        emp_loss_test = policy.compute_loss(batch)
+                        val_losses_noise_pred.append(emp_loss_test.item() * n_samples)
                 
-        #         val_loss_noise_pred.append(torch.sum(torch.tensor(val_losses_noise_pred)).item()/n_total_samples)
-        # avg_loss_pred_noise = np.mean(val_loss_noise_pred)
-        # var_loss_pred_noise = np.var(val_loss_noise_pred, ddof=1)
-
-        # # dump log to json
-        # json_log = dict()
-        # json_log["test/avg_mean_score"] = avg_success_rate
-        # json_log["test/var_mean_score"] = var_success_rate
-        # json_log["test/avg_loss_noise_pred"] = avg_loss_pred_noise
-        # json_log["test/var_loss_noise_pred"] = var_loss_pred_noise
-
-        # for key, value in runner_log.items():
-        #     if isinstance(value, wandb.sdk.data_types.video.Video):
-        #         json_log[key] = value._path
-        #     else:
-        #         json_log[key] = value
-        # out_path = os.path.join(output_dir, 'eval_log.json')
-        # json.dump(json_log, open(out_path, 'w'), indent=2, sort_keys=True)
+                val_loss_noise_pred.append(torch.sum(torch.tensor(val_losses_noise_pred)).item()/n_total_samples)
+            
+            avg_loss_pred_noise = np.mean(val_loss_noise_pred)
+            var_loss_pred_noise = np.var(val_loss_noise_pred, ddof=0)
+        
+            # Create hierarchical entry
+            epoch_key = f"model_at_epoch_{epoch:04d}"
+            json_log[epoch_key] = {
+                "test": {
+                    "mean_score_avg": avg_success_rate,
+                    "mean_score_var": var_success_rate,
+                    "loss_noise_pred_avg": avg_loss_pred_noise,
+                    "loss_noise_pred_var": var_loss_pred_noise,
+                }
+            }
+            
+        out_path = os.path.join(output_dir, 'eval_log.json')
+        json.dump(json_log, open(out_path, 'w'), indent=2, sort_keys=True)
 
 if __name__ == '__main__':
     main()
