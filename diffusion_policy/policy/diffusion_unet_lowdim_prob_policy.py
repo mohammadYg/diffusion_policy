@@ -193,7 +193,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def compute_bound(self, batch, n_bound, delta, kl_weight, mc_sampling=1000, stochastic = True, clamping = False, bounded = False):
+    def compute_loss(self, batch):
         # normalize input
         assert 'valid_mask' not in batch
         nbatch = self.normalizer.normalize(batch)
@@ -247,28 +247,77 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         noisy_trajectory[condition_mask] = trajectory[condition_mask]
         
         # Predict the noise residual
-        # if not self.model.training:
-        #     error_mc = 0.0
-        #     for _ in range (mc_sampling):
-        #         pred = self.model(noisy_trajectory, timesteps, 
-        #             local_cond=local_cond, global_cond=global_cond,
-        #             stochastic = stochastic, clamping = clamping)
+        pred = self.model(noisy_trajectory, timesteps, 
+            local_cond=local_cond, global_cond=global_cond)
 
-        #         pred_type = self.noise_scheduler.config.prediction_type 
-        #         if pred_type == 'epsilon':
-        #             target = noise
-        #         elif pred_type == 'sample':
-        #             target = trajectory
-        #         else:
-        #             raise ValueError(f"Unsupported prediction type {pred_type}")
+        pred_type = self.noise_scheduler.config.prediction_type 
+        if pred_type == 'epsilon':
+            target = noise
+        elif pred_type == 'sample':
+            target = trajectory
+        else:
+            raise ValueError(f"Unsupported prediction type {pred_type}")
 
-        #         loss_dm = F.mse_loss(pred, target, reduction='none')
-        #         loss_dm = loss_dm * loss_mask.type(loss_dm.dtype)
-        #         loss_dm = reduce(loss_dm, 'b ... -> b (...)', 'mean')
-        #         loss_dm = loss_dm.mean()
-        #         error_mc += loss_dm
-        #     loss_emp = error_mc/mc_sampling
-        # else:
+        loss = F.mse_loss(pred, target, reduction='none')
+        loss = loss * loss_mask.type(loss.dtype)
+        loss = reduce(loss, 'b ... -> b (...)', 'mean')
+        loss = loss.mean()
+        return loss
+    
+    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, kl_penalty = 0.005, mc_sampling=1000, stochastic = True, clamping = False, bounded = False):
+        # normalize input
+        assert 'valid_mask' not in batch
+        nbatch = self.normalizer.normalize(batch)
+        obs = nbatch['obs']
+        action = nbatch['action']
+
+        # handle different ways of passing observation
+        local_cond = None
+        global_cond = None
+        trajectory = action
+        if self.obs_as_local_cond:
+            # zero out observations after n_obs_steps
+            local_cond = obs
+            local_cond[:,self.n_obs_steps:,:] = 0
+        elif self.obs_as_global_cond:
+            global_cond = obs[:,:self.n_obs_steps,:].reshape(
+                obs.shape[0], -1)
+            if self.pred_action_steps_only:
+                To = self.n_obs_steps
+                start = To
+                if self.oa_step_convention:
+                    start = To - 1
+                end = start + self.n_action_steps
+                trajectory = action[:,start:end]
+        else:
+            trajectory = torch.cat([action, obs], dim=-1)
+
+        # generate impainting mask
+        if self.pred_action_steps_only:
+            condition_mask = torch.zeros_like(trajectory, dtype=torch.bool)
+        else:
+            condition_mask = self.mask_generator(trajectory.shape)
+
+        # Sample noise that we'll add to the images
+        noise = torch.randn(trajectory.shape, device=trajectory.device)
+        bsz = trajectory.shape[0]
+        # Sample a random timestep for each image
+        timesteps = torch.randint(
+            0, self.noise_scheduler.config.num_train_timesteps, 
+            (bsz,), device=trajectory.device
+        ).long()
+        # Add noise to the clean images according to the noise magnitude at each timestep
+        # (this is the forward diffusion process)
+        noisy_trajectory = self.noise_scheduler.add_noise(
+            trajectory, noise, timesteps)
+        
+        # compute loss mask
+        loss_mask = ~condition_mask
+
+        # apply conditioning
+        noisy_trajectory[condition_mask] = trajectory[condition_mask]
+        
+        # Compute emprical rist
         pred = self.model(noisy_trajectory, timesteps, 
             local_cond=local_cond, global_cond=global_cond,
             stochastic = stochastic, clamping = clamping)
@@ -286,8 +335,33 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         loss_dm = reduce(loss_dm, 'b ... -> b (...)', 'mean')
         loss_dm = loss_dm.mean()
         loss_emp = loss_dm
+        scale = 2.0
+        if bounded:
+            loss_emp_scaled = loss_emp/scale
+        else:
+            loss_emp_scaled = loss_emp
         
-        kl = self.model.compute_kl()
+        if objective == "fquad":
+            # compute kl divergence of the network
+            kl = self.model.compute_kl()
+            # compute the PAC-Bayes bound
+            repeated_kl_ratio = torch.div((kl*kl_penalty + np.log((2*np.sqrt(n_bound))/delta)), 2*n_bound)
+            # scale the empirical risk to be inside [0,1]
+            first_term = torch.sqrt(loss_emp_scaled + repeated_kl_ratio)
+            second_term = torch.sqrt(repeated_kl_ratio)
+            loss_sum = torch.pow(first_term + second_term, 2)
+        elif objective == "classic":
+            # compute kl divergence of the network
+            kl = self.model.compute_kl()
+            # compute the PAC-Bayes bound
+            kl_ratio = torch.div((kl*kl_penalty + np.log((2 * np.sqrt(n_bound)) / delta)), 2*n_bound)
+            loss_sum = loss_emp_scaled + torch.sqrt(kl_ratio)
+        elif self.objective == "bbb":
+            # ipdb.set_trace()
+            kl = self.model.compute_kl()
+            loss_sum = loss_emp_scaled + kl_penalty * (kl / n_bound)
+        else:
+            raise RuntimeError(f"Wrong objective {self.objective}")
         
         # loss_kl = torch.div(
         #         2*(kl_weight*kl + np.log((2*np.sqrt(n_bound))/delta)), n_bound)
@@ -298,15 +372,6 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         #     loss_sum = loss_emp/scale + loss_kl + torch.sqrt((loss_emp/scale)*loss_kl)
         # else:
         #     loss_sum = loss_emp + loss_kl + torch.sqrt(loss_emp*loss_kl)
-
-        loss_kl = torch.div(
-                kl_weight*kl + np.log((2*np.sqrt(n_bound))/delta), 2*n_bound)
-        # scale the empirical risk to be inside [0,1]
-        scale = 2.0
-        if bounded:
-            loss_sum = loss_emp/scale + torch.sqrt(loss_kl)
-        else:
-            loss_sum = loss_emp + torch.sqrt(loss_kl)
         
         return loss_sum, loss_emp, kl
 

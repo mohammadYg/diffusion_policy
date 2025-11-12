@@ -4,7 +4,7 @@ obs_dim: 20 # 9*2 keypoints + 2 state
 action_dim: 2
 keypoint_dim: 2
 
-n_repeat_runner: 10
+n_repeat_runner: 3
 
 env_runner:
   _target_: diffusion_policy.env_runner.pusht_keypoints_runner.PushTKeypointsRunner

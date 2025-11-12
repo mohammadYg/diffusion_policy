@@ -57,3 +57,23 @@ class TopKCheckpointManager:
             if os.path.exists(delete_path):
                 os.remove(delete_path)
             return ckpt_path
+
+class CheckpointManager:
+    def __init__(self,
+            save_dir,
+            monitor_key: str,
+            format_str='epoch={epoch:03d}.ckpt'
+        ):
+
+        self.save_dir = save_dir
+        self.monitor_key = monitor_key
+        self.format_str = format_str
+        self.path_value_map = dict()
+    
+    def get_ckpt_path(self, data: Dict[str, float]) -> Optional[str]:
+
+        value = data[self.monitor_key]
+        ckpt_path = os.path.join(
+            self.save_dir, self.format_str.format(**data))
+        self.path_value_map[ckpt_path] = value
+        return ckpt_path

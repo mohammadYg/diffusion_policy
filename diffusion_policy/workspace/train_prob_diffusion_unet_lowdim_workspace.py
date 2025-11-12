@@ -202,8 +202,9 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
 
-                        raw_loss, emp_risk_train, kl_train = self.model.compute_bound(batch, n_bound=len(pac_dataloader.dataset), delta=cfg.training.delta, 
-                                                                                      kl_weight=cfg.training.kl_weight, 
+                        raw_loss, emp_risk_train, kl_train = self.model.compute_bound(batch, n_bound=len(pac_dataloader.dataset), objective=cfg.training.pac_objective,
+                                                                                      delta=cfg.training.delta, 
+                                                                                      kl_penalty=cfg.training.kl_penalty, 
                                                                                       mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.training.stochastic, 
                                                            clamping=cfg.training.clamping, bounded=cfg.training.bounded)
                             
@@ -250,11 +251,25 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 step_log['train_loss (pac_bayes bound)'] = train_loss
 
                 # ========= eval for this epoch ==========
-                #if self.epoch>0:
                 policy = self.model
                 if cfg.training.use_ema:
                     policy = self.ema_model
                 policy.eval()
+
+                # # run rollout
+                # if (self.epoch % cfg.training.rollout_every) == 0:
+                #     success_rate = list()
+                #     for _ in range (cfg.task.n_repeat_runner):
+                #         runner_log = env_runner.run(policy)
+                #         success_rate.append(runner_log["test/mean_score"])
+                #     # log average success rate and variance
+                #     step_log.update(runner_log)
+
+                #     avg_success_rate = np.mean(success_rate)
+                #     var_success_rate = np.var(success_rate, ddof=0)
+                    
+                #     step_log["test/avg_mean_score"] = avg_success_rate
+                #     step_log["test/var_mean_score"] = var_success_rate
 
                 # run rollout
                 if (self.epoch % cfg.training.rollout_every) == 0:
@@ -262,68 +277,37 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     # log all
                     step_log.update(runner_log)
 
-                # run validation
-                if (self.epoch % cfg.training.val_every) == 0:
-                    with torch.no_grad():
-                        val_losses_noise_pred = list()
-                        #val_losses_reconstruction = list()
-                        #bound_test = list()
-                        #val_lips_const_prod = 0
-                        n_total_samples = 0
+                # # run validation
+                # if (self.epoch % cfg.training.val_every) == 0:
+                #     with torch.no_grad():
+                #         val_losses_noise_pred = list()
+                #         n_total_samples = 0
 
-                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
-                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                            
-                            ## random batch for computing Lipschitz Constant
-                            #rand_batch = np.random.randint(0, len(val_dataloader))
+                #         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
+                #                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
 
-                            for batch_idx, batch in enumerate(tepoch):
-                                n_samples = len(batch["obs"])
-                                n_total_samples += n_samples
+                #             for batch_idx, batch in enumerate(tepoch):
+                #                 n_samples = len(batch["obs"])
+                #                 n_total_samples += n_samples
                                 
-                                # device transfer
-                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                bound, emp_loss_test, kl_test = policy.compute_bound(batch, n_bound=len(val_dataloader.dataset), delta=cfg.eval.delta, 
-                                                        kl_weight=cfg.training.kl_weight,
-                                                        mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.eval.stochastic,
-                                                        clamping=cfg.eval.clamping, bounded = cfg.training.bounded)
-                                val_losses_noise_pred.append(emp_loss_test.item() * n_samples)
+                #                 # device transfer
+                #                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                #                 emp_loss_test = policy.compute_loss(batch)
+                #                 val_losses_noise_pred.append(emp_loss_test.item() * n_samples)
 
-                                # loss_reconstruct = policy.compute_reconst_loss_T(batch, cfg.training.PAC_loss_type,
-                                #                                                 stochastic=cfg.eval.stochastic,
-                                #                                                 clamping=cfg.eval.clamping) 
-                                # val_losses_reconstruction.append(loss_reconstruct.item() * n_samples)
-
-                                if (cfg.training.max_val_steps is not None) \
-                                    and batch_idx >= (cfg.training.max_val_steps-1):
-                                    break
-                                
-                                # if rand_batch == batch_idx:
-                                #     # 2 random samples from the random batch to compute Lipschitz Constant
-                                #     rand_sample1 = np.random.randint(0, len(batch))
-                                #     #rand_sample2 = np.random.randint(0, len(batch))
-                                #     obs1 = batch["obs"][rand_sample1]
-                                #     obs2 = batch['obs'][rand_sample1]
-                                #     obs = torch.stack((obs1, obs2))
-                                #     val_lips_const, val_lips_const_prod = policy.lip_const(obs, 
-                                #                                                 stochastic=cfg.eval.stochastic,
-                                #                                                 clamping=cfg.eval.clamping)
+                #                 if (cfg.training.max_val_steps is not None) \
+                #                     and batch_idx >= (cfg.training.max_val_steps-1):
+                #                     break
                                     
-                        if len(val_losses_noise_pred) > 0:
-                            #val_loss_reconstruction = torch.sum(torch.tensor(val_losses_reconstruction)).item()/n_total_samples
-                            val_loss_noise_pred = torch.sum(torch.tensor(val_losses_noise_pred)).item()/n_total_samples
-                            # log epoch average validation loss
-                            #step_log['val_loss_reconstruct'] = val_loss_reconstruction
-                            step_log['val_loss_noise_pred'] = val_loss_noise_pred
-                            #step_log['val_lips_const_prod'] = val_lips_const_prod.item()
-                            #step_log['emp_risk_test'] = emp_loss_test.item()
-                            #step_log['kl_test'] = kl_test.item()
+                #         if len(val_losses_noise_pred) > 0:
+                #             val_loss_noise_pred = torch.sum(torch.tensor(val_losses_noise_pred)).item()/n_total_samples
+                #             step_log['val_loss_noise_pred'] = val_loss_noise_pred
 
-                        # if (self.epoch % cfg.training.nll_every)==0:
-                        #             NLL = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None,
-                        #                                 stochastic=cfg.eval.stochastic,
-                        #                                 clamping=cfg.eval.clamping)
-                        #             step_log['nll_bpd'] = NLL 
+                #         # if (self.epoch % cfg.training.nll_every)==0:
+                #         #             NLL = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None,
+                #         #                                 stochastic=cfg.eval.stochastic,
+                #         #                                 clamping=cfg.eval.clamping)
+                #         #             step_log['nll_bpd'] = NLL 
 
                 # run diffusion sampling on a training batch
                 # if (self.epoch % cfg.training.sample_every) == 0:

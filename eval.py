@@ -48,7 +48,6 @@ def main(checkpoint, output_dir, device, override):
     cls = hydra.utils.get_class(cfg._target_)
     workspace = cls(cfg, output_dir=output_dir)
     workspace: BaseWorkspace
-    print ("initialization of init_net is before the loading the model")
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
     
     # get policy from workspace
