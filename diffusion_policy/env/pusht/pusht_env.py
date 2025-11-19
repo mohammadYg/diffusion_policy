@@ -93,62 +93,38 @@ class PushTEnv(gym.Env):
             self.block.center_of_gravity = self.block_cog
         if self.damping is not None:
             self.space.damping = self.damping
-        
-        def random_outside_point(rs, offset, agent = True):
-            core_min = offset + 12
-            core_max = offset + 500
-            if agent:
-                ext_min = 50
-                ext_max = 512 + 2*offset - 50
-            else:
-                ext_min = 100
-                ext_max = 512 + 2*offset - 100
-
-            region = rs.choice(4)
-            if region == 0:  # left
-                x = rs.uniform(ext_min, core_min)
-                y = rs.uniform(ext_min, ext_max)
-            elif region == 1:  # right
-                x = rs.uniform(core_max, ext_max)
-                y = rs.uniform(ext_min, ext_max)
-            elif region == 2:  # bottom
-                x = rs.uniform(core_min, core_max)
-                y = rs.uniform(ext_min, core_min)
-            else:  # top
-                x = rs.uniform(core_min, core_max)
-                y = rs.uniform(core_max, ext_max)
-            return x, y
 
         # use legacy RandomState for compatibility
         state = self.reset_to_state
+        
         if state is None:
-            valid = False
-            rs = np.random.default_rng(seed=seed)
-            ws = self.offset
-            while not valid:
-                state = np.array(
-                    [
-                        rs.uniform(50, 450),
-                        rs.uniform(50, 450),
-                        rs.uniform(100, 400),
-                        rs.uniform(100, 400),
-                        rs.uniform(-np.pi, np.pi + 1e-10)
-                    ]
-                )
-                self._set_state(state)
-                pos_CoM_Tblock = np.array(self.block.local_to_world(self.block.center_of_gravity))
-                pos_CoM_agent = np.array(self.agent.local_to_world(self.agent.center_of_gravity))
-                distance = np.linalg.norm(pos_CoM_Tblock - pos_CoM_agent)
-                if distance>95.0:
-                    valid = True
+            # valid = False
+            # rs = np.random.default_rng(seed=seed)
+            # ws = self.offset
+            # while not valid:
+            #     state = np.array(
+            #         [
+            #             rs.uniform(50, 450),
+            #             rs.uniform(50, 450),
+            #             rs.uniform(100, 400),
+            #             rs.uniform(100, 400),
+            #             rs.uniform(-np.pi, np.pi + 1e-10)
+            #         ]
+            #     )
+            #     self._set_state(state)
+            #     pos_CoM_Tblock = np.array(self.block.local_to_world(self.block.center_of_gravity))
+            #     pos_CoM_agent = np.array(self.agent.local_to_world(self.agent.center_of_gravity))
+            #     distance = np.linalg.norm(pos_CoM_Tblock - pos_CoM_agent)
+            #     if distance>95.0:
+            #         valid = True
 
-        #     rs = np.random.RandomState(seed=seed)
-        #     state = np.array([
-        #         rs.randint(50, 450), rs.randint(50, 450),
-        #         rs.randint(100, 400), rs.randint(100, 400),
-        #         rs.randn() * 2 * np.pi - np.pi
-        #         ])
-        # self._set_state(state)
+            rs = np.random.RandomState(seed=seed)
+            state = np.array([
+                rs.randint(50, 450), rs.randint(50, 450),
+                rs.randint(100, 400), rs.randint(100, 400),
+                rs.randn() * 2 * np.pi - np.pi
+                ])
+        self._set_state(state)
 
         observation = self._get_obs()
         return observation

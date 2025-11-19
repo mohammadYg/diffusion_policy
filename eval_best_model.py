@@ -28,13 +28,18 @@ import tqdm
 
 @click.command()
 @click.option('-c', '--ckpts_dir', required=True)
-@click.option('-o', '--output_dir', required=True)
 @click.option('-d', '--device', default='cuda:0')
 @click.option('--override', multiple=True,
               help="Hydra-style config overrides, e.g. task.env_runner.n_test=300")
 
-def main(ckpts_dir, output_dir, device, override):
+def main(ckpts_dir, device, override):
     
+    # Go one folder up (parent of checkpoints)
+    parent_dir = os.path.dirname(os.path.normpath(ckpts_dir))
+
+    # Create new eval_output directory inside the parent
+    output_dir = os.path.join(parent_dir, "eval_output")
+
     if os.path.exists(output_dir):
         click.confirm(
             f"Output path {output_dir} already exists! Overwrite?", abort=True
@@ -153,6 +158,17 @@ def main(ckpts_dir, output_dir, device, override):
             
         out_path = os.path.join(output_dir, 'eval_log.json')
         json.dump(json_log, open(out_path, 'w'), indent=2, sort_keys=True)
+        del policy
+        del workspace
+        del env_runner
+        del dataset
+        del val_dataset
+        del val_dataloader
+        del payload
+        del cfg
+        
+        torch.cuda.empty_cache()
+
 
 if __name__ == '__main__':
     main()

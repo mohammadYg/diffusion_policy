@@ -171,6 +171,13 @@ checkpoint:
   save_last_ckpt: True
   save_last_snapshot: False
 
+checkpoint_every:
+  topk:
+    monitor_key: epoch
+    format_str: 'epoch={epoch:04d}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+  
 checkpoint_nll:
   topk:
     monitor_key: nll_bpd
