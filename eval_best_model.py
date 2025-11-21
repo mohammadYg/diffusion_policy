@@ -4,6 +4,9 @@ python eval.py --checkpoint data/image/pusht/diffusion_policy_cnn/train_0/checkp
 """
 
 import sys
+import gc
+from pathlib import Path
+from datetime import datetime
 # use line-buffering for both stdout and stderr
 sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
 sys.stderr = open(sys.stderr.fileno(), mode='w', buffering=1)
@@ -55,7 +58,10 @@ def main(ckpts_dir, device, override):
         format_str='epoch={epoch:04d}-test_mean_score_avg={test_mean_score_avg:.3f}.ckpt'
     )
     
+    now = datetime.now().strftime("%Y.%m.%d_%H.%M.%S") 
     json_log = dict()
+    out_path = os.path.join(output_dir, f"eval_log_{now}.json")
+    sum_success_rate_last_10_epochs = 0.0
     
     # List all .cpk files in the directory
     ckpt_files = sorted([f for f in os.listdir(ckpts_dir) if f.endswith('.ckpt')])
@@ -67,7 +73,7 @@ def main(ckpts_dir, device, override):
         cfg = payload['cfg']
 
         if ckpt_file == 'latest.ckpt':
-            epoch = cfg.training.num_epochs
+            continue  # skip latest.ckpt for eval
         else:
             epoch = int(ckpt_file.split("=")[1].split(".")[0])
 
@@ -90,26 +96,35 @@ def main(ckpts_dir, device, override):
         policy.to(device)
         policy.eval()
         
-        # run eval
-        env_runner = hydra.utils.instantiate(
-                cfg.task.env_runner,
-                output_dir=output_dir)
-        
         success_rate = list()
         for _ in range (cfg.task.n_repeat_runner):
+            # run eval
+            env_runner = hydra.utils.instantiate(
+                cfg.task.env_runner,
+                output_dir=output_dir)
             if isinstance(policy, BaseLowdimProbPolicy):
                 runner_log = env_runner.run_prob(policy, cfg.eval.stochastic, cfg.eval.clamping)
             else:
                 runner_log = env_runner.run(policy)
             success_rate.append(runner_log["test/mean_score"])
+            del env_runner
+
+        if cfg.task.n_repeat_runner > 1:
+            ddof = 1
+        else:
+            ddof = 0
 
         avg_success_rate = np.mean(success_rate)
-        var_success_rate = np.var(success_rate, ddof=0)
+        var_success_rate = np.var(success_rate, ddof=ddof)
 
         #save best model
         success_rate = {"test_mean_score_avg": avg_success_rate, "epoch": epoch}
         topk_ckpt_path = topk_manager.get_ckpt_path(success_rate)
 
+        # save success rate of last 10 epochs
+        if epoch>cfg.training.num_epochs-500:
+            sum_success_rate_last_10_epochs += avg_success_rate
+        
         if topk_ckpt_path is not None:
             workspace.save_checkpoint(path=topk_ckpt_path)
 
@@ -143,7 +158,7 @@ def main(ckpts_dir, device, override):
                 val_loss_noise_pred.append(torch.sum(torch.tensor(val_losses_noise_pred)).item()/n_total_samples)
             
             avg_loss_pred_noise = np.mean(val_loss_noise_pred)
-            var_loss_pred_noise = np.var(val_loss_noise_pred, ddof=0)
+            var_loss_pred_noise = np.var(val_loss_noise_pred, ddof=ddof)
         
             # Create hierarchical entry
             epoch_key = f"model_at_epoch_{epoch:04d}"
@@ -151,22 +166,26 @@ def main(ckpts_dir, device, override):
                 "test": {
                     "mean_score_avg": avg_success_rate,
                     "mean_score_var": var_success_rate,
+                    "mean_score_sd": np.sqrt(var_success_rate),
                     "loss_noise_pred_avg": avg_loss_pred_noise,
                     "loss_noise_pred_var": var_loss_pred_noise,
+                    "loss_noise_pred_sd": np.sqrt(var_loss_pred_noise),
                 }
             }
-            
-        out_path = os.path.join(output_dir, 'eval_log.json')
+        if epoch == cfg.training.num_epochs-1:
+            json_log["mean_score_last_10_epochs"] = sum_success_rate_last_10_epochs / 10.0
+
         json.dump(json_log, open(out_path, 'w'), indent=2, sort_keys=True)
+        
         del policy
         del workspace
-        del env_runner
         del dataset
         del val_dataset
         del val_dataloader
         del payload
         del cfg
-        
+
+        gc.collect()
         torch.cuda.empty_cache()
 
 
