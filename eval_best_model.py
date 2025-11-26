@@ -76,7 +76,9 @@ def main(ckpts_dir, device, override):
             continue  # skip latest.ckpt for eval
         else:
             epoch = int(ckpt_file.split("=")[1].split(".")[0])
-
+            if epoch<50:
+                continue  # skip epochs less than 100
+            
         # apply overrides (if any)
         if override:
             override_cfg = OmegaConf.from_dotlist(override)
@@ -122,7 +124,7 @@ def main(ckpts_dir, device, override):
         topk_ckpt_path = topk_manager.get_ckpt_path(success_rate)
 
         # save success rate of last 10 epochs
-        if epoch>cfg.training.num_epochs-500:
+        if epoch>cfg.training.num_epochs-550:
             sum_success_rate_last_10_epochs += avg_success_rate
         
         if topk_ckpt_path is not None:
@@ -172,7 +174,7 @@ def main(ckpts_dir, device, override):
                     "loss_noise_pred_sd": np.sqrt(var_loss_pred_noise),
                 }
             }
-        if epoch == cfg.training.num_epochs-1:
+        if epoch == cfg.training.num_epochs-50:
             json_log["mean_score_last_10_epochs"] = sum_success_rate_last_10_epochs / 10.0
 
         json.dump(json_log, open(out_path, 'w'), indent=2, sort_keys=True)

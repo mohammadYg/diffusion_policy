@@ -372,7 +372,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 # policy.train()
                 
                 # checkpoint
-                if ((self.epoch % cfg.training.checkpoint_every) == 0) or (self.epoch + 1 == cfg.training.num_epochs):
+                if ((self.epoch % cfg.training.checkpoint_every) == 0):
                     # checkpointing
                     if cfg.checkpoint_every.save_last_ckpt:
                         self.save_checkpoint()

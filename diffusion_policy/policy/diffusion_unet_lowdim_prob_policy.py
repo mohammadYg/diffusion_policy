@@ -345,18 +345,29 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             # compute kl divergence of the network
             kl = self.model.compute_kl()
             # compute the PAC-Bayes bound
-            repeated_kl_ratio = torch.div((kl*kl_penalty + np.log((2*np.sqrt(n_bound))/delta)), 2*n_bound)
+            kl_ratio = torch.div((kl*kl_penalty + np.log((2*np.sqrt(n_bound))/delta)), 2*n_bound)
             # scale the empirical risk to be inside [0,1]
-            first_term = torch.sqrt(loss_emp_scaled + repeated_kl_ratio)
-            second_term = torch.sqrt(repeated_kl_ratio)
+            first_term = torch.sqrt(loss_emp_scaled + kl_ratio)
+            second_term = torch.sqrt(kl_ratio)
             loss_sum = torch.pow(first_term + second_term, 2)
+        
         elif objective == "classic":
             # compute kl divergence of the network
             kl = self.model.compute_kl()
             # compute the PAC-Bayes bound
             kl_ratio = torch.div((kl*kl_penalty + np.log((2 * np.sqrt(n_bound)) / delta)), 2*n_bound)
             loss_sum = loss_emp_scaled + torch.sqrt(kl_ratio)
-        elif self.objective == "bbb":
+        
+        elif objective == "friendly":
+            # ipdb.set_trace()
+            kl = self.model.compute_kl()
+            # compute the PAC-Bayes bound
+            kl_ratio = torch.div((kl*kl_penalty + np.log((2 * np.sqrt(n_bound)) / delta)), n_bound)
+            first_term = torch.sqrt(2*loss_emp_scaled * kl_ratio)
+            second_term = 2*kl_ratio
+            loss_sum = loss_emp_scaled + first_term + second_term
+
+        elif objective == "bbb":
             # ipdb.set_trace()
             kl = self.model.compute_kl()
             loss_sum = loss_emp_scaled + kl_penalty * (kl / n_bound)
