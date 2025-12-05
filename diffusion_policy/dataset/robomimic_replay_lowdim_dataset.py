@@ -34,7 +34,8 @@ class RobomimicReplayLowdimDataset(BaseLowdimDataset):
             use_legacy_normalizer=False,
             seed=42,
             val_ratio=0.0,
-            max_train_episodes=None
+            max_train_episodes=None,
+            train_episodes_for_PAC_Bayes= 0
         ):
         obs_keys = list(obs_keys)
         rotation_transformer = RotationTransformer(
@@ -63,6 +64,20 @@ class RobomimicReplayLowdimDataset(BaseLowdimDataset):
             max_n=max_train_episodes, 
             seed=seed)
 
+        val_mask = ~train_mask
+        pac_mask = np.zeros_like(train_mask, dtype=bool)
+
+        if train_episodes_for_PAC_Bayes>0:    
+            # Get the indices of validation episodes
+            train_indices = np.where(train_mask)[0]
+            # Reproducible random generator
+            rng = np.random.default_rng(seed)
+            # Randomly choose demos from train dataset
+            n_train_pac = min(train_episodes_for_PAC_Bayes, len(train_indices))
+            train_pac_indices = rng.choice(train_indices, size=n_train_pac, replace=False)
+            pac_mask [train_pac_indices] = True
+            train_mask [train_pac_indices] = False
+
         sampler = SequenceSampler(
             replay_buffer=replay_buffer, 
             sequence_length=horizon,
@@ -73,11 +88,13 @@ class RobomimicReplayLowdimDataset(BaseLowdimDataset):
         self.replay_buffer = replay_buffer
         self.sampler = sampler
         self.abs_action = abs_action
-        self.train_mask = train_mask
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.use_legacy_normalizer = use_legacy_normalizer
+        self.train_mask = train_mask
+        self.val_mask = val_mask
+        self.pac_mask = pac_mask
     
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -86,11 +103,23 @@ class RobomimicReplayLowdimDataset(BaseLowdimDataset):
             sequence_length=self.horizon,
             pad_before=self.pad_before, 
             pad_after=self.pad_after,
-            episode_mask=~self.train_mask
+            episode_mask=self.val_mask
             )
-        val_set.train_mask = ~self.train_mask
+        val_set.train_mask = self.val_mask
         return val_set
 
+    def get_pac_bayes_dataset(self):
+        pac_set = copy.copy(self)
+        pac_set.sampler = SequenceSampler(
+            replay_buffer=self.replay_buffer, 
+            sequence_length=self.horizon,
+            pad_before=self.pad_before, 
+            pad_after=self.pad_after,
+            episode_mask=self.pac_mask
+            )
+        pac_set.train_mask = self.pac_mask
+        return pac_set
+    
     def get_normalizer(self, **kwargs) -> LinearNormalizer:
         normalizer = LinearNormalizer()
 

@@ -149,22 +149,22 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
             }
         )
 
-        # # configure checkpoint
-        # topk_manager = TopKCheckpointManager(
-        #     save_dir=os.path.join(self.output_dir, 'checkpoints'),
-        #     **cfg.checkpoint.topk
-        # )
-
-        # # configure checkpoint for nll
-        # topk_manager_nll = TopKCheckpointManager(
-        #     save_dir=os.path.join(self.output_dir, 'checkpoints'),
-        #     **cfg.checkpoint_nll.topk
-        # )
-        
         # configure checkpoint
-        topk_manager_every = CheckpointManager(
-            save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_every.topk
+        topk_manager = TopKCheckpointManager(
+            save_dir=os.path.join(self.output_dir, 'checkpoints'),
+            **cfg.checkpoint.topk
         )
+
+        # configure checkpoint for nll
+        topk_manager_nll = TopKCheckpointManager(
+            save_dir=os.path.join(self.output_dir, 'checkpoints'),
+            **cfg.checkpoint_nll.topk
+        )
+        
+        # # configure checkpoint
+        # topk_manager_every = CheckpointManager(
+        #     save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_every.topk
+        # )
 
         # device transfer
         device = torch.device(cfg.training.device)
@@ -207,11 +207,17 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
 
-                        raw_loss, emp_risk_train, kl_train = self.model.compute_bound(batch, n_bound=len(pac_dataloader.dataset), objective=cfg.training.pac_objective,
-                                                                                      delta=cfg.training.delta, 
-                                                                                      kl_penalty=cfg.training.kl_penalty, 
-                                                                                      mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.training.stochastic, 
-                                                           clamping=cfg.training.clamping, bounded=cfg.training.bounded)
+                        if cfg.training.kl_penalty>0.0:
+                            raw_loss, emp_risk_train, kl_train = self.model.compute_bound(batch, n_bound=len(pac_dataloader.dataset), objective=cfg.training.pac_objective,
+                                                        delta=cfg.training.delta, 
+                                                        kl_penalty=cfg.training.kl_penalty, 
+                                                        mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.training.stochastic, 
+                            clamping=cfg.training.clamping, bounded=cfg.training.bounded)
+                            
+                        else:
+                            raw_loss = self.model.compute_loss(batch, stochastic=cfg.training.stochastic, clamping=cfg.training.clamping)
+                            emp_risk_train = raw_loss
+                            kl_train = torch.tensor([0.0])
                             
                         loss = raw_loss / cfg.training.gradient_accumulate_every
                         loss.backward()
@@ -256,10 +262,10 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 step_log['train_loss (pac_bayes bound)'] = train_loss
 
                 # ========= eval for this epoch ==========
-                # policy = self.model
-                # if cfg.training.use_ema:
-                #     policy = self.ema_model
-                # policy.eval()
+                policy = self.model
+                if cfg.training.use_ema:
+                    policy = self.ema_model
+                policy.eval()
 
                 # # run rollout
                 # if (self.epoch % cfg.training.rollout_every) == 0:
@@ -276,112 +282,112 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 #     step_log["test/avg_mean_score"] = avg_success_rate
                 #     step_log["test/var_mean_score"] = var_success_rate
 
-                # # run rollout
-                # if (self.epoch % cfg.training.rollout_every) == 0:
-                #     runner_log = env_runner.run_prob(policy, stochastic= cfg.eval.stochastic, clamping=cfg.eval.clamping)
-                #     # log all
-                #     step_log.update(runner_log)
+                # run rollout
+                if (self.epoch % cfg.training.rollout_every) == 0:
+                    runner_log = env_runner.run_prob(policy, stochastic= cfg.eval.stochastic, clamping=cfg.eval.clamping)
+                    # log all
+                    step_log.update(runner_log)
 
-                # # run validation
-                # if (self.epoch % cfg.training.val_every) == 0:
-                #     with torch.no_grad():
-                #         val_losses_noise_pred = list()
-                #         n_total_samples = 0
+                # run validation
+                if (self.epoch % cfg.training.val_every) == 0:
+                    with torch.no_grad():
+                        val_losses_noise_pred = list()
+                        n_total_samples = 0
 
-                #         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
-                #                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
+                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
 
-                #             for batch_idx, batch in enumerate(tepoch):
-                #                 n_samples = len(batch["obs"])
-                #                 n_total_samples += n_samples
+                            for batch_idx, batch in enumerate(tepoch):
+                                n_samples = len(batch["obs"])
+                                n_total_samples += n_samples
                                 
-                #                 # device transfer
-                #                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                #                 emp_loss_test = policy.compute_loss(batch)
-                #                 val_losses_noise_pred.append(emp_loss_test.item() * n_samples)
+                                # device transfer
+                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                                emp_loss_test = policy.compute_loss(batch, stochastic=cfg.eval.stochastic, clamping=cfg.eval.clamping)
+                                val_losses_noise_pred.append(emp_loss_test.item() * n_samples)
 
-                #                 if (cfg.training.max_val_steps is not None) \
-                #                     and batch_idx >= (cfg.training.max_val_steps-1):
-                #                     break
+                                if (cfg.training.max_val_steps is not None) \
+                                    and batch_idx >= (cfg.training.max_val_steps-1):
+                                    break
                                     
-                #         if len(val_losses_noise_pred) > 0:
-                #             val_loss_noise_pred = torch.sum(torch.tensor(val_losses_noise_pred)).item()/n_total_samples
-                #             step_log['val_loss_noise_pred'] = val_loss_noise_pred
+                        if len(val_losses_noise_pred) > 0:
+                            val_loss_noise_pred = torch.sum(torch.tensor(val_losses_noise_pred)).item()/n_total_samples
+                            step_log['val_loss_noise_pred'] = val_loss_noise_pred
 
-                #         # if (self.epoch % cfg.training.nll_every)==0:
-                #         #             NLL = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None,
-                #         #                                 stochastic=cfg.eval.stochastic,
-                #         #                                 clamping=cfg.eval.clamping)
-                #         #             step_log['nll_bpd'] = NLL 
+                        if (self.epoch % cfg.training.nll_every)==0:
+                            NLL = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None,
+                                                stochastic=cfg.eval.stochastic,
+                                                clamping=cfg.eval.clamping)
+                            step_log['nll_bpd'] = NLL 
 
-                # run diffusion sampling on a training batch
-                # if (self.epoch % cfg.training.sample_every) == 0:
-                #     with torch.no_grad():
-                #         # sample trajectory from training set, and evaluate difference
-                #         batch = train_sampling_batch
-                #         obs_dict = {'obs': batch['obs']}
-                #         gt_action = batch['action']
+                #run diffusion sampling on a training batch
+                if (self.epoch % cfg.training.sample_every) == 0:
+                    with torch.no_grad():
+                        # sample trajectory from training set, and evaluate difference
+                        batch = train_sampling_batch
+                        obs_dict = {'obs': batch['obs']}
+                        gt_action = batch['action']
                         
-                #         result = policy.predict_action(obs_dict, 
-                #                                     stochastic=cfg.eval.stochastic,
-                #                                         clamping=cfg.eval.clamping)
-                #         if cfg.pred_action_steps_only:
-                #             pred_action = result['action']
-                #             start = cfg.n_obs_steps - 1
-                #             end = start + cfg.n_action_steps
-                #             gt_action = gt_action[:,start:end]
-                #         else:
-                #             pred_action = result['action_pred']
-                #         mse = torch.nn.functional.mse_loss(pred_action, gt_action)
-                #         # log
-                #         step_log['train_action_mse_error'] = mse.item()
-                #         # release RAM
-                #         del batch
-                #         del obs_dict
-                #         del gt_action
-                #         del result
-                #         del pred_action
-                #         del mse
-                
-                # # checkpoint
-                # if (self.epoch % cfg.training.checkpoint_every) == 0:
-                #     # checkpointing
-                #     if cfg.checkpoint.save_last_ckpt:
-                #         self.save_checkpoint()
-                #     if cfg.checkpoint.save_last_snapshot:
-                #         self.save_snapshot()
-
-                #     # sanitize metric names
-                #     metric_dict = dict()
-                #     for key, value in step_log.items():
-                #         new_key = key.replace('/', '_')
-                #         metric_dict[new_key] = value
-                    
-                #     # We can't copy the last checkpoint here
-                #     # since save_checkpoint uses threads.
-                #     # therefore at this point the file might have been empty!
-                #     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
-                #     #topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(metric_dict)
-
-                #     if topk_ckpt_path is not None:
-                #         self.save_checkpoint(path=topk_ckpt_path)
-
-                #     # if topk_ckpt_path_nll is not None:
-                #     #     self.save_checkpoint(path=topk_ckpt_path_nll)
-                # ========= eval end for this epoch ==========
-                # policy.train()
+                        result = policy.predict_action(obs_dict, 
+                                                    stochastic=cfg.eval.stochastic,
+                                                        clamping=cfg.eval.clamping)
+                        if cfg.pred_action_steps_only:
+                            pred_action = result['action']
+                            start = cfg.n_obs_steps - 1
+                            end = start + cfg.n_action_steps
+                            gt_action = gt_action[:,start:end]
+                        else:
+                            pred_action = result['action_pred']
+                        mse = torch.nn.functional.mse_loss(pred_action, gt_action)
+                        # log
+                        step_log['train_action_mse_error'] = mse.item()
+                        # release RAM
+                        del batch
+                        del obs_dict
+                        del gt_action
+                        del result
+                        del pred_action
+                        del mse
                 
                 # checkpoint
-                if ((self.epoch % cfg.training.checkpoint_every) == 0):
+                if (self.epoch % cfg.training.checkpoint_every) == 0:
                     # checkpointing
-                    if cfg.checkpoint_every.save_last_ckpt:
+                    if cfg.checkpoint.save_last_ckpt:
                         self.save_checkpoint()
-                    if cfg.checkpoint_every.save_last_snapshot:
+                    if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
 
-                    topk_ckpt_path = topk_manager_every.get_ckpt_path(step_log)
+                    # sanitize metric names
+                    metric_dict = dict()
+                    for key, value in step_log.items():
+                        new_key = key.replace('/', '_')
+                        metric_dict[new_key] = value
+                    
+                    # We can't copy the last checkpoint here
+                    # since save_checkpoint uses threads.
+                    # therefore at this point the file might have been empty!
+                    topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
                     if topk_ckpt_path is not None:
                         self.save_checkpoint(path=topk_ckpt_path)
+
+                    topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(metric_dict)
+                    if topk_ckpt_path_nll is not None:
+                        self.save_checkpoint(path=topk_ckpt_path_nll)
+               
+                #========= eval end for this epoch ==========
+                policy.train()
+                
+                # # checkpoint
+                # if ((self.epoch % cfg.training.checkpoint_every) == 0):
+                #     # checkpointing
+                #     if cfg.checkpoint_every.save_last_ckpt:
+                #         self.save_checkpoint()
+                #     if cfg.checkpoint_every.save_last_snapshot:
+                #         self.save_snapshot()
+
+                #     topk_ckpt_path = topk_manager_every.get_ckpt_path(step_log)
+                #     if topk_ckpt_path is not None:
+                #         self.save_checkpoint(path=topk_ckpt_path)
 
                 # end of epoch
                 # log of last step is combined with validation and rollout

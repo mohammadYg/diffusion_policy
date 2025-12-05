@@ -113,7 +113,7 @@ training:
   rollout_every: 50
   checkpoint_every: 50
   val_every: 50
-  sample_every: 5000
+  sample_every: 50
   PAC_Bayes_every: 8000
   nll_every: 50
   # steps per epoch

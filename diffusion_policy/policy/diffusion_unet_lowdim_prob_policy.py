@@ -193,7 +193,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def compute_loss(self, batch):
+    def compute_loss(self, batch, stochastic=False, clamping=True):
         # normalize input
         assert 'valid_mask' not in batch
         nbatch = self.normalizer.normalize(batch)
@@ -248,7 +248,8 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         
         # Predict the noise residual
         pred = self.model(noisy_trajectory, timesteps, 
-            local_cond=local_cond, global_cond=global_cond)
+            local_cond=local_cond, global_cond=global_cond,
+            stochastic = stochastic, clamping = clamping)
 
         pred_type = self.noise_scheduler.config.prediction_type 
         if pred_type == 'epsilon':
@@ -265,76 +266,9 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         return loss
     
     def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, kl_penalty = 0.005, mc_sampling=1000, stochastic = True, clamping = False, bounded = False):
-        # normalize input
-        assert 'valid_mask' not in batch
-        nbatch = self.normalizer.normalize(batch)
-        obs = nbatch['obs']
-        action = nbatch['action']
-
-        # handle different ways of passing observation
-        local_cond = None
-        global_cond = None
-        trajectory = action
-        if self.obs_as_local_cond:
-            # zero out observations after n_obs_steps
-            local_cond = obs
-            local_cond[:,self.n_obs_steps:,:] = 0
-        elif self.obs_as_global_cond:
-            global_cond = obs[:,:self.n_obs_steps,:].reshape(
-                obs.shape[0], -1)
-            if self.pred_action_steps_only:
-                To = self.n_obs_steps
-                start = To
-                if self.oa_step_convention:
-                    start = To - 1
-                end = start + self.n_action_steps
-                trajectory = action[:,start:end]
-        else:
-            trajectory = torch.cat([action, obs], dim=-1)
-
-        # generate impainting mask
-        if self.pred_action_steps_only:
-            condition_mask = torch.zeros_like(trajectory, dtype=torch.bool)
-        else:
-            condition_mask = self.mask_generator(trajectory.shape)
-
-        # Sample noise that we'll add to the images
-        noise = torch.randn(trajectory.shape, device=trajectory.device)
-        bsz = trajectory.shape[0]
-        # Sample a random timestep for each image
-        timesteps = torch.randint(
-            0, self.noise_scheduler.config.num_train_timesteps, 
-            (bsz,), device=trajectory.device
-        ).long()
-        # Add noise to the clean images according to the noise magnitude at each timestep
-        # (this is the forward diffusion process)
-        noisy_trajectory = self.noise_scheduler.add_noise(
-            trajectory, noise, timesteps)
         
-        # compute loss mask
-        loss_mask = ~condition_mask
-
-        # apply conditioning
-        noisy_trajectory[condition_mask] = trajectory[condition_mask]
-        
-        # Compute emprical rist
-        pred = self.model(noisy_trajectory, timesteps, 
-            local_cond=local_cond, global_cond=global_cond,
-            stochastic = stochastic, clamping = clamping)
-
-        pred_type = self.noise_scheduler.config.prediction_type 
-        if pred_type == 'epsilon':
-            target = noise
-        elif pred_type == 'sample':
-            target = trajectory
-        else:
-            raise ValueError(f"Unsupported prediction type {pred_type}")
-
-        loss_dm = F.mse_loss(pred, target, reduction='none')
-        loss_dm = loss_dm * loss_mask.type(loss_dm.dtype)
-        loss_dm = reduce(loss_dm, 'b ... -> b (...)', 'mean')
-        loss_dm = loss_dm.mean()
-        loss_emp = loss_dm
+        # DM emprical risk
+        loss_emp = self.compute_loss(batch, stochastic=stochastic, clamping=clamping)
         scale = 2.0
         if bounded:
             loss_emp_scaled = loss_emp/scale
@@ -572,84 +506,69 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     
 # ========================== Compute upper bound on nll ==========================
     def noisy_channel(self, x, logsnr):
-        '''
-        The noise channel is working as the forward process of the DDPM
-        here, we need to computet the corresponding diffusion timestep to the logsnr
-        '''
-        # compare each sigmoid(logsnr) (or sigmoid(alpha)) with alpha_cumprod of DDIM to find the closest value of alpha_cumprod to each sigmoid(logsnr)
-        # Then find the correspoing t of logsnr
-        diff = torch.abs(torch.sigmoid(logsnr).unsqueeze(1) - self.noise_scheduler.alphas_cumprod.unsqueeze(0).to(self.device))
-        timestep = torch.argmin(diff, dim=1)   # shape (N,)
+        """
+        Forward diffusion process: match each logSNR to the nearest DDIM alpha_cumprod
+        and generate noisy samples + return timestep and the noise.
+        """
+        # Compute alpha from logSNR and find nearest scheduler timestep
+        alpha = torch.sigmoid(logsnr)  # (N,)
+        scheduler_alpha = self.noise_scheduler.alphas_cumprod.to(self.device)  # (T,)
 
+        # Compute |alpha - alpha_t|
+        diff = torch.abs(alpha.unsqueeze(1) - scheduler_alpha.unsqueeze(0))
+        timesteps = diff.argmin(dim=1)  # (N,)
+
+        # Sample noise
         eps = torch.randn((len(logsnr),) + self.shape, dtype=x.dtype, device=x.device)
-        noisy_data = self.noise_scheduler.add_noise(x, eps, timestep)
-        return noisy_data, timestep, eps
+
+        # DDPM forward step
+        noisy_x = self.noise_scheduler.add_noise(x, eps, timesteps)
+        return noisy_x, timesteps, eps
 
     def mse(self, batch, logsnr, mse_type='epsilon', xinterval=None, stochastic=False, clamping = False):
-        """Return MSE curve either conditioned or not on y.
-        x_hat = z/sqrt(snr) - eps_hat(z, snr)/sqrt(snr),
-        so x_hat - x = (eps - eps_hat(z, snr))/sqrt(snr).
-        And we actually reparametrize eps_hat to depend on eps(z/sqrt(1+snr), snr)
-        Options are:
-        mse_type: {"epsilon" or "x"), for error in predicting noise, or predicting data.
-        xinterval: Whether predictions should be clamped to some interval.
-        delta: If provided, hard round to the nearest discrete value
-        soft: If provided, soft round to the nearest discrete value
         """
-        x = batch[0].to(self.device)  # assume iterator gives other things besides x in list (e.g. y)
+        Compute per-sample MSE between predicted noise eps_hat and true eps.
+        If mse_type='epsilon', returns ||eps - eps_hat||^2.
+        """
+        x = batch[0].to(self.device)
         z, timesteps, eps = self.noisy_channel(x, logsnr)
 
+        # Unpack conditioning
+        local_cond, global_cond, cond_data, cond_mask = batch[1:]
 
-        local_cond = batch[1]
-        global_cond = batch[2]
-        cond_data = batch[3]
-        cond_mask = batch[4]
-
+        # Apply imputation mask
         z[cond_mask] = cond_data[cond_mask]
 
         eps_hat = self.model(z, timesteps, local_cond=local_cond, global_cond=global_cond,
                              stochastic = stochastic, clamping= clamping)
         
-        err_eps = (eps - eps_hat).flatten(start_dim=1) 
-        mse_eps = torch.einsum('ij,ij->i', err_eps, err_eps)  # MSE for epsilon
-        # if mse_type == 'epsilon':
-        #     return mse_x * torch.exp(logsnr)  # Special form of x_hat, eps_hat leads to this relation
-        # elif mse_type == 'x':
-        #     return mse_x
-        
-        # x_hat = torch.sqrt(1 + torch.exp(-logsnr.view(self.left))) * z - eps_hat * torch.exp(-logsnr.view(self.left) / 2)
-        # if xinterval:
-        #     x_hat = torch.clamp(x_hat, xinterval[0], xinterval[1])  # clamp predictions to not fall outside of range
-        # err = (x - x_hat).flatten(start_dim=1)  # Flatten for, e.g., image data
-        # mse_x = torch.einsum('ij,ij->i', err, err)  # MSE for epsilon
-        # if mse_type == 'epsilon':
-        #     return mse_x * torch.exp(logsnr)  # Special form of x_hat, eps_hat leads to this relation
-        # elif mse_type == 'x':
-        #     return mse_x
+        # compute loss mask
+        loss_mask = (~cond_mask).float()        # same shape as eps
+
+        sse = ((eps - eps_hat)**2 * loss_mask)  # masked squared error
+        mse_eps = sse.flatten(start_dim=1).sum(dim=1)
+
         return mse_eps
 
     def nll(self, batch, logsnr_samples_per_x=1, xinterval=None, stochastic = False, clamping = False):
-        """-log p(x) (or -log p(x|y) if y is provided) estimated for a batch."""
-        nll = 0
+        """Monte-Carlo estimate of -log p(x)."""
+        total = 0
+        B = len(batch[0])
+
         for _ in range(logsnr_samples_per_x):
-            logsnr, w = self.logistic_integrate(len(batch[0]), *self.loc_scale, device=self.device)
+            logsnr, w = self.logistic_integrate(
+                B, *self.loc_scale, device=self.device
+            )
             mses = self.mse(batch, logsnr, mse_type='epsilon', xinterval=xinterval, stochastic=stochastic, clamping=clamping)
-            nll += self.loss(mses, logsnr, w) / logsnr_samples_per_x
-        return nll
+            total += self.loss(mses, logsnr, w)
+        return total / logsnr_samples_per_x
 
     def loss(self, mses, logsnr, w):
         """
-        Returns the (per-sample) losses from MSEs, for convenience adding constants to match
-        with NLL expression.
-        :param mses:  Mean square error for *epsilon*
-        :param logsnr:  Log signal to noise ratio
-        :param w:  Integration weights
-        :return: loss, -log p(x) estimate
+        MSE → NLL conversion using analytic Gaussian MMSE gap.
         """
-        mmse_gap = mses - self.mmse_g(
-            logsnr)  # The "scale" does not change the integral, but may be more numerically stable.
-        loss = self.h_g + 0.5 * (w * mmse_gap).mean()
-        return loss  # *logsnr integration, see paper
+        mmse_gap = mses - self.mmse_g(logsnr)
+        return self.h_g + 0.5 * (w * mmse_gap).mean()
 
     @torch.no_grad()
     def test_nll(self, dataloader, epoch, npoints=100, xinterval=None, stochastic = False, clamping=False):
@@ -792,6 +711,10 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         # normalize the data
         nbatch = self.normalizer.normalize(batch)
         data = nbatch["action"].to(self.device)
+
+        if not (self.obs_as_local_cond or self.obs_as_global_cond):
+            cond = nbatch["obs"].to(self.device)
+            data = torch.cat([data, cond], dim=-1)
 
         self.d = len(data[0].flatten())
         if not diagonal:

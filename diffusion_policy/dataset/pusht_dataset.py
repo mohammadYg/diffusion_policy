@@ -19,7 +19,6 @@ class PushTLowdimDataset(BaseLowdimDataset):
             state_key='state',
             action_key='action',
             seed=42,
-            seed_pac=123,
             val_ratio=0.0,
             max_train_episodes=None,
             train_episodes_for_PAC_Bayes= 0
@@ -46,7 +45,7 @@ class PushTLowdimDataset(BaseLowdimDataset):
             # Get the indices of validation episodes
             train_indices = np.where(train_mask)[0]
             # Reproducible random generator
-            rng = np.random.default_rng(seed_pac)
+            rng = np.random.default_rng(seed)
             # Randomly choose demos from train dataset
             n_train_pac = min(train_episodes_for_PAC_Bayes, len(train_indices))
             train_pac_indices = rng.choice(train_indices, size=n_train_pac, replace=False)
@@ -64,10 +63,10 @@ class PushTLowdimDataset(BaseLowdimDataset):
         self.obs_key = obs_key
         self.state_key = state_key
         self.action_key = action_key
-        self.train_mask = train_mask
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
+        self.train_mask = train_mask
         self.val_mask = val_mask
         self.pac_mask = pac_mask
 
