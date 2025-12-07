@@ -71,8 +71,13 @@ def main(checkpoint, output_dir, device, override):
             runner_log = env_runner.run(policy)
         success_rate.append(runner_log["test/mean_score"])
 
+    if cfg.task.n_repeat_runner > 1:
+        ddof = 1
+    else:
+        ddof = 0
+
     avg_success_rate = np.mean(success_rate)
-    var_success_rate = np.var(success_rate, ddof=1)
+    var_success_rate = np.var(success_rate, ddof=ddof)
 
     # configure dataset
     dataset: BaseLowdimDataset
@@ -101,16 +106,41 @@ def main(checkpoint, output_dir, device, override):
                     emp_loss_test = policy.compute_loss(batch)
                     val_losses_noise_pred.append(emp_loss_test.item() * n_samples)
             
-            val_loss_noise_pred.append(torch.sum(torch.tensor(val_losses_noise_pred)).item()/n_total_samples)
-    avg_loss_pred_noise = np.mean(val_loss_noise_pred)
-    var_loss_pred_noise = np.var(val_loss_noise_pred, ddof=1)
+            val_loss_noise_pred.append(np.sum(val_losses_noise_pred)/n_total_samples)
 
+    avg_loss_pred_noise = np.mean(val_loss_noise_pred)
+    var_loss_pred_noise = np.var(val_loss_noise_pred, ddof=ddof)
+
+    # Reconstructions loss
+    n_MC= 1
+    with torch.no_grad():
+        val_action_rec_loss = list()
+        n_total_samples = 0
+        with tqdm.tqdm(val_dataloader, desc=f"Validation: Action Prediction loss", 
+                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+            for batch in tepoch:
+                n_samples = len(batch["obs"])
+                n_total_samples += n_samples
+                # device transfer
+                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                # initial noise
+                shape = (n_samples, cfg.horizon, cfg.action_dim + cfg.obs_dim)
+                noise = torch.randn(shape, device=batch["action"].device)
+                for _ in range (n_MC):
+                    if isinstance(policy, BaseLowdimProbPolicy):
+                        rec_loss = policy.compute_action_reconst_loss(noise, batch, cfg.eval.stochastic, 
+                        cfg.eval.clamping, loss_type = "MSE")
+                    else:
+                         rec_loss = policy.compute_action_reconst_loss(noise, batch, loss_type = "MSE")
+                    val_action_rec_loss.append(rec_loss.item() * n_samples)
+        action_reconst_loss =np.sum(val_action_rec_loss)/(n_total_samples*n_MC)     
     # dump log to json
     json_log = dict()
     json_log["test/avg_mean_score"] = avg_success_rate
     json_log["test/var_mean_score"] = var_success_rate
     json_log["test/avg_loss_noise_pred"] = avg_loss_pred_noise
     json_log["test/var_loss_noise_pred"] = var_loss_pred_noise
+    json_log["test/action_reconst_loss"] = action_reconst_loss
 
     for key, value in runner_log.items():
         if isinstance(value, wandb.sdk.data_types.video.Video):

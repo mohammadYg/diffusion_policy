@@ -5,6 +5,7 @@ action_dim: 2
 keypoint_dim: 2
 
 n_repeat_runner: 3
+n_MC: 5
 
 env_runner:
   _target_: diffusion_policy.env_runner.pusht_keypoints_runner.PushTKeypointsRunner

@@ -321,7 +321,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         return loss_sum, loss_emp, kl
 
     # ========= Compute Reconstruction Loss of PAC-Bayes Bounds for case where we do inference from last step ============
-    def compute_reconst_loss_T(self, batch, loss_type, stochastic=False, clamping=False):
+    def compute_action_reconst_loss(self, init_noise, batch, stochastic, clamping, loss_type):
         
         nbatch = self.normalizer.normalize(batch)
         nobs = nbatch['obs']
@@ -349,10 +349,12 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             local_cond[:,:To] = nobs[:,:To]
             shape = (B, T, Da)
             cond_mask = torch.zeros(size=shape, device=device, dtype=torch.bool)
+            init_noise = init_noise[...,:Da]
         
         elif self.obs_as_global_cond:
             # condition throught global feature
             global_cond = nobs[:,:To].reshape(nobs.shape[0], -1)
+            init_noise = init_noise[...,:Da]
             shape = (B, T, Da)
             if self.pred_action_steps_only:
                 shape = (B, self.n_action_steps, Da)
@@ -361,6 +363,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
                     start = To - 1
                 end = start + self.n_action_steps
                 trajectory = naction[:,start:end]
+                init_noise = init_noise[:, start:end]
             cond_mask = torch.zeros(size=shape, device=device, dtype=torch.bool)
         else:
             # condition through impainting
@@ -368,20 +371,16 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             cond_mask = torch.zeros(size=shape, device=device, dtype=torch.bool)
             cond_mask[:,:To,Da:] = True
             trajectory = torch.cat([naction, nobs], dim=-1)
-
-        # # Sample noise that we'll add to the input
-        noise = torch.randn(trajectory.shape, device=trajectory.device)
         
-        # # set timestep to last noising step for each image
+        # set timestep to last noising step for each sanmple
         timestep = self.noise_scheduler.timesteps[0]
 
-        # # Add noise to the clean images according to the noise magnitude at each timestep
-        # # (this is the forward diffusion process)
-        noisy_trajectory = self.noise_scheduler.add_noise(trajectory, noise, timestep)
+        # Add noise to the clean images according to the noise magnitude at each timestep
+        noisy_trajectory = self.noise_scheduler.add_noise(trajectory, init_noise, timestep)
         
         # set step values
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
-    
+        
         for t in self.noise_scheduler.timesteps:
             
             # 1. apply conditioning
@@ -389,9 +388,9 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     
             # 2. predict model output
             model_output = self.model(noisy_trajectory, t, 
-                local_cond=local_cond, global_cond=global_cond,
-                stochastic = stochastic, clamping = clamping)
-            
+                            local_cond=local_cond, global_cond=global_cond,
+                            stochastic = stochastic, clamping = clamping)
+
             # 3. compute previous image: x_t -> x_t-1
             noisy_trajectory = self.noise_scheduler.step(
                 model_output, t, noisy_trajectory,
@@ -399,21 +398,22 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
                 **self.kwargs
                 ).prev_sample
                
-        #finally make sure conditioning is enforced
+        # finally make sure conditioning is enforced
         noisy_trajectory[cond_mask] = trajectory[cond_mask]
         
-        # prediction
+        # extract only predicted actions
         naction_pred = noisy_trajectory[...,:Da]
 
-        # # compute loss
+        # compute loss
         if loss_type == "MSE":
             loss = F.mse_loss(naction_pred, trajectory[...,:Da])
+
         elif loss_type == "RMSE":
             loss = torch.sqrt(F.mse_loss(naction_pred, trajectory[...,:Da]))
         else: 
             loss = torch.linalg.norm(naction_pred - trajectory[...,:Da], ord=2, dim=(1, 2)).mean()
-        
-        return loss 
+            
+        return loss
     
     # ========================== Lipschitz Constant of the Denoising ==========================
     def lip_const(self, obs, stochastic=False, clamping=False):

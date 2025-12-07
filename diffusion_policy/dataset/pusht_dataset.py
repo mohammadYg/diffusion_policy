@@ -19,6 +19,7 @@ class PushTLowdimDataset(BaseLowdimDataset):
             state_key='state',
             action_key='action',
             seed=42,
+            seed_pac=42,
             val_ratio=0.0,
             max_train_episodes=None,
             train_episodes_for_PAC_Bayes= 0
