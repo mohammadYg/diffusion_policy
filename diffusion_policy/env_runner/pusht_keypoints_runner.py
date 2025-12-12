@@ -208,6 +208,10 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 leave=False, mininterval=self.tqdm_interval_sec)
             done = False
             consecutive_step = 0
+
+            all_generated_actions = []
+            all_generated_actions_normalized = []
+            
             while not done:
                 Do = obs.shape[-1] // 2
                 # create obs dict
@@ -245,6 +249,10 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 # handle latency_steps, we discard the first n_latency_steps actions
                 # to simulate latency
                 action = np_action_dict['action'][:,self.n_latency_steps:]
+                action_pred = np_action_dict['action_pred']
+                action_pred_normalized = np_action_dict['action_pred_normalized']
+                all_generated_actions.append(action_pred)                       # list of arrays
+                all_generated_actions_normalized.append(action_pred_normalized) # list of arrays
 
                 if self.out_of_dist:
                     action = action + self.offset
@@ -300,11 +308,22 @@ class PushTKeypointsRunner(BaseLowdimRunner):
             name = prefix+'mean_score'
             value = np.mean(value)
             log_data[name] = value
+        
+        # Convert to tensors only once
+        gen = torch.tensor(
+            np.concatenate(all_generated_actions, axis=0)   # concat over steps
+        )   # shape: (M, 16, 2)
 
+        gen_norm = torch.tensor(
+            np.concatenate(all_generated_actions_normalized, axis=0)
+        )
+
+        log_data['generated_actions'] = gen
+        log_data['generated_actions_normalized'] = gen_norm
         return log_data
 
 
-    def run_prob(self, policy: BaseLowdimProbPolicy, stochastic=False, clamping=False):
+    def run_prob(self, policy: BaseLowdimProbPolicy, stochastic=False):
             device = policy.device
             dtype = policy.dtype
 
@@ -344,7 +363,10 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 pbar = tqdm.tqdm(total=self.max_steps, desc=f"Eval PushtKeypointsRunner {chunk_idx+1}/{n_chunks}", 
                     leave=False, mininterval=self.tqdm_interval_sec)
                 done = False
+                #done_all = np.array([False]*n_envs)
                 consecutive_step = 0
+                all_generated_actions = []
+                all_generated_actions_normalized = []
                 while not done:
                     Do = obs.shape[-1] // 2
                     # create obs dict
@@ -370,7 +392,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                     # run policy
                     #start_time = time.perf_counter()
                     with torch.no_grad():
-                        action_dict = policy.predict_action(obs_dict, stochastic=stochastic, clamping=clamping)
+                        action_dict = policy.predict_action(obs_dict, stochastic=stochastic)
                     #end_time = time.perf_counter()
                     #elapsed_time = end_time - start_time
                     #print (f"Elapsed time:{elapsed_time} seconds")
@@ -381,6 +403,11 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                     # handle latency_steps, we discard the first n_latency_steps actions
                     # to simulate latency
                     action = np_action_dict['action'][:,self.n_latency_steps:]
+                    action_pred = np_action_dict['action_pred']
+                    action_pred_normalized = np_action_dict['action_pred_normalized']
+                    #all_generated_actions.append(action_pred[~done_all])                       # list of arrays
+                    all_generated_actions.append(action_pred)   
+                    all_generated_actions_normalized.append(action_pred_normalized) # list of arrays
 
                     if self.out_of_dist:
                         action = action + self.offset
@@ -395,6 +422,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                     
                     # step env
                     obs, reward, done, info = env.step(action)
+                    #done_all = done
                     done = np.all(done)
                     past_action = action
 
@@ -437,4 +465,15 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 value = np.mean(value)
                 log_data[name] = value
 
+            # Convert to tensors only once
+            gen = torch.tensor(
+                np.concatenate(all_generated_actions, axis=0)   # concat over steps
+            )   # shape: (M, 16, 2)
+
+            gen_norm = torch.tensor(
+                np.concatenate(all_generated_actions_normalized, axis=0)
+            )
+
+            log_data['generated_actions'] = gen
+            log_data['generated_actions_normalized'] = gen_norm
             return log_data

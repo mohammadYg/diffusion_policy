@@ -348,7 +348,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         return log_data
     
 
-    def run_prob(self, policy: BaseLowdimProbPolicy, stochastic=False, clamping=False):
+    def run_prob(self, policy: BaseLowdimProbPolicy, stochastic=False):
         device = policy.device
         dtype = policy.dtype
         env = self.env
@@ -407,7 +407,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
 
                 # run policy
                 with torch.no_grad():
-                    action_dict = policy.predict_action(obs_dict, stochastic=stochastic, clamping=clamping)
+                    action_dict = policy.predict_action(obs_dict, stochastic=stochastic)
 
                 # device_transfer
                 np_action_dict = dict_apply(action_dict,

@@ -28,18 +28,18 @@ class SinusoidalPosEmb(nn.Module):
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
     
-def regression_output_transform(x, clamping=True, min_val=-1.0, max_val=1.0):
-    """Transform output for regression with clamping between min_val and max_val"""
-    if clamping:
-        x = torch.clamp(x, min_val, max_val)
-    return x
+# def regression_output_transform(x, clamping=True, min_val=-1.0, max_val=1.0):
+#     """Transform output for regression with clamping between min_val and max_val"""
+#     if clamping:
+#         x = torch.clamp(x, min_val, max_val)
+#     return x
 
-# Or use a smooth clamping function like tanh
-def tanh_output_transform(x, clamping=True):
-    """Use tanh to smoothly constrain outputs between -1 and 1"""
-    if clamping:
-        x = torch.tanh(x)
-    return x
+# # Or use a smooth clamping function like tanh
+# def tanh_output_transform(x, clamping=True):
+#     """Use tanh to smoothly constrain outputs between -1 and 1"""
+#     if clamping:
+#         x = torch.tanh(x)
+#     return x
 
 def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
     # type: (Tensor, float, float, float, float) -> Tensor
@@ -971,7 +971,7 @@ class BayesianConditionalUnet1D(nn.Module):
 
         if output_dim is None:
             output_dim = input_dim
-        print("output_dim", output_dim)
+        #print("output_dim", output_dim)
 
         all_dims = [input_dim] + list(down_dims)
         start_dim = down_dims[0]
@@ -1302,7 +1302,6 @@ class BayesianConditionalUnet1D(nn.Module):
         local_cond=None,
         global_cond=None,
         stochastic=False,  # Added stochastic parameter
-        clamping = True,
         **kwargs,
     ):
         """
@@ -1384,29 +1383,24 @@ class BayesianConditionalUnet1D(nn.Module):
         # Apply final convolution with stochastic sampling
         x = self.final_conv[0](x, stochastic=stochastic)
         x = self.final_conv[1](x, stochastic=stochastic)
-
-        # Apply output transformation
-        if clamping:
-            x = self._apply_output_transform(x)
-
         x = einops.rearrange(x, "b t h -> b h t")
         return x
     
-    def _apply_output_transform(self, x):
-        """Apply the selected output transformation"""
-        if self.output_transform_type == 'clamp':
-            return regression_output_transform(
-                x, 
-                clamping=True, 
-                min_val=self.output_clamp_min, 
-                max_val=self.output_clamp_max
-            )
-        elif self.output_transform_type == 'tanh':
-            return tanh_output_transform(x, clamping=True)
-        elif self.output_transform_type == 'none':
-            return x
-        else:
-            raise ValueError(f"Unknown output_transform_type: {self.output_transform_type}")
+    # def _apply_output_transform(self, x):
+    #     """Apply the selected output transformation"""
+    #     if self.output_transform_type == 'clamp':
+    #         return regression_output_transform(
+    #             x, 
+    #             clamping=True, 
+    #             min_val=self.output_clamp_min, 
+    #             max_val=self.output_clamp_max
+    #         )
+    #     elif self.output_transform_type == 'tanh':
+    #         return tanh_output_transform(x, clamping=True)
+    #     elif self.output_transform_type == 'none':
+    #         return x
+    #     else:
+    #         raise ValueError(f"Unknown output_transform_type: {self.output_transform_type}")
 
     def compute_kl(self):
         """Compute total KL divergence from all probabilistic components"""

@@ -162,6 +162,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         
         # unnormalize prediction
         naction_pred = nsample[...,:Da]
+        action_pred_normalized = naction_pred
         action_pred = self.normalizer['action'].unnormalize(naction_pred)
 
         # get action
@@ -176,7 +177,8 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         
         result = {
             'action': action,
-            'action_pred': action_pred
+            'action_pred': action_pred,
+            'action_pred_normalized': action_pred_normalized
         }
         if not (self.obs_as_local_cond or self.obs_as_global_cond):
             nobs_pred = nsample[...,Da:]
@@ -190,7 +192,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def compute_loss(self, batch):
+    def compute_loss(self, batch, train = True):
         # normalize input
         assert 'valid_mask' not in batch
         nbatch = self.normalizer.normalize(batch)
@@ -228,10 +230,13 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         noise = torch.randn(trajectory.shape, device=trajectory.device)
         bsz = trajectory.shape[0]
         # Sample a random timestep for each image
-        timesteps = torch.randint(
-            0, self.noise_scheduler.config.num_train_timesteps, 
-            (bsz,), device=trajectory.device
-        ).long()
+        if train:
+            timesteps = torch.randint(
+                0, self.noise_scheduler.config.num_train_timesteps, 
+                (bsz,), device=trajectory.device
+            ).long()
+        else:
+            timesteps = torch.ones(bsz, device=trajectory.device).long() * 10
         # Add noise to the clean images according to the noise magnitude at each timestep
         # (this is the forward diffusion process)
         noisy_trajectory = self.noise_scheduler.add_noise(
@@ -262,7 +267,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         return loss
 
     # ========= Compute Reconstruction Loss of PAC-Bayes Bounds for case where we do inference from last step ============
-    def compute_action_reconst_loss(self, init_noise, batch, loss_type):
+    def compute_action_reconst_loss(self, init_noise, batch, loss_type, normalized):
         
         nbatch = self.normalizer.normalize(batch)
         nobs = nbatch['obs']
@@ -342,20 +347,86 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         noisy_trajectory[cond_mask] = trajectory[cond_mask]
         
         # extract only predicted actions
-        naction_pred = noisy_trajectory[...,:Da]
+        if not normalized:
+            action_pred = self.normalizer['action'].unnormalize(noisy_trajectory[...,:Da])
+            action_ref  = self.normalizer['action'].unnormalize(trajectory[...,:Da])
+        else:
+            action_pred = noisy_trajectory[...,:Da]
+            action_ref = trajectory[...,:Da]
 
         # compute loss
         if loss_type == "MSE":
-            loss = F.mse_loss(naction_pred, trajectory[...,:Da])
+            loss = F.mse_loss(action_pred, action_ref)
 
         elif loss_type == "RMSE":
-            loss = torch.sqrt(F.mse_loss(naction_pred, trajectory[...,:Da]))
+            loss = torch.sqrt(F.mse_loss(action_pred, action_ref))
         else: 
-            loss = torch.linalg.norm(naction_pred - trajectory[...,:Da], ord=2, dim=(1, 2)).mean()
+            loss = torch.linalg.norm(action_pred - action_ref, ord=2, dim=(1, 2)).mean()
             
         return loss
   
-    
+    ## ========= Memorization Evaluation ============
+    def eval_memorization(self, dataloader_eval, dataloader_train, normalized, device, threshold=0.3):
+        # -----------------------------------------------------------
+        # 1. Load all training actions once
+        # -----------------------------------------------------------
+        train_actions_list = []
+        with torch.inference_mode():
+            with tqdm.tqdm(dataloader_train, desc=f"Memorization Eval: Load all training actions once", 
+                                leave=False, mininterval=1.0) as tepoch:
+                for batch in tepoch:
+                    batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                    if normalized:
+                        batch = self.normalizer.normalize(batch)
+                    train_actions_list.append(batch['action'])
+            train_actions = torch.cat(train_actions_list, dim=0)   # (N_train, H, A)
+
+        # -----------------------------------------------------------
+        # 2. Compute nearest-neighbor ratios for all eval samples
+        # -----------------------------------------------------------
+        all_ratios = []
+        with torch.inference_mode():
+            with tqdm.tqdm(dataloader_train, desc=f"Memorization Eval: Compute nearest-neighbor ratios for all eval samples", 
+                                leave=False, mininterval=1.0) as tepoch:
+                for batch in tepoch:
+                    batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+
+                    # Predict actions
+                    action = self.predict_action({'obs': batch['obs']})
+                    gen_actions = action["action_pred_normalized"] if normalized else action["action_pred"]
+                    gen_actions = gen_actions.to(device)
+
+                    # Compute pairwise distances: (B_eval, N_train)
+                    diff = gen_actions[:, None, :, :] - train_actions[None, :, :, :]
+                    dist = torch.sqrt(torch.sum(diff ** 2, dim=(2, 3)))   # (B_eval, N_train)
+
+                    # Extract 2 nearest distances
+                    smallest_vals, _ = torch.topk(dist, k=2, largest=False)
+                    # smallest_vals: (B_eval, 2)
+
+                    # Compute ratio d1 / d2
+                    ratios = smallest_vals[:, 0] / smallest_vals[:, 1]
+                    all_ratios.append(ratios.cpu())
+
+        # Concatenate all batches
+        all_ratios = torch.cat(all_ratios, dim=0)   # (N_eval,)
+
+        # -----------------------------------------------------------
+        # 3. Compute required metrics
+        # -----------------------------------------------------------
+        mean_ratio = all_ratios.mean().item()
+
+        # Memorized samples
+        memorized_mask = all_ratios < threshold
+        memorized_count = memorized_mask.sum().item()
+
+        # Memorization fraction
+        total_generated = all_ratios.numel()
+        memorization_fraction = 100.0*memorized_count / total_generated
+
+        return mean_ratio, memorized_count, memorization_fraction
+
+
     # ========= Lipschitz Constant of the Denoising ============
     def lip_const(self, obs):
         nobs = self.normalizer['obs'].normalize(obs)
@@ -1061,7 +1132,10 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
                 NLL+=logp.sum()
 
         return NLL/n_samples
-    # # ========= PAC-Bayes Bounds ============
+    
+    
+
+
     # @torch.no_grad()
     # def test_nll(self, dataloader, epoch, npoints=100, xinterval=None):
     #     """Calculate expected NLL on data at test time.  Main difference is that we can clamp the integration

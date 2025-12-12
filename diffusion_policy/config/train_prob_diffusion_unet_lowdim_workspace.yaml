@@ -40,9 +40,9 @@ policy_prob:
     prior_dist: 'gaussian'
     init_prior: 'zeros'
     #init_net: "data/outputs/2025.10.30/16.25.02_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0100-test_mean_score=0.803.ckpt"
+    #init_net_prior: null
     init_net: null
     init_net_prior: null # Separate prior initialization
-    #init_net_prior: null
     # Output transformation parameters
     output_transform_type: 'none'  # 'clamp', 'tanh', or 'none'
     output_clamp_min: -1.0
@@ -149,7 +149,6 @@ training:
 
 eval:
   stochastic: False
-  clamping: False
   delta: 0.05
   mc_sampling: 1000
 
@@ -180,7 +179,7 @@ checkpoint_every:
   
 checkpoint_nll:
   topk:
-    monitor_key: nll_bpd
+    monitor_key: test_nll_bpd
     mode: min
     k: 3
     format_str: 'epoch={epoch:04d}-nll_bpd={nll_bpd:.3f}.ckpt'

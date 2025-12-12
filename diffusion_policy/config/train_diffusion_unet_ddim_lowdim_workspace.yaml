@@ -18,7 +18,7 @@ n_latency_steps: 0
 past_action_visible: False
 keypoint_visible_rate: 1.0
 obs_as_local_cond: False
-obs_as_global_cond: False
+obs_as_global_cond: True
 pred_action_steps_only: False
 
 policy:
@@ -53,7 +53,7 @@ policy:
   action_dim: ${action_dim}
   n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
   n_obs_steps: ${n_obs_steps}
-  num_inference_steps: 100
+  num_inference_steps: 8
   obs_as_local_cond: ${obs_as_local_cond}
   obs_as_global_cond: ${obs_as_global_cond}
   pred_action_steps_only: ${pred_action_steps_only}
@@ -109,23 +109,24 @@ training:
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 4500
+  num_epochs: 500
   gradient_accumulate_every: 1
   use_ema: True
   # training loop control
   # in epochs
   rollout_every: 50
   checkpoint_every: 50
-  val_every: 50
-  sample_every: 50
-  PAC_Bayes_every: 5000
+  val_every: 1
+  sample_every: 50000
+  reconstraction_every: 50
   nll_every: 50
+  memorization_every: 50
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
   # misc
   tqdm_interval_sec: 1.0
-  PAC_loss_type: "norm2"
+  PAC_loss_type: "Norm"
   random_timestep: False
   # PAC-Bayes Bounds 
   num_expect: 10
@@ -150,12 +151,19 @@ checkpoint:
   save_last_ckpt: True
   save_last_snapshot: False
 
+checkpoint_every:
+  topk:
+    monitor_key: epoch
+    format_str: 'epoch={epoch:04d}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
 checkpoint_nll:
   topk:
-    monitor_key: nll_bpd
+    monitor_key: test_nll_bpd
     mode: min
     k: 1
-    format_str: 'epoch={epoch:04d}-nll_bpd={nll_bpd:.3f}.ckpt'
+    format_str: 'epoch={epoch:04d}-nll_bpd={test_nll_bpd:.3f}.ckpt'
   save_last_ckpt: False
   save_last_snapshot: False
 

@@ -128,8 +128,7 @@ def main(checkpoint, output_dir, device, override):
                 noise = torch.randn(shape, device=batch["action"].device)
                 for _ in range (n_MC):
                     if isinstance(policy, BaseLowdimProbPolicy):
-                        rec_loss = policy.compute_action_reconst_loss(noise, batch, cfg.eval.stochastic, 
-                        cfg.eval.clamping, loss_type = "MSE")
+                        rec_loss = policy.compute_action_reconst_loss(noise, batch, cfg.eval.stochastic, loss_type = "MSE")
                     else:
                          rec_loss = policy.compute_action_reconst_loss(noise, batch, loss_type = "MSE")
                     val_action_rec_loss.append(rec_loss.item() * n_samples)
@@ -145,8 +144,12 @@ def main(checkpoint, output_dir, device, override):
     for key, value in runner_log.items():
         if isinstance(value, wandb.sdk.data_types.video.Video):
             json_log[key] = value._path
+        elif isinstance(value, torch.Tensor):
+            # completely remove tensor entries
+            continue
         else:
             json_log[key] = value
+            
     out_path = os.path.join(output_dir, 'eval_log.json')
     json.dump(json_log, open(out_path, 'w'), indent=2, sort_keys=True)
 

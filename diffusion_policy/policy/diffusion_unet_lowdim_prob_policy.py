@@ -13,6 +13,7 @@ from diffusion_policy.model.diffusion.conditional_prob_unet1d import BayesianCon
 from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from diffusion_policy.common.SDE import VPSDE
 from diffusion_policy.common.likelihood import get_likelihood_fn
+from diffusion_policy.common.pytorch_util import dict_apply
 
 import collections
 import math 
@@ -68,7 +69,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     def conditional_sample(self, 
             condition_data, condition_mask,
             local_cond=None, global_cond=None,
-            stochastic = False, clamping = True,
+            stochastic = False,
             generator=None,
             # keyword arguments to scheduler.step
             **kwargs
@@ -92,7 +93,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             # 2. predict model output
             model_output = model(trajectory, t, 
                 local_cond=local_cond, global_cond=global_cond, 
-                stochastic = stochastic, clamping = clamping)
+                stochastic = stochastic)
 
             # 3. compute previous image: x_t -> x_t-1
             trajectory = scheduler.step(
@@ -107,7 +108,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         return trajectory
 
 
-    def predict_action(self, obs_dict: Dict[str, torch.Tensor], stochastic=False, clamping=True) -> Dict[str, torch.Tensor]:
+    def predict_action(self, obs_dict: Dict[str, torch.Tensor], stochastic=False) -> Dict[str, torch.Tensor]:
         """
         obs_dict: must include "obs" key
         result: must include "action" key
@@ -160,11 +161,11 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             local_cond=local_cond,
             global_cond=global_cond,
             stochastic=stochastic,
-            clamping = clamping,
             **self.kwargs)
         
         # unnormalize prediction
         naction_pred = nsample[...,:Da]
+        action_pred_normalized = naction_pred
         action_pred = self.normalizer['action'].unnormalize(naction_pred)
 
         # get action
@@ -179,7 +180,8 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         
         result = {
             'action': action,
-            'action_pred': action_pred
+            'action_pred': action_pred,
+            'action_pred_normalized': action_pred_normalized
         }
         if not (self.obs_as_local_cond or self.obs_as_global_cond):
             nobs_pred = nsample[...,Da:]
@@ -193,7 +195,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def compute_loss(self, batch, stochastic=False, clamping=True):
+    def compute_loss(self, batch, stochastic=False, train= True):
         # normalize input
         assert 'valid_mask' not in batch
         nbatch = self.normalizer.normalize(batch)
@@ -231,10 +233,13 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         noise = torch.randn(trajectory.shape, device=trajectory.device)
         bsz = trajectory.shape[0]
         # Sample a random timestep for each image
-        timesteps = torch.randint(
-            0, self.noise_scheduler.config.num_train_timesteps, 
-            (bsz,), device=trajectory.device
-        ).long()
+        if train:    
+            timesteps = torch.randint(
+                0, self.noise_scheduler.config.num_train_timesteps, 
+                (bsz,), device=trajectory.device
+            ).long()
+        else:
+            timesteps = torch.ones(bsz, device=trajectory.device).long() * 10
         # Add noise to the clean images according to the noise magnitude at each timestep
         # (this is the forward diffusion process)
         noisy_trajectory = self.noise_scheduler.add_noise(
@@ -249,7 +254,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         # Predict the noise residual
         pred = self.model(noisy_trajectory, timesteps, 
             local_cond=local_cond, global_cond=global_cond,
-            stochastic = stochastic, clamping = clamping)
+            stochastic = stochastic)
 
         pred_type = self.noise_scheduler.config.prediction_type 
         if pred_type == 'epsilon':
@@ -265,10 +270,10 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         loss = loss.mean()
         return loss
     
-    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, kl_penalty = 0.005, mc_sampling=1000, stochastic = True, clamping = False, bounded = False):
+    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, kl_penalty = 0.005, mc_sampling=1000, stochastic = True, train = True, bounded = False):
         
         # DM emprical risk
-        loss_emp = self.compute_loss(batch, stochastic=stochastic, clamping=clamping)
+        loss_emp = self.compute_loss(batch, stochastic=stochastic, train=train)
         scale = 2.0
         if bounded:
             loss_emp_scaled = loss_emp/scale
@@ -321,7 +326,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         return loss_sum, loss_emp, kl
 
     # ========= Compute Reconstruction Loss of PAC-Bayes Bounds for case where we do inference from last step ============
-    def compute_action_reconst_loss(self, init_noise, batch, stochastic, clamping, loss_type):
+    def compute_action_reconst_loss(self, init_noise, batch, stochastic, loss_type, normalized=False):
         
         nbatch = self.normalizer.normalize(batch)
         nobs = nbatch['obs']
@@ -389,7 +394,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             # 2. predict model output
             model_output = self.model(noisy_trajectory, t, 
                             local_cond=local_cond, global_cond=global_cond,
-                            stochastic = stochastic, clamping = clamping)
+                            stochastic = stochastic)
 
             # 3. compute previous image: x_t -> x_t-1
             noisy_trajectory = self.noise_scheduler.step(
@@ -402,21 +407,87 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         noisy_trajectory[cond_mask] = trajectory[cond_mask]
         
         # extract only predicted actions
-        naction_pred = noisy_trajectory[...,:Da]
+        if not normalized:
+            action_pred = self.normalizer['action'].unnormalize(noisy_trajectory[...,:Da])
+            action_ref  = self.normalizer['action'].unnormalize(trajectory[...,:Da])
+        else:
+            action_pred = noisy_trajectory[...,:Da]
+            action_ref = trajectory[...,:Da]
 
         # compute loss
         if loss_type == "MSE":
-            loss = F.mse_loss(naction_pred, trajectory[...,:Da])
+            loss = F.mse_loss(action_pred, action_ref)
 
         elif loss_type == "RMSE":
-            loss = torch.sqrt(F.mse_loss(naction_pred, trajectory[...,:Da]))
+            loss = torch.sqrt(F.mse_loss(action_pred, action_ref))
         else: 
-            loss = torch.linalg.norm(naction_pred - trajectory[...,:Da], ord=2, dim=(1, 2)).mean()
+            loss = torch.linalg.norm(action_pred - action_ref, ord=2, dim=(1, 2)).mean()
             
         return loss
     
+        ## ========= Memorization Evaluation ============
+    def eval_memorization(self, dataloader_eval, dataloader_train, stochastic, normalized, device, threshold=0.3):
+        # -----------------------------------------------------------
+        # 1. Load all training actions once
+        # -----------------------------------------------------------
+        train_actions_list = []
+        with torch.inference_mode():
+            with tqdm.tqdm(dataloader_train, desc=f"Memorization Eval: Load all training actions once", 
+                                leave=False, mininterval=1.0) as tepoch:
+                for batch in tepoch:
+                    batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                    if normalized:
+                        batch = self.normalizer.normalize(batch)
+                    train_actions_list.append(batch['action'])
+            train_actions = torch.cat(train_actions_list, dim=0)   # (N_train, H, A)
+        # -----------------------------------------------------------
+        # 2. Compute nearest-neighbor ratios for all eval samples
+        # -----------------------------------------------------------
+        all_ratios = []
+        with torch.inference_mode():
+            with tqdm.tqdm(dataloader_train, desc=f"Memorization Eval: Compute nearest-neighbor ratios for all eval samples", 
+                                leave=False, mininterval=1.0) as tepoch:
+                for batch in tepoch:
+                    batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+
+                    # Predict actions
+                    action = self.predict_action({'obs': batch['obs']}, stochastic=stochastic)
+                    gen_actions = action["action_pred_normalized"] if normalized else action["action_pred"]
+                    gen_actions = gen_actions.to(device)
+
+                    all_distances_train = []
+                    # Compute pairwise distances: (B_eval, N_train)
+                    diff = gen_actions[:, None, :, :] - train_actions[None, :, :, :]
+                    dist = torch.sqrt(torch.sum(diff ** 2, dim=(2, 3)))   # (B_eval, N_train)
+
+                    # Extract 2 nearest distances
+                    smallest_vals, _ = torch.topk(dist, k=2, largest=False)
+                    # smallest_vals: (B_eval, 2)
+
+                    # Compute ratio d1 / d2
+                    ratios = smallest_vals[:, 0] / smallest_vals[:, 1]
+                    all_ratios.append(ratios.cpu())
+
+        # Concatenate all batches
+        all_ratios = torch.cat(all_ratios, dim=0)   # (N_eval,)
+
+        # -----------------------------------------------------------
+        # 3. Compute required metrics
+        # -----------------------------------------------------------
+        mean_ratio = all_ratios.mean().item()
+
+        # Memorized samples
+        memorized_mask = all_ratios < threshold
+        memorized_count = memorized_mask.sum().item()
+
+        # Memorization fraction
+        total_generated = all_ratios.numel()
+        memorization_fraction = 100.0*memorized_count / total_generated
+
+        return mean_ratio, memorized_count, memorization_fraction
+    
     # ========================== Lipschitz Constant of the Denoising ==========================
-    def lip_const(self, obs, stochastic=False, clamping=False):
+    def lip_const(self, obs, stochastic=False):
         nobs = self.normalizer['obs'].normalize(obs)
         B, _, Do = nobs.shape
         To = self.n_obs_steps
@@ -480,7 +551,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             # 2. predict model output
             model_output = model(trajectory, t, 
                 local_cond=local_cond, global_cond=global_cond,
-                stochastic= stochastic, clamping=clamping)
+                stochastic= stochastic)
 
             # 3. compute previous image: x_t -> x_t-1
             trajectory = scheduler.step(
@@ -525,7 +596,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         noisy_x = self.noise_scheduler.add_noise(x, eps, timesteps)
         return noisy_x, timesteps, eps
 
-    def mse(self, batch, logsnr, mse_type='epsilon', xinterval=None, stochastic=False, clamping = False):
+    def mse(self, batch, logsnr, mse_type='epsilon', xinterval=None, stochastic=False):
         """
         Compute per-sample MSE between predicted noise eps_hat and true eps.
         If mse_type='epsilon', returns ||eps - eps_hat||^2.
@@ -540,7 +611,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         z[cond_mask] = cond_data[cond_mask]
 
         eps_hat = self.model(z, timesteps, local_cond=local_cond, global_cond=global_cond,
-                             stochastic = stochastic, clamping= clamping)
+                             stochastic = stochastic)
         
         # compute loss mask
         loss_mask = (~cond_mask).float()        # same shape as eps
@@ -550,7 +621,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
 
         return mse_eps
 
-    def nll(self, batch, logsnr_samples_per_x=1, xinterval=None, stochastic = False, clamping = False):
+    def nll(self, batch, logsnr_samples_per_x=1, xinterval=None, stochastic = False):
         """Monte-Carlo estimate of -log p(x)."""
         total = 0
         B = len(batch[0])
@@ -559,7 +630,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             logsnr, w = self.logistic_integrate(
                 B, *self.loc_scale, device=self.device
             )
-            mses = self.mse(batch, logsnr, mse_type='epsilon', xinterval=xinterval, stochastic=stochastic, clamping=clamping)
+            mses = self.mse(batch, logsnr, mse_type='epsilon', xinterval=xinterval, stochastic=stochastic)
             total += self.loss(mses, logsnr, w)
         return total / logsnr_samples_per_x
 
@@ -571,7 +642,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         return self.h_g + 0.5 * (w * mmse_gap).mean()
 
     @torch.no_grad()
-    def test_nll(self, dataloader, epoch, npoints=100, xinterval=None, stochastic = False, clamping=False):
+    def test_nll(self, dataloader, epoch, npoints=100, xinterval=None, stochastic = False):
         """Calculate expected NLL on data at test time.  Main difference is that we can clamp the integration
         range, because negative values of MMSE gap we can switch to Gaussian decoder to get zero.
         npoints - number of points to use in integration
@@ -655,7 +726,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
                 n_samples = len(data)
                 total_samples += n_samples
 
-                val_loss += self.nll([data, ] + batch[1:], xinterval=xinterval, stochastic=stochastic, clamping=clamping).cpu() * n_samples
+                val_loss += self.nll([data, ] + batch[1:], xinterval=xinterval, stochastic=stochastic).cpu() * n_samples
 
                 mses.append(torch.zeros(n_samples, len(logsnr)))
                 for j, this_logsnr in enumerate(logsnr):
@@ -663,7 +734,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
 
                     # Regular MSE, clamps predictions, but does not discretize
                     this_mse = self.mse([data, ] + batch[1:], this_logsnr_broadcast, mse_type='epsilon',
-                                        xinterval=xinterval, stochastic=stochastic, clamping=clamping).cpu()
+                                        xinterval=xinterval, stochastic=stochastic).cpu()
                     mses[-1][:, j] = this_mse
 
         val_loss /= total_samples
@@ -779,7 +850,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         weights = scale * torch.tanh(clip / 2) / (torch.sigmoid((logsnr - loc)/scale) * torch.sigmoid(-(logsnr - loc)/scale))
         return logsnr, weights
 
-    def nll_sde(self, dataloader, stochastic=False, clamping=False):
+    def nll_sde(self, dataloader, stochastic=False):
         SDE = VPSDE(self.noise_scheduler, beta_min=0.1, beta_max=20.0, N=1000)
         logp_fn = get_likelihood_fn(SDE, continuous = False, exact = False)
 
@@ -840,7 +911,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
                     cond_mask[:,:To,Da:] = True
                     trajectory = torch.cat([naction, nobs], dim=-1)
 
-                logp, z, nfe = logp_fn (self.model, trajectory, local_cond, global_cond, stochastic=stochastic, clamping=clamping)
+                logp, z, nfe = logp_fn (self.model, trajectory, local_cond, global_cond, stochastic=stochastic)
                 NLL+=logp.sum()
 
         return NLL/n_samples
