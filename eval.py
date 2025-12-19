@@ -128,17 +128,19 @@ def main(checkpoint, output_dir, device, override):
                 noise = torch.randn(shape, device=batch["action"].device)
                 for _ in range (n_MC):
                     if isinstance(policy, BaseLowdimProbPolicy):
-                        rec_loss = policy.compute_action_reconst_loss(noise, batch, cfg.eval.stochastic, loss_type = "MSE")
+                        rec_loss = policy.compute_action_reconst_loss(noise, batch, cfg.eval.stochastic, loss_type = "MSE", normalized=False)
                     else:
-                         rec_loss = policy.compute_action_reconst_loss(noise, batch, loss_type = "MSE")
+                         rec_loss = policy.compute_action_reconst_loss(noise, batch, loss_type = "MSE", normalized=False)
                     val_action_rec_loss.append(rec_loss.item() * n_samples)
         action_reconst_loss =np.sum(val_action_rec_loss)/(n_total_samples*n_MC)     
     # dump log to json
     json_log = dict()
-    json_log["test/avg_mean_score"] = avg_success_rate
-    json_log["test/var_mean_score"] = var_success_rate
-    json_log["test/avg_loss_noise_pred"] = avg_loss_pred_noise
-    json_log["test/var_loss_noise_pred"] = var_loss_pred_noise
+    json_log["test/mean_score_avg"] = avg_success_rate
+    json_log["test/mean_score_var"] = var_success_rate
+    json_log["test/mean_score_sd"] = np.sqrt(var_success_rate)
+    json_log["test/loss_noise_pred_avg"] = avg_loss_pred_noise
+    json_log["test/loss_noise_pred_var"] = var_loss_pred_noise
+    json_log["test/loss_noise_pred_sd"] = np.sqrt(var_loss_pred_noise)
     json_log["test/action_reconst_loss"] = action_reconst_loss
 
     for key, value in runner_log.items():

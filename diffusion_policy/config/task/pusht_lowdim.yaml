@@ -26,10 +26,7 @@ env_runner:
   past_action: ${past_action_visible}
   n_envs: null
   # validation outside the working space
-  out_of_dist: False
-  ofst: 0
-  add_noise: False
-  n_add_dis: 0
+  ofst: ${task.dataset.offset}
 
 dataset:
   _target_: diffusion_policy.dataset.pusht_dataset.PushTLowdimDataset
@@ -39,5 +36,6 @@ dataset:
   pad_after: ${eval:'${n_action_steps}-1'}
   seed: 42
   val_ratio: 0.02
-  max_train_episodes: 40
-  train_episodes_for_PAC_Bayes: 0        # This is selected from training data.
+  max_train_episodes: 90
+  train_episodes_for_PAC_Bayes: 5        # This is selected from training data.
+  offset: 0.0

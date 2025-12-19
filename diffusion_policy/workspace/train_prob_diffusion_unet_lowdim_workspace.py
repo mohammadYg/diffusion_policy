@@ -161,6 +161,12 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
             **cfg.checkpoint_nll.topk
         )
 
+        # configure checkpoint for best noise predictor
+        topk_manager_noise_pred = TopKCheckpointManager(
+            save_dir=os.path.join(self.output_dir, 'checkpoints'),
+            **cfg.checkpoint_val.topk
+        )
+
         # # configure checkpoint
         # topk_manager_every = CheckpointManager(
         #     save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_every.topk
@@ -309,6 +315,9 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         if len(val_noise_pred_losses) > 0:
                             noise_pred_loss = np.sum(val_noise_pred_losses)/n_total_samples
                             step_log['test_noise_pred_loss'] = noise_pred_loss
+                            topk_ckpt_path_val = topk_manager_noise_pred.get_ckpt_path(step_log)
+                            if topk_ckpt_path_val is not None:
+                                self.save_checkpoint(path=topk_ckpt_path_val)
                         
                         # compute train noise prediction loss
                         train_noise_pred_losses = list()
@@ -331,46 +340,46 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             noise_pred_loss = np.sum(train_noise_pred_losses)/n_total_samples
                             step_log['train_noise_pred_loss'] = noise_pred_loss
 
-                # Compute action reconstruction loss
-                if (self.epoch % cfg.training.reconstruction_every) == 0:
-                    with torch.no_grad():
-                        ## Compute action reconstruction loss on validation set
-                        val_act_rec_losses = list()
-                        n_total_samples = 0
-                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}: Action Reconstruction Loss on test set", 
-                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                            for batch_idx, batch in enumerate(tepoch):
-                                n_samples = len(batch["obs"])
-                                n_total_samples += n_samples
+                # # Compute action reconstruction loss
+                # if (self.epoch % cfg.training.reconstruction_every) == 0:
+                #     with torch.no_grad():
+                #         ## Compute action reconstruction loss on validation set
+                #         val_act_rec_losses = list()
+                #         n_total_samples = 0
+                #         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}: Action Reconstruction Loss on test set", 
+                #                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                #             for batch_idx, batch in enumerate(tepoch):
+                #                 n_samples = len(batch["obs"])
+                #                 n_total_samples += n_samples
                                 
-                                # device transfer
-                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                #                 # device transfer
+                #                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
-                                # action reconstruction loss
-                                shape = (n_samples, cfg.horizon, cfg.action_dim + cfg.obs_dim)
-                                noise = torch.randn(shape, device=device)
-                                rec_loss = policy.compute_action_reconst_loss(noise, batch, stochastic = cfg.eval.stochastic, loss_type="MSE", normalized = True)
-                                val_act_rec_losses.append(rec_loss.item() * n_samples)
-                        step_log['test_action_reconst_loss'] = np.sum(val_act_rec_losses)/n_total_samples
+                #                 # action reconstruction loss
+                #                 shape = (n_samples, cfg.horizon, cfg.action_dim + cfg.obs_dim)
+                #                 noise = torch.randn(shape, device=device)
+                #                 rec_loss = policy.compute_action_reconst_loss(noise, batch, stochastic = cfg.eval.stochastic, loss_type="MSE", normalized = True)
+                #                 val_act_rec_losses.append(rec_loss.item() * n_samples)
+                #         step_log['test_action_reconst_loss'] = np.sum(val_act_rec_losses)/n_total_samples
 
-                        ## Compute action reconstruction loss on training set
-                        train_act_rec_losses = list()
-                        n_total_samples = 0
-                        with tqdm.tqdm(pac_dataloader, desc=f"Validation epoch {self.epoch}: Action Reconstruction Loss on train set", 
-                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                            for batch_idx, batch in enumerate(tepoch):
-                                n_samples = len(batch["obs"])
-                                n_total_samples += n_samples
+                #         ## Compute action reconstruction loss on training set
+                #         train_act_rec_losses = list()
+                #         n_total_samples = 0
+                #         with tqdm.tqdm(pac_dataloader, desc=f"Validation epoch {self.epoch}: Action Reconstruction Loss on train set", 
+                #                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                #             for batch_idx, batch in enumerate(tepoch):
+                #                 n_samples = len(batch["obs"])
+                #                 n_total_samples += n_samples
                                 
-                                # device transfer
-                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                #                 # device transfer
+                #                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
-                                # action reconstruction loss
-                                shape = (n_samples, cfg.horizon, cfg.action_dim + cfg.obs_dim)
-                                noise = torch.randn(shape, device=device)
-                                rec_loss = policy.compute_action_reconst_loss(noise, batch, stochastic = cfg.eval.stochastic, loss_type="MSE", normalized = True)
-                                train_act_rec_losses.append(rec_loss.item() * n_samples)
-                        step_log['train_action_reconst_loss'] = np.sum(train_act_rec_losses)/n_total_samples
+                #                 # action reconstruction loss
+                #                 shape = (n_samples, cfg.horizon, cfg.action_dim + cfg.obs_dim)
+                #                 noise = torch.randn(shape, device=device)
+                #                 rec_loss = policy.compute_action_reconst_loss(noise, batch, stochastic = cfg.eval.stochastic, loss_type="MSE", normalized = True)
+                #                 train_act_rec_losses.append(rec_loss.item() * n_samples)
+                #         step_log['train_action_reconst_loss'] = np.sum(train_act_rec_losses)/n_total_samples
                 
                 if (self.epoch % cfg.training.nll_every)==0:
                     NLL_test = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None,
@@ -383,7 +392,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     if topk_ckpt_path_nll is not None:
                         self.save_checkpoint(path=topk_ckpt_path_nll)
 
-                # Compute memorization metric
+                # #Compute memorization metric
                 # if (self.epoch % cfg.training.memorization_every)==0:
                 #     avg_memoraized, n_memorized, memorization_frac = policy.eval_memorization(dataloader_eval=val_dataloader,
                 #                                                                                dataloader_train=pac_dataloader,

@@ -117,7 +117,7 @@ training:
   rollout_every: 50
   checkpoint_every: 50
   val_every: 1
-  sample_every: 50000
+  sample_every: 50
   reconstraction_every: 50
   nll_every: 50
   memorization_every: 50
@@ -167,6 +167,15 @@ checkpoint_nll:
   save_last_ckpt: False
   save_last_snapshot: False
 
+checkpoint_val:
+  topk:
+    monitor_key: test_noise_pred_loss
+    mode: min
+    k: 1
+    format_str: 'epoch={epoch:04d}-test_noise_pred_loss={test_noise_pred_loss:.3f}.ckpt'
+  save_last_ckpt: False
+  save_last_snapshot: False
+  
 multi_run:
   run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
   wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}

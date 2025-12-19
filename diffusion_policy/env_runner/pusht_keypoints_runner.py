@@ -39,11 +39,8 @@ class PushTKeypointsRunner(BaseLowdimRunner):
             agent_keypoints=False,
             past_action=False,
             tqdm_interval_sec=5.0,
-            n_envs=None,  
-            out_of_dist=False,
+            n_envs=None,
             ofst=0,
-            add_noise = False,
-            n_add_dis = 10,
         ):
         super().__init__(output_dir)
 
@@ -163,9 +160,6 @@ class PushTKeypointsRunner(BaseLowdimRunner):
         self.max_steps = max_steps
         self.tqdm_interval_sec = tqdm_interval_sec
         self.offset = ofst
-        self.out_of_dist  = out_of_dist
-        self.add_noise = add_noise
-        self.n_add_dis = n_add_dis
     
     def run(self, policy: BaseLowdimPolicy):
         device = policy.device
@@ -230,10 +224,6 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                     lambda x: torch.from_numpy(x).to(
                         device=device))
 
-                if self.out_of_dist:
-                    ## no need for normalization
-                    obs_dict["obs"] = obs_dict['obs'] - self.offset
-
                 # run policy
                 #start_time = time.perf_counter()
                 with torch.no_grad():
@@ -254,16 +244,6 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 all_generated_actions.append(action_pred)                       # list of arrays
                 all_generated_actions_normalized.append(action_pred_normalized) # list of arrays
 
-                if self.out_of_dist:
-                    action = action + self.offset
-                
-                # apply noise to the actions for a couple of consecutive steps
-                if self.add_noise:
-                    rng = np.random.default_rng(seed=42 + consecutive_step)
-                    if consecutive_step <= self.n_add_dis:
-                        noise = 50*rng.random(action.shape)
-                        action = action + noise
-                        consecutive_step += 1
                 
                 # step env
                 obs, reward, done, info = env.step(action)
@@ -300,7 +280,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
             # visualize sim
             video_path = all_video_paths[i]
             if video_path is not None:
-                sim_video = wandb.Video(video_path)
+                sim_video = wandb.Video(video_path, format="gif")
                 log_data[prefix+f'sim_video_{seed}'] = sim_video
 
         # log aggregate metrics
@@ -318,8 +298,8 @@ class PushTKeypointsRunner(BaseLowdimRunner):
             np.concatenate(all_generated_actions_normalized, axis=0)
         )
 
-        log_data['generated_actions'] = gen
-        log_data['generated_actions_normalized'] = gen_norm
+        # log_data['generated_actions'] = gen
+        # log_data['generated_actions_normalized'] = gen_norm
         return log_data
 
 
@@ -385,10 +365,6 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                         lambda x: torch.from_numpy(x).to(
                             device=device))
 
-                    if self.out_of_dist:
-                        ## no need for normalization
-                        obs_dict["obs"] = obs_dict['obs'] - self.offset
-
                     # run policy
                     #start_time = time.perf_counter()
                     with torch.no_grad():
@@ -408,17 +384,6 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                     #all_generated_actions.append(action_pred[~done_all])                       # list of arrays
                     all_generated_actions.append(action_pred)   
                     all_generated_actions_normalized.append(action_pred_normalized) # list of arrays
-
-                    if self.out_of_dist:
-                        action = action + self.offset
-                    
-                    # apply noise to the actions for a couple of consecutive steps
-                    if self.add_noise:
-                        rng = np.random.default_rng(seed=42 + consecutive_step)
-                        if consecutive_step <= self.n_add_dis:
-                            noise = 50*rng.random(action.shape)
-                            action = action + noise
-                            consecutive_step += 1
                     
                     # step env
                     obs, reward, done, info = env.step(action)
@@ -456,7 +421,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 # visualize sim
                 video_path = all_video_paths[i]
                 if video_path is not None:
-                    sim_video = wandb.Video(video_path)
+                    sim_video = wandb.Video(video_path, format="gif")
                     log_data[prefix+f'sim_video_{seed}'] = sim_video
 
             # log aggregate metrics
@@ -474,6 +439,6 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 np.concatenate(all_generated_actions_normalized, axis=0)
             )
 
-            log_data['generated_actions'] = gen
-            log_data['generated_actions_normalized'] = gen_norm
+            # log_data['generated_actions'] = gen
+            # log_data['generated_actions_normalized'] = gen_norm
             return log_data

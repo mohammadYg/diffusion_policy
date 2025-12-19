@@ -380,13 +380,12 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
                         batch = self.normalizer.normalize(batch)
                     train_actions_list.append(batch['action'])
             train_actions = torch.cat(train_actions_list, dim=0)   # (N_train, H, A)
-
         # -----------------------------------------------------------
         # 2. Compute nearest-neighbor ratios for all eval samples
         # -----------------------------------------------------------
         all_ratios = []
         with torch.inference_mode():
-            with tqdm.tqdm(dataloader_train, desc=f"Memorization Eval: Compute nearest-neighbor ratios for all eval samples", 
+            with tqdm.tqdm(dataloader_eval, desc=f"Memorization Eval: Compute nearest-neighbor ratios for all eval samples", 
                                 leave=False, mininterval=1.0) as tepoch:
                 for batch in tepoch:
                     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
@@ -399,7 +398,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
                     # Compute pairwise distances: (B_eval, N_train)
                     diff = gen_actions[:, None, :, :] - train_actions[None, :, :, :]
                     dist = torch.sqrt(torch.sum(diff ** 2, dim=(2, 3)))   # (B_eval, N_train)
-
+                    
                     # Extract 2 nearest distances
                     smallest_vals, _ = torch.topk(dist, k=2, largest=False)
                     # smallest_vals: (B_eval, 2)
@@ -410,7 +409,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
 
         # Concatenate all batches
         all_ratios = torch.cat(all_ratios, dim=0)   # (N_eval,)
-
+        
         # -----------------------------------------------------------
         # 3. Compute required metrics
         # -----------------------------------------------------------
@@ -748,40 +747,6 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
 
         return loss
     
-    # ========= PAC-Bayes Bounds ============
-    # def PAC_Bayes_Bounds(self, data_loader, cfg: OmegaConf):
-        
-    #     def reconstruction_loss(data_loader):
-    #         emp_risk = 0
-    #         alpha_bar_T = self.noise_scheduler.alpha_bar[-1]
-            
-    #         for batch_idx, batch in enumerate(data_loader):               
-    #             # device transfer
-    #             device = cfg.device
-    #             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-    #             obs_dict = {"obs": batch["obs"]}
-    #             gt_action = batch["action"]
-                
-    #             loss = 0
-    #             for _ in range (cfg.training.num_expect):
-    #                 result = self.predict_action(obs_dict)
-    #                 if cfg.pred_action_steps_only:
-    #                     pred_action = result["action"]
-    #                     start = cfg.n_obs_steps - 1
-    #                     end = start + cfg.n_action_steps
-    #                     gt_action = gt_action[:, start:end]
-    #                 else:
-    #                     pred_action = result["action_pred"]
-                    
-    #                 # compute loss
-    #                 if cfg.training.loss_type == "MSE":
-    #                     loss += torch.nn.functional.mse_loss(pred_action, gt_action) * gt_action.shape[0]
-    #                 else:
-    #                     loss += torch.linalg.norm(pred_action - gt_action, ord=2, dim=(1, 2))
-                    
-    #                 emp_risk +=  torch.sum(loss)
-
-    #         return emp_risk.item() / (num_expect * (batch_idx+1))
 
     def noisy_channel(self, x, logsnr):
         """
@@ -1067,7 +1032,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         weights = scale * torch.tanh(clip / 2) / (torch.sigmoid((logsnr - loc)/scale) * torch.sigmoid(-(logsnr - loc)/scale))
         return logsnr, weights
 
-    def nll_sde(self, dataloader):
+    def nll_sde(self, dataloader, cfg):
         SDE = VPSDE(self.noise_scheduler, beta_min=0.1, beta_max=20.0, N=100)
         logp_fn = get_likelihood_fn(SDE, continuous = False, exact = False)
 
@@ -1128,7 +1093,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
                     cond_mask[:,:To,Da:] = True
                     trajectory = torch.cat([naction, nobs], dim=-1)
 
-                logp, z, nfe = logp_fn (self.model, trajectory, local_cond, global_cond)
+                logp, z, nfe = logp_fn (self.model, trajectory, local_cond, global_cond, cfg)
                 NLL+=logp.sum()
 
         return NLL/n_samples

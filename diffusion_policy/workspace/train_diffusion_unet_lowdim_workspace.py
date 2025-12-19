@@ -95,6 +95,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
+        print ("validation dataset size: ", len(val_dataset))
         
         ## configure dataset for covariance_spectrum
         cov_dataloader = DataLoader(dataset, batch_size=len(dataset), num_workers=1, pin_memory = True, persistent_workers = False)
@@ -154,10 +155,16 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             **cfg.checkpoint_nll.topk
         )
 
-        # # configure checkpoint
-        # topk_manager_every = CheckpointManager(
-        #     save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_every.topk
-        # )
+        # configure checkpoint for best noise predictor
+        topk_manager_noise_pred = TopKCheckpointManager(
+            save_dir=os.path.join(self.output_dir, 'checkpoints'),
+            **cfg.checkpoint_val.topk
+        )
+
+        # configure checkpoint
+        topk_manager_every = CheckpointManager(
+            save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_every.topk
+        )
 
         # device transfer
         device = torch.device(cfg.training.device)
@@ -186,6 +193,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
+        act_pre = []
         with JsonLogger(log_path) as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs):
                 step_log = dict()
@@ -291,6 +299,9 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         if len(val_noise_pred_losses) > 0:
                             noise_pred_loss = np.sum(val_noise_pred_losses)/n_total_samples
                             step_log['test_noise_pred_loss'] = noise_pred_loss
+                            topk_ckpt_path_val = topk_manager_noise_pred.get_ckpt_path(step_log)
+                            if topk_ckpt_path_val is not None:
+                                self.save_checkpoint(path=topk_ckpt_path_val)
                         
                         # compute train noise prediction loss
                         train_noise_pred_losses = list()
@@ -313,94 +324,109 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             noise_pred_loss = np.sum(train_noise_pred_losses)/n_total_samples
                             step_log['train_noise_pred_loss'] = noise_pred_loss
 
-                # Compute action reconstruction loss
-                if (self.epoch % cfg.training.reconstruction_every) == 0:
-                    with torch.no_grad():
-                        ## Compute action reconstruction loss on validation set
-                        val_act_rec_losses = list()
-                        n_total_samples = 0
-                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}: Action Reconstruction Loss on test set", 
-                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                            for batch_idx, batch in enumerate(tepoch):
-                                n_samples = len(batch["obs"])
-                                n_total_samples += n_samples
+                # # Compute action reconstruction loss
+                # if (self.epoch % cfg.training.reconstruction_every) == 0:
+                #     with torch.no_grad():
+                #         ## Compute action reconstruction loss on validation set
+                #         val_act_rec_losses = list()
+                #         n_total_samples = 0
+                #         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}: Action Reconstruction Loss on test set", 
+                #                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                #             for batch_idx, batch in enumerate(tepoch):
+                #                 n_samples = len(batch["obs"])
+                #                 n_total_samples += n_samples
                                 
-                                # device transfer
-                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                #                 # device transfer
+                #                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
-                                # action reconstruction loss
-                                shape = (n_samples, cfg.horizon, cfg.action_dim + cfg.obs_dim)
-                                noise = torch.randn(shape, device=device)
-                                rec_loss = policy.compute_action_reconst_loss(noise, batch, loss_type="MSE", normalized = True)
-                                val_act_rec_losses.append(rec_loss.item() * n_samples)
-                        step_log['test_action_reconst_loss'] = np.sum(val_act_rec_losses)/n_total_samples
+                #                 # action reconstruction loss
+                #                 shape = (n_samples, cfg.horizon, cfg.action_dim + cfg.obs_dim)
+                #                 noise = torch.randn(shape, device=device)
+                #                 rec_loss = policy.compute_action_reconst_loss(noise, batch, loss_type="MSE", normalized = True)
+                #                 val_act_rec_losses.append(rec_loss.item() * n_samples)
+                #         step_log['test_action_reconst_loss'] = np.sum(val_act_rec_losses)/n_total_samples
 
-                        ## Compute action reconstruction loss on training set
-                        train_act_rec_losses = list()
-                        n_total_samples = 0
-                        with tqdm.tqdm(train_dataloader, desc=f"Validation epoch {self.epoch}: Action Reconstruction Loss on train set", 
-                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                            for batch_idx, batch in enumerate(tepoch):
-                                n_samples = len(batch["obs"])
-                                n_total_samples += n_samples
+                #         ## Compute action reconstruction loss on training set
+                #         train_act_rec_losses = list()
+                #         n_total_samples = 0
+                #         with tqdm.tqdm(train_dataloader, desc=f"Validation epoch {self.epoch}: Action Reconstruction Loss on train set", 
+                #                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                #             for batch_idx, batch in enumerate(tepoch):
+                #                 n_samples = len(batch["obs"])
+                #                 n_total_samples += n_samples
                                 
-                                # device transfer
-                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                #                 # device transfer
+                #                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
-                                # action reconstruction loss
-                                shape = (n_samples, cfg.horizon, cfg.action_dim + cfg.obs_dim)
-                                noise = torch.randn(shape, device=device)
-                                rec_loss = policy.compute_action_reconst_loss(noise, batch, loss_type="MSE", normalized = True)
-                                train_act_rec_losses.append(rec_loss.item() * n_samples)
-                        step_log['train_action_reconst_loss'] = np.sum(train_act_rec_losses)/n_total_samples
+                #                 # action reconstruction loss
+                #                 shape = (n_samples, cfg.horizon, cfg.action_dim + cfg.obs_dim)
+                #                 noise = torch.randn(shape, device=device)
+                #                 rec_loss = policy.compute_action_reconst_loss(noise, batch, loss_type="MSE", normalized = True)
+                #                 train_act_rec_losses.append(rec_loss.item() * n_samples)
+                #         step_log['train_action_reconst_loss'] = np.sum(train_act_rec_losses)/n_total_samples
                 
                 # Compute upper bound on NLL
                 if (self.epoch % cfg.training.nll_every)==0:
                     NLL_test = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None)
                     step_log['test_nll_bpd'] = NLL_test
-                    NLL_train = policy.test_nll(train_dataloader, self.epoch, npoints=100, xinterval=None)
-                    step_log['train_nll_bpd'] = NLL_train
+                    # NLL_train = policy.test_nll(train_dataloader, self.epoch, npoints=100, xinterval=None)
+                    # step_log['train_nll_bpd'] = NLL_train
                     topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
                     if topk_ckpt_path_nll is not None:
                         self.save_checkpoint(path=topk_ckpt_path_nll)
 
-                # Compute memorization metric
-                if (self.epoch % cfg.training.memorization_every)==0:
-                    avg_memoraized, n_memorized, memorization_frac = policy.eval_memorization(dataloader_eval=val_dataloader,
-                                                                                               dataloader_train=train_dataloader,
-                                                                                               normalized=True,
-                                                                                               device=device,
-                                                                                               threshold=0.5)
-                    step_log['num_memorized'] = n_memorized
-                    step_log['memorization_fraction'] = memorization_frac
+                # # Compute memorization metric
+                # if (self.epoch % cfg.training.memorization_every)==0:
+                #     avg_memoraized, n_memorized, memorization_frac = policy.eval_memorization(dataloader_eval=val_dataloader,
+                #                                                                                dataloader_train=train_dataloader,
+                #                                                                                normalized=True,
+                #                                                                                device=device,
+                #                                                                                threshold=0.5)
+                #     step_log['num_memorized'] = n_memorized
+                #     step_log['memorization_fraction'] = memorization_frac
                     
                 # # run diffusion sampling on a training batch
                 # if (self.epoch % cfg.training.sample_every) == 0:
                 #     with torch.no_grad():
-                #         # sample trajectory from training set, and evaluate difference
-                #         batch = train_sampling_batch
-                #         obs_dict = {'obs': batch['obs']}
-                #         gt_action = batch['action']
+                #         n_total_samples = 0
+                #         loss_rec = 0
+                #         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}: Action Reconstruction Loss on test set", 
+                #             leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                #             # sample trajectory from training set, and evaluate difference
+                #             for batch_idx, batch in enumerate(tepoch):
+                #                 obs_dict = {'obs': batch['obs']}
+                #                 gt_action = batch['action']
+                #                 n_samples = len(batch["obs"])
+                #                 n_total_samples += n_samples
+                                
+                #                 result = policy.predict_action(obs_dict)
+                #                 if cfg.pred_action_steps_only:
+                #                     pred_action = result['action']
+                #                     start = cfg.n_obs_steps - 1
+                #                     end = start + cfg.n_action_steps
+                #                     gt_action = gt_action[:,start:end]
+                #                 else:
+                #                     pred_action = result['action_pred']
+                #                 if self.epoch>0:
+                #                     mse = torch.nn.functional.mse_loss(pred_action, act_pre[batch_idx])
+                #                     act_pre[batch_idx] = pred_action
+                #                     loss_rec += mse.item()*n_samples
+                #                 else:
+                #                     act_pre.append(pred_action)
+                                    
                         
-                #         result = policy.predict_action(obs_dict)
-                #         if cfg.pred_action_steps_only:
-                #             pred_action = result['action']
-                #             start = cfg.n_obs_steps - 1
-                #             end = start + cfg.n_action_steps
-                #             gt_action = gt_action[:,start:end]
-                #         else:
-                #             pred_action = result['action_pred']
-                #         mse = torch.nn.functional.mse_loss(pred_action, gt_action)
-                #         # log
-                #         step_log['train_action_mse_error'] = mse.item()
-                #         # release RAM
-                #         del batch
-                #         del obs_dict
-                #         del gt_action
-                #         del result
-                #         del pred_action
-                #         del mse
-                
+                #                 # release RAM
+                #                 del batch
+                #                 del obs_dict
+                #                 del gt_action
+                #                 del result
+                #                 del pred_action
+                        
+                #         if self.epoch >0 :
+                #             step_log['act_gen_err_between_epochs'] = loss_rec/n_total_samples
+                #             step_log['log_act_gen_err_between_epochs'] = np.log(loss_rec/n_total_samples)
+
+                                
                 # checkpoint
                 if (self.epoch % cfg.training.checkpoint_every) == 0:
                     # checkpointing
@@ -426,7 +452,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 policy.train()
 
                 # # checkpoint
-                # if (self.epoch % cfg.training.checkpoint_every) == 0:
+                # if (self.epoch % cfg.training.checkpoint_every) == 0 and self.epoch<200:
                 #     # checkpointing
                 #     if cfg.checkpoint_every.save_last_ckpt:
                 #         self.save_checkpoint()

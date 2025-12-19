@@ -15,7 +15,7 @@ def get_model_fn(model, train=False):
     A model function.
   """
 
-  def model_fn(x, labels, local_cond, global_cond, stochastic = False, clamping = False):
+  def model_fn(x, labels, local_cond, global_cond, stochastic=False):
     """Compute the output of the score-based model.
 
     Args:
@@ -29,13 +29,13 @@ def get_model_fn(model, train=False):
     if not train:
       model.eval()
       if isinstance(model, BayesianConditionalUnet1D):
-        return model(sample = x, timestep = labels, local_cond=local_cond, global_cond=global_cond, stochastic = stochastic, clamping = clamping)
+        return model(sample = x, timestep = labels, local_cond=local_cond, global_cond=global_cond, stochastic = stochastic)
       else:
          return model(sample = x, timestep = labels, local_cond=local_cond, global_cond=global_cond)
     else:
       model.train()
       if isinstance(model, BayesianConditionalUnet1D):
-        return model(sample = x, timestep = labels, local_cond=local_cond, global_cond=global_cond, stochastic = stochastic, clamping = clamping)
+        return model(sample = x, timestep = labels, local_cond=local_cond, global_cond=global_cond, stochastic = stochastic)
       else:
          return model(sample = x, timestep = labels, local_cond=local_cond, global_cond=global_cond)
 
@@ -59,7 +59,7 @@ def get_score_fn(sde, model, train=False, continuous=False):
     model_fn = model.eval()
 
   if isinstance(sde, VPSDE):
-    def score_fn(x, t, local_cond, global_cond, stochastic = False, clamping = False):
+    def score_fn(x, t, local_cond, global_cond, stochastic):
       # Scale neural network output by standard deviation and flip sign
       if continuous:
         # For VP-trained models, t=0 corresponds to the lowest noise level
@@ -67,7 +67,7 @@ def get_score_fn(sde, model, train=False, continuous=False):
         # continuously-trained models.
         labels = t * 999
         if isinstance(model, BayesianConditionalUnet1D):
-          noise = model_fn(sample = x, timestep = labels, local_cond=local_cond, global_cond=global_cond, stochastic = stochastic, clamping = clamping)
+          noise = model_fn(sample = x, timestep = labels, local_cond=local_cond, global_cond=global_cond, stochastic = stochastic)
         else:
           noise = model_fn(sample = x, timestep = labels, local_cond=local_cond, global_cond=global_cond)
         std = sde.marginal_prob(torch.zeros_like(x), t)[1]
@@ -75,7 +75,7 @@ def get_score_fn(sde, model, train=False, continuous=False):
         # For VP-trained models, t=0 corresponds to the lowest noise level
         labels = t * (sde.N - 1)
         if isinstance(model, BayesianConditionalUnet1D):
-          noise = model_fn(sample = x, timestep = labels, local_cond=local_cond, global_cond=global_cond, stochastic = stochastic, clamping = clamping)
+          noise = model_fn(sample = x, timestep = labels, local_cond=local_cond, global_cond=global_cond, stochastic = stochastic)
         else:
           noise = model_fn(sample = x, timestep = labels, local_cond=local_cond, global_cond=global_cond)
         std = sde.sqrt_1m_alphas_cumprod.to(labels.device)[labels.long()]
@@ -124,11 +124,10 @@ def get_div_fn(fn):
 
 def get_div_prob_fn(fn):
   """Create the divergence function of `fn` using the Hutchinson-Skilling trace estimator."""
-
-  def div_fn(x, t, local_cond, global_cond, stochastic = False, clamping = False, eps=torch.tensor):
+  def div_fn(x, t, local_cond, global_cond, stochastic, eps=torch.tensor):
     with torch.enable_grad():
       x.requires_grad_(True)
-      fn_eps = torch.sum(fn(x, t, local_cond, global_cond, stochastic = stochastic, clamping = clamping) * eps)
+      fn_eps = torch.sum(fn(x, t, local_cond, global_cond, stochastic = stochastic) * eps)
       grad_fn_eps = torch.autograd.grad(fn_eps, x)[0]
     x.requires_grad_(False)
     return torch.sum(grad_fn_eps * eps, dim=tuple(range(1, len(x.shape))))
@@ -167,11 +166,11 @@ def get_exact_div_prob_fn(fn):
     """
     Computes the exact trace of the Jacobian of fn(x, t) w.r.t. x, per batch item.
     """
-    def div_fn(x, t, local_cond, global_cond, stochastic = False, clamping = False):
+    def div_fn(x, t, local_cond, global_cond, stochastic = False):
         B, T, F = x.shape
         with torch.enable_grad():
             x.requires_grad_(True)
-            output = fn(x, t, local_cond, global_cond, stochastic = stochastic, clamping = clamping)  # Shape: (B, T, F)
+            output = fn(x, t, local_cond, global_cond, stochastic = stochastic)  # Shape: (B, T, F)
             trace = torch.zeros(B, device=x.device)
 
             flat_size = T * F
@@ -211,16 +210,16 @@ def get_likelihood_fn(sde, continuous=False, exact = True, hutchinson_type='Rade
     """
     inverse_scaler = get_data_inverse_scaler()
     
-    def drift_fn(model, x, t, local_cond, global_cond, stochastic = False, clamping = False):
+    def drift_fn(model, x, t, local_cond, global_cond, stochastic=False):
         """The drift function of the reverse-time SDE."""
         score_fn = get_score_fn(sde, model, train=False, continuous=continuous)
         # Probability flow ODE is a special case of Reverse SDE
         rsde = sde.reverse(score_fn, probability_flow=True)
 
         # Here you just need the drift not the diffusion coefficient
-        return rsde.sde(x, t, local_cond, global_cond, stochastic = stochastic, clamping = clamping)[0]
+        return rsde.sde(x, t, local_cond, global_cond, stochastic)[0]
 
-    def div_fn(model, x, t, local_cond, global_cond, stochastic = False, clamping = False, noise = torch.tensor):
+    def div_fn(model, x, t, local_cond, global_cond, stochastic=False, noise = torch.tensor):
         """
         This function returns the Hutchinson-based divergence estimate of the drift function
         drift_fn(model, xx, tt) returns the vector field whose divergence we want to compute.
@@ -232,16 +231,16 @@ def get_likelihood_fn(sde, continuous=False, exact = True, hutchinson_type='Rade
         """
         if exact:
           if isinstance(model, BayesianConditionalUnet1D):
-            return get_exact_div_prob_fn(lambda xx, tt, local_condd, global_condd, stochasticc, clampingg: drift_fn(model, xx, tt, local_condd, global_condd, stochasticc, clampingg))(x, t, local_cond, global_cond, stochastic, clamping)
+            return get_exact_div_prob_fn(lambda xx, tt, local_condd, global_condd, stochasticc: drift_fn(model, xx, tt, local_condd, global_condd, stochasticc))(x, t, local_cond, global_cond, stochastic)
           else:
             return get_exact_div_fn(lambda xx, tt, local_condd, global_condd: drift_fn(model, xx, tt, local_condd, global_condd))(x, t, local_cond, global_cond)
         else:
             if isinstance(model, BayesianConditionalUnet1D):
-              return get_div_prob_fn(lambda xx, tt, local_condd, global_condd, stochastic, clamping: drift_fn(model, xx, tt, local_condd, global_condd, stochastic, clamping))(x, t, local_cond, global_cond, stochastic, clamping, noise)
+              return get_div_prob_fn(lambda xx, tt, local_condd, global_condd, stochasticc: drift_fn(model, xx, tt, local_condd, global_condd, stochasticc))(x, t, local_cond, global_cond, stochastic, noise)
             else:
                return get_div_fn(lambda xx, tt, local_condd, global_condd: drift_fn(model, xx, tt, local_condd, global_condd))(x, t, local_cond, global_cond, noise)
 
-    def likelihood_fn(model, action, local_cond, global_cond, stochastic = False, clamping = False):
+    def likelihood_fn(model, action, local_cond, global_cond, cfg):
         """Compute an unbiased estimate to the log-likelihood in bits/dim.
 
         Args:
@@ -270,9 +269,15 @@ def get_likelihood_fn(sde, continuous=False, exact = True, hutchinson_type='Rade
                 """
                 sample = from_flattened_numpy(x[:-shape[0]], shape).to(action.device).type(torch.float32)
                 vec_t = torch.ones(sample.shape[0], device=sample.device) * t
-
-                drift = to_flattened_numpy(drift_fn(model, sample, vec_t, local_cond, global_cond, stochastic=stochastic, clamping=clamping))
-                logp_grad = to_flattened_numpy(div_fn(model, sample, vec_t, local_cond, global_cond, stochastic=stochastic, clamping=clamping, noise=epsilon))
+                
+                if isinstance(model, BayesianConditionalUnet1D):
+                  stochastic = cfg.training.stochastic if model.training else cfg.eval.stochastic
+                  drift = to_flattened_numpy(drift_fn(model, sample, vec_t, local_cond, global_cond, stochastic =stochastic))
+                  logp_grad = to_flattened_numpy(div_fn(model, sample, vec_t, local_cond, global_cond, stochastic =stochastic, noise=epsilon))
+                else:
+                  drift = to_flattened_numpy(drift_fn(model, sample, vec_t, local_cond, global_cond))
+                  logp_grad = to_flattened_numpy(div_fn(model, sample, vec_t, local_cond, global_cond, noise=epsilon))
+                
 
                 return np.concatenate([drift, logp_grad], axis=0)
 

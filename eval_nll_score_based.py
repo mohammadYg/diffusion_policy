@@ -14,7 +14,6 @@ import click
 import hydra
 import torch
 import dill
-import wandb
 import json
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
@@ -65,10 +64,8 @@ def main(checkpoint, output_dir, device, override):
     val_dataset = dataset.get_validation_dataset()
     val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
-    if isinstance(policy, BaseLowdimProbPolicy):
-        NLL = policy.nll_sde(val_dataloader, stochastic = cfg.eval.stochastic, clamping = cfg.eval.clamping)
-    else:
-        NLL = policy.nll_sde(val_dataloader)
+    NLL = policy.nll_sde(val_dataloader, cfg=cfg)
+
     print ('nll_bpd', NLL)
 
 if __name__ == '__main__':
