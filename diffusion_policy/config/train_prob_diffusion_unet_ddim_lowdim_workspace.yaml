@@ -36,11 +36,12 @@ policy:
     cond_predict_scale: True
     use_dropout: False
     # Bayesian parameters
-    rho_prior: -3.0
+    rho_init: -3.0
+    rho_prior: 0.54
     prior_dist: 'gaussian'
     init_prior: 'zeros'
-    # init_net: "data/outputs/2025.10.27/22.47.07_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0550-test_mean_score=0.873.ckpt"
-    # init_net_prior: "data/outputs/2025.10.27/22.47.07_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0550-test_mean_score=0.873.ckpt" # Separate prior initialization
+    #init_net: ${policy.model.init_net_prior}
+    #init_net_prior: "data/outputs/2025.12.19/11.26.50_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0046-test_noise_pred_loss=0.109.ckpt" # Separate prior initialization
     init_net: null
     init_net_prior: null # Separate prior initialization
     # Output transformation parameters
@@ -111,6 +112,10 @@ optimizer:
   betas: [0.95, 0.999]
   eps: 1.0e-8
   weight_decay: 1.0e-6
+
+# optimizer:
+#   _target_: torch.optim.SGD
+#   lr: 0.001
 
 training:
   device: "cuda:1"

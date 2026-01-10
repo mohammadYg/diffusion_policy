@@ -66,7 +66,7 @@ def main(checkpoint, output_dir, device, override):
     success_rate = list()
     for _ in range (cfg.task.n_repeat_runner):
         if isinstance(policy, BaseLowdimProbPolicy):
-            runner_log = env_runner.run_prob(policy, cfg.eval.stochastic, cfg.eval.clamping)
+            runner_log = env_runner.run_prob(policy, cfg.eval.stochastic)
         else:
             runner_log = env_runner.run(policy)
         success_rate.append(runner_log["test/mean_score"])

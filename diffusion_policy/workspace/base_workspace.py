@@ -70,6 +70,42 @@ class BaseWorkspace:
             torch.save(payload, path.open('wb'), pickle_module=dill)
         return str(path.absolute())
     
+    def save_weights_only(
+        self,
+        path=None,
+        tag="latest",
+    ):
+        # resolve path (same behavior as save_checkpoint)
+        if path is None:
+            path = pathlib.Path(self.output_dir).joinpath(
+                "checkpoints", f"{tag}.pt"
+            )
+        else:
+            path = pathlib.Path(path)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # choose which weights to save
+        if getattr(self, "ema_model", None) is not None:
+            state_dict = self.ema_model.state_dict()
+            key = "ema_model"
+        else:
+            state_dict = self.model.state_dict()
+            key = "model"
+
+        # move tensors to cpu for portability & smaller GPU memory use
+        state_dict = {k: v.detach().cpu() for k, v in state_dict.items()}
+
+        # save
+        torch.save(
+            {
+                key: state_dict
+            },
+            path.open("wb")
+        )
+
+        return str(path.absolute())
+
     def get_checkpoint_path(self, tag='latest'):
         return pathlib.Path(self.output_dir).joinpath('checkpoints', f'{tag}.ckpt')
 

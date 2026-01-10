@@ -54,6 +54,7 @@ class RobomimicReplayLowdimDataset(BaseLowdimDataset):
                     rotation_transformer=rotation_transformer)
                 replay_buffer.add_episode(episode)
 
+        print (replay_buffer.n_episodes)
         val_mask = get_val_mask(
             n_episodes=replay_buffer.n_episodes, 
             val_ratio=val_ratio,

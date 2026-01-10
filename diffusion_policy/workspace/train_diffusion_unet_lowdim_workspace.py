@@ -194,6 +194,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         act_pre = []
+        last_ten_success_rate = []
         with JsonLogger(log_path) as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs):
                 step_log = dict()
@@ -276,6 +277,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     runner_log = env_runner.run(policy)
                     # log all
                     step_log.update(runner_log)
+                    if self.epoch>cfg.training.num_epochs-500:
+                        last_ten_success_rate.append(step_log["test/mean_score"])
 
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0:
@@ -301,7 +304,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             step_log['test_noise_pred_loss'] = noise_pred_loss
                             topk_ckpt_path_val = topk_manager_noise_pred.get_ckpt_path(step_log)
                             if topk_ckpt_path_val is not None:
-                                self.save_checkpoint(path=topk_ckpt_path_val)
+                                #self.save_checkpoint(path=topk_ckpt_path_val)
+                                self.save_weights_only(path=topk_ckpt_path_val)
                         
                         # compute train noise prediction loss
                         train_noise_pred_losses = list()
@@ -373,7 +377,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     # step_log['train_nll_bpd'] = NLL_train
                     topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
                     if topk_ckpt_path_nll is not None:
-                        self.save_checkpoint(path=topk_ckpt_path_nll)
+                        #self.save_checkpoint(path=topk_ckpt_path_nll)
+                        self.save_weights_only(path=topk_ckpt_path_nll)
 
                 # # Compute memorization metric
                 # if (self.epoch % cfg.training.memorization_every)==0:
@@ -426,12 +431,12 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 #             step_log['act_gen_err_between_epochs'] = loss_rec/n_total_samples
                 #             step_log['log_act_gen_err_between_epochs'] = np.log(loss_rec/n_total_samples)
 
-                                
                 # checkpoint
                 if (self.epoch % cfg.training.checkpoint_every) == 0:
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
-                        self.save_checkpoint()
+                        #self.save_checkpoint()
+                        self.save_weights_only()
                     if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
 
@@ -446,7 +451,9 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     # therefore at this point the file might have been empty!
                     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
                     if topk_ckpt_path is not None:
-                        self.save_checkpoint(path=topk_ckpt_path)
+                        #self.save_checkpoint(path=topk_ckpt_path)
+                        self.save_weights_only(path=topk_ckpt_path)
+
 
                 # ========= eval end for this epoch ==========
                 policy.train()
@@ -455,20 +462,27 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 # if (self.epoch % cfg.training.checkpoint_every) == 0 and self.epoch<200:
                 #     # checkpointing
                 #     if cfg.checkpoint_every.save_last_ckpt:
-                #         self.save_checkpoint()
+                #         #self.save_checkpoint()
+                #         self.save_weights_only()
                 #     if cfg.checkpoint_every.save_last_snapshot:
                 #         self.save_snapshot()
 
                 #     topk_ckpt_path = topk_manager_every.get_ckpt_path(step_log)
                 #     if topk_ckpt_path is not None:
-                #         self.save_checkpoint(path=topk_ckpt_path)
+                #         #self.save_checkpoint(path=topk_ckpt_path)
+                #         self.save_weights_only(path=topk_ckpt_path)
 
                 # end of epoch
                 # log of last step is combined with validation and rollout
+                if local_epoch_idx == cfg.training.num_epochs-1:
+                    step_log["test/last_10_mean_score"] = np.mean(last_ten_success_rate)
                 wandb_run.log(step_log, step=self.global_step)
                 json_logger.log(step_log)
                 self.global_step += 1
                 self.epoch += 1
+        
+        
+
 
 @hydra.main(
     version_base=None,

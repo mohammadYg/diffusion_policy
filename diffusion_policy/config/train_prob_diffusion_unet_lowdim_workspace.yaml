@@ -181,7 +181,7 @@ checkpoint_nll:
   topk:
     monitor_key: test_nll_bpd
     mode: min
-    k: 3
+    k: 1
     format_str: 'epoch={epoch:04d}-nll_bpd={nll_bpd:.3f}.ckpt'
   save_last_ckpt: False
   save_last_snapshot: False

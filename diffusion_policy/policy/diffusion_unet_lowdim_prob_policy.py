@@ -578,50 +578,69 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
 # ========================== Compute upper bound on nll ==========================
     def noisy_channel(self, x, logsnr):
         """
-        Forward diffusion process: match each logSNR to the nearest DDIM alpha_cumprod
-        and generate noisy samples + return timestep and the noise.
+        Vectorized DDPM forward process.
+        x: (B, K, ...)
+        logsnr: (B, K)
         """
-        # Compute alpha from logSNR and find nearest scheduler timestep
-        alpha = torch.sigmoid(logsnr)  # (N,)
-        scheduler_alpha = self.noise_scheduler.alphas_cumprod.to(self.device)  # (T,)
+        alpha = torch.sigmoid(logsnr) # (B, K)
 
-        # Compute |alpha - alpha_t|
-        diff = torch.abs(alpha.unsqueeze(1) - scheduler_alpha.unsqueeze(0))
-        timesteps = diff.argmin(dim=1)  # (N,)
+        # Map alpha → nearest scheduler timestep
+        scheduler_alpha = self.noise_scheduler.alphas_cumprod.to(self.device) # (T,)
+        diff = torch.abs(alpha[..., None] - scheduler_alpha)
+        timesteps = diff.argmin(dim=-1)  # (B, K)
 
-        # Sample noise
-        eps = torch.randn((len(logsnr),) + self.shape, dtype=x.dtype, device=x.device)
+        eps = torch.randn_like(x)
 
-        # DDPM forward step
-        noisy_x = self.noise_scheduler.add_noise(x, eps, timesteps)
+        noisy_x = self.noise_scheduler.add_noise(
+            x.flatten(0, 1),
+            eps.flatten(0, 1),
+            timesteps.flatten(),
+        ).view_as(x)
+
         return noisy_x, timesteps, eps
 
-    def mse(self, batch, logsnr, mse_type='epsilon', xinterval=None, stochastic=False):
+    def mse(self, batch, logsnr, stochastic=False):
         """
         Compute per-sample MSE between predicted noise eps_hat and true eps.
-        If mse_type='epsilon', returns ||eps - eps_hat||^2.
         """
         x = batch[0].to(self.device)
-        z, timesteps, eps = self.noisy_channel(x, logsnr)
-
         # Unpack conditioning
         local_cond, global_cond, cond_data, cond_mask = batch[1:]
 
-        # Apply imputation mask
+        B = x.shape[0]
+        K = logsnr.shape[0]
+
+        # Expand x and logsnr
+        x = x[:, None].expand(B, K, *x.shape[1:])
+        logsnr = logsnr[None].expand(B, K)
+
+        # Forward diffusion
+        z, timesteps, eps = self.noisy_channel(x, logsnr)
+
+        # Apply imputation
+        local_cond = local_cond[:, None, ...].expand(B,K,*local_cond.shape[1:]) if local_cond is not None else None  # (B, K, T, D)
+        global_cond = global_cond[:, None, ...].expand(B,K,*global_cond.shape[1:]) if global_cond is not None else None # (B, K, T, D)
+        cond_mask = cond_mask[:, None, ...].expand(B,*x.shape[1:])        # (B, K, T, D)
+        cond_data = cond_data[:, None, ...].expand(B,*x.shape[1:])        # (B, K, T, D)
+        
         z[cond_mask] = cond_data[cond_mask]
 
-        eps_hat = self.model(z, timesteps, local_cond=local_cond, global_cond=global_cond,
-                             stochastic = stochastic)
-        
-        # compute loss mask
-        loss_mask = (~cond_mask).float()        # same shape as eps
+        # Noise Prediction
+        eps_hat = self.model(
+            z.flatten(0, 1),
+            timesteps.flatten(),
+            local_cond=local_cond.flatten(0, 1) if local_cond is not None else None ,
+            global_cond=global_cond.flatten(0, 1) if global_cond is not None else None,
+            stochastic=stochastic,
+        ).view_as(eps)
 
-        sse = ((eps - eps_hat)**2 * loss_mask)  # masked squared error
-        mse_eps = sse.flatten(start_dim=1).sum(dim=1)
+        # MSE loss
+        loss_mask = (~cond_mask).float()
+        sse = ((eps - eps_hat) ** 2) * loss_mask
 
-        return mse_eps
+        return sse.flatten(start_dim=2).sum(dim=2)  # (B, K)
 
-    def nll(self, batch, logsnr_samples_per_x=1, xinterval=None, stochastic = False):
+    def nll(self, batch, logsnr_samples_per_x=1, stochastic = False):
         """Monte-Carlo estimate of -log p(x)."""
         total = 0
         B = len(batch[0])
@@ -630,46 +649,40 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             logsnr, w = self.logistic_integrate(
                 B, *self.loc_scale, device=self.device
             )
-            mses = self.mse(batch, logsnr, mse_type='epsilon', xinterval=xinterval, stochastic=stochastic)
-            total += self.loss(mses, logsnr, w)
+            mses = self.mse(batch, logsnr, stochastic=stochastic)
+            total += self._nll_from_mse(mses, logsnr, w)
         return total / logsnr_samples_per_x
 
-    def loss(self, mses, logsnr, w):
-        """
-        MSE → NLL conversion using analytic Gaussian MMSE gap.
-        """
-        mmse_gap = mses - self.mmse_g(logsnr)
-        return self.h_g + 0.5 * (w * mmse_gap).mean()
+    def _nll_from_mse(self, mses, logsnr, weights):
+        # mse: (N, K)
+        # logsnr: (K,)
+        # weights: (N, K)
+        mmse_gap = mses.mean(dim=0) - self.mmse_g(logsnr)
+        return torch.mean(self.h_g + 0.5 * torch.sum(weights * mmse_gap))
 
     @torch.no_grad()
-    def test_nll(self, dataloader, epoch, npoints=100, xinterval=None, stochastic = False):
+    def nll_bound(self, dataloader, epoch, npoints=100, stochastic = False):
         """Calculate expected NLL on data at test time.  Main difference is that we can clamp the integration
         range, because negative values of MMSE gap we can switch to Gaussian decoder to get zero.
-        npoints - number of points to use in integration
-        delta - if the data is discrete, delta is the gap between discrete values.
-        E.g. delta = 1/127.5 for CIFAR data (0, 255) scaled to -1, 1 range
-        xinterval - a tuple of the range of the discrete values, e.g. (-1, 1) for CIFAR10 normalized
-        soft -  using soft discretization if True.
+        npoints -> number of points to use in integration
         """
         if self.model.training:
             print("Warning - estimating test NLL but model is in train mode")
+        
         results = {}  # Return multiple forms of results in a dictionary
         clip = 4
         loc, scale = self.loc_scale
-        logsnr, w = self.logistic_integrate(npoints, loc=loc, scale=scale, clip=clip, device=self.device, deterministic=True)
+        logsnr, w = self.logistic_integrate(npoints, loc=loc, scale=scale, clip=clip, device=self.device, deterministic=True) # logsnr:(K,), w:(K,)
 
         # sort logsnrs along with weights
         logsnr, idx = logsnr.sort()
-        w = w[idx].to('cpu')
+        w = w[idx]
 
-        results['logsnr'] = logsnr.to('cpu')
-        results['w'] = w
         mses = []  # Store all MSEs, per sample, logsnr, in an array
-        total_samples = 0
-        val_loss = 0
         with tqdm.tqdm(dataloader, desc=f"NLL computation at epoch = {epoch}", 
                         leave=False) as tepoch:
             for batch in tepoch:
+                batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
                 nbatch = self.normalizer.normalize(batch)
                 nobs = nbatch['obs']
                 naction = nbatch['action']
@@ -722,44 +735,22 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
 
                 # construct a batch of data in the form that diffusion model of IT expects
                 batch = [trajectory, local_cond, global_cond, cond_data, cond_mask]
-                data = batch[0].to(self.device)  # assume iterator gives other things besides x in list
-                n_samples = len(data)
-                total_samples += n_samples
-
-                val_loss += self.nll([data, ] + batch[1:], xinterval=xinterval, stochastic=stochastic).cpu() * n_samples
-
-                mses.append(torch.zeros(n_samples, len(logsnr)))
-                for j, this_logsnr in enumerate(logsnr):
-                    this_logsnr_broadcast = this_logsnr * torch.ones(len(data), device=self.device)
-
-                    # Regular MSE, clamps predictions, but does not discretize
-                    this_mse = self.mse([data, ] + batch[1:], this_logsnr_broadcast, mse_type='epsilon',
-                                        xinterval=xinterval, stochastic=stochastic).cpu()
-                    mses[-1][:, j] = this_mse
-
-        val_loss /= total_samples
-
-        mses = torch.cat(mses, dim=0)  # Concatenate the batches together across axis 0
-        results['mses-all'] = mses  # Store array of mses for each sample, logsnr
-        mses = mses.mean(dim=0)  # Average across samples, giving MMSE(logsnr)
+                this_mse = self.mse(batch, logsnr, stochastic=stochastic)
+                mses.append(this_mse)
+            
+        mses = torch.cat(mses, dim=0)       # Concatenate the batches together across axis 0
+        results['mses-all'] = mses          # Store array of mses for each sample, logsnr
+        mses = mses.mean(dim=0)             # Average across samples, giving MMSE(logsnr)
 
         results['mses'] = mses
-        results['mmse_g'] = self.mmse_g(logsnr.to(self.device)).to('cpu')
+        results['mmse_g'] = self.mmse_g(logsnr)
 
         # here the results of the integral is clamped to 0 if the MMSE is negative
-        results['nll (nats)'] = torch.mean(self.h_g - 0.5 * w * torch.clamp(results['mmse_g'] - mses, 0.))
-        results['nll (bpd)'] = results['nll (nats)'] / math.log(2) / self.d
- 
-        ## Variance (of the mean) calculation - via CLT, it's the variance of the samples (over epsilon, x, logsnr) / n samples.
-        ## n_samples is number of x samples * number of logsnr samples per x
-        inds = (results['mmse_g'] - results[
-            'mses']) > 0  # we only give nonzero estimates in this region (for continuous estimators)
-        n_samples = results['mses-all'].numel()
-        wp = w[inds]
-        results['nll (nats) - var'] = torch.var(
-            0.5 * wp * (results['mmse_g'][inds] - results['mses-all'][:, inds])) / n_samples
-        
-        results['nll (bpd) - std'] = torch.sqrt(results['nll (nats) - var']) / math.log(2) / self.d
+        results['nll (nats)'] = self.h_g - torch.mean(0.5 * w * torch.clamp(results['mmse_g'] - mses, 0.))
+        results['nll (bpd)'] = results['nll (nats)'] / (math.log(2) * self.d)
+
+        # results['logsnr'] = logsnr.to('cpu')
+        # results['w'] = w.to('cpu')
         
         return results['nll (bpd)']
 
@@ -826,7 +817,8 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
 
     def mmse_g(self, logsnr):
         """The analytic MMSE for a Gaussian with the same eigenvalues as the data in a Gaussian noise channel."""
-        return torch.sigmoid(logsnr + self.log_eigs.view((-1, 1))).sum(axis=0)  # *logsnr integration, see note
+        mmse = torch.sigmoid(logsnr[None, :] + self.log_eigs[:, None]).sum(dim=0)   # (K,)
+        return mmse
     
     def logistic_integrate(self, npoints, loc, scale, clip=4., device='cpu', deterministic=False):
         """Return sample point and weights for integration, using

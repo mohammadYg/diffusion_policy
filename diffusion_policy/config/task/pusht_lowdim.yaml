@@ -36,6 +36,6 @@ dataset:
   pad_after: ${eval:'${n_action_steps}-1'}
   seed: 42
   val_ratio: 0.02
-  max_train_episodes: 90
-  train_episodes_for_PAC_Bayes: 5        # This is selected from training data.
+  max_train_episodes: null
+  train_episodes_for_PAC_Bayes: 0        # This is selected from training data.
   offset: 0.0

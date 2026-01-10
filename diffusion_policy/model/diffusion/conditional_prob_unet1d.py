@@ -131,7 +131,9 @@ class Gaussian(nn.Module):
 
     def sample(self):
         # Return a sample from the Gaussian distribution
-        epsilon = torch.randn(self.sigma.size()).to(self.mu.device)
+
+        epsilon = torch.randn(self.sigma.size(), device=self.mu.device)
+        #epsilon = torch.randn(self.sigma.size())
         return self.mu + self.sigma * epsilon
 
     def compute_kl(self, other):
@@ -239,10 +241,14 @@ class ProbLinear(nn.Module):
     out_features : int
         Number of output features for the layer
 
-    rho_prior : float
-        prior scale hyperparmeter (to initialise the scale of
+    rho_init : float
+        scale hyperparmeter (to initialise the scale of
         the posterior)
 
+    rho_prior : float
+        scale hyperparmeter (to set the scale of
+        the prior)
+    
     prior_dist : string
         string that indicates the type of distribution for the
         prior and posterior
@@ -259,7 +265,7 @@ class ProbLinear(nn.Module):
 
     """
 
-    def __init__(self, in_features, out_features, rho_prior=-3.0, prior_dist='gaussian', 
+    def __init__(self, in_features, out_features, rho_init = -3.0, rho_prior=-3.0, prior_dist='gaussian', 
                  init_prior='weights', init_layer=None, 
                  init_layer_prior=None):
         super().__init__()
@@ -278,12 +284,15 @@ class ProbLinear(nn.Module):
                 out_features, in_features), 0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
             bias_mu_init = torch.zeros(out_features)
 
-        weights_rho_init = torch.ones(out_features, in_features) * rho_prior
-        bias_rho_init = torch.ones(out_features) * rho_prior
+        weights_rho_init = torch.ones(out_features, in_features) * rho_init
+        bias_rho_init = torch.ones(out_features) * rho_init
+        weights_rho_prior = torch.ones(out_features, in_features) * rho_prior
+        bias_rho_prior = torch.ones(out_features) * rho_prior
 
         if init_prior == 'zeros':
             bias_mu_prior = torch.zeros(out_features) 
             weights_mu_prior = torch.zeros(out_features, in_features)
+            
         elif init_prior == 'random':
             weights_mu_prior = trunc_normal_(torch.Tensor(
                 out_features, in_features), 0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
@@ -311,9 +320,9 @@ class ProbLinear(nn.Module):
         self.weight = dist(weights_mu_init.clone(),
                            weights_rho_init.clone(), fixed=False)
         self.weight_prior = dist(
-            weights_mu_prior.clone(), weights_rho_init.clone(), fixed=True)
+            weights_mu_prior.clone(), weights_rho_prior.clone(), fixed=True)
         self.bias_prior = dist(
-            bias_mu_prior.clone(), bias_rho_init.clone(), fixed=True)
+            bias_mu_prior.clone(), bias_rho_prior.clone(), fixed=True)
 
         self.kl_div = 0
 
@@ -329,6 +338,7 @@ class ProbLinear(nn.Module):
             # otherwise we use the posterior mean
             weight = self.weight.mu
             bias = self.bias.mu
+
         if self.training:
             # sum of the KL computed for weights and biases
             self.kl_div = self.weight.compute_kl(self.weight_prior) + \
@@ -373,9 +383,13 @@ class ProbConv1d(nn.Module):
     kernel_size : int
         size of the convolutional kernel
 
-    rho_prior : float
-        prior scale hyperparmeter (to initialise the scale of
+    rho_init : float
+        scale hyperparmeter (to initialise the scale of
         the posterior)
+
+    rho_prior : float
+        scale hyperparmeter (to set the scale of
+        the prior)
 
     prior_dist : string
         string that indicates the type of distribution for the
@@ -395,7 +409,7 @@ class ProbConv1d(nn.Module):
 
     """
 
-    def __init__(self, in_channels, out_channels, kernel_size, rho_prior=-3.0,
+    def __init__(self, in_channels, out_channels, kernel_size, rho_init = -3.0, rho_prior=-3.0,
                  prior_dist='gaussian', stride=1, padding=0, dilation=1,
                 groups = 1, init_prior='weights', init_layer=None, init_layer_prior=None):
         super().__init__()
@@ -421,8 +435,10 @@ class ProbConv1d(nn.Module):
                                         0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
             bias_mu_init = torch.zeros(out_channels)
 
-        weights_rho_init = torch.ones(out_channels, in_channels, kernel_size) * rho_prior
-        bias_rho_init = torch.ones(out_channels) * rho_prior
+        weights_rho_init = torch.ones(out_channels, in_channels, kernel_size) * rho_init
+        bias_rho_init = torch.ones(out_channels) * rho_init
+        weights_rho_prior = torch.ones(out_channels, in_channels, kernel_size) * rho_prior
+        bias_rho_prior = torch.ones(out_channels) * rho_prior
 
         if init_prior == 'zeros':
             bias_mu_prior = torch.zeros(out_features) 
@@ -452,8 +468,8 @@ class ProbConv1d(nn.Module):
 
         self.weight = dist(weights_mu_init.clone(), weights_rho_init.clone(), fixed=False)
         self.bias = dist(bias_mu_init.clone(), bias_rho_init.clone(), fixed=False)
-        self.weight_prior = dist(weights_mu_prior.clone(), weights_rho_init.clone(), fixed=True)
-        self.bias_prior = dist(bias_mu_prior.clone(), bias_rho_init.clone(), fixed=True)
+        self.weight_prior = dist(weights_mu_prior.clone(), weights_rho_prior.clone(), fixed=True)
+        self.bias_prior = dist(bias_mu_prior.clone(), bias_rho_prior.clone(), fixed=True)
 
         self.kl_div = 0
 
@@ -486,8 +502,11 @@ class ProbConvTranspose1d(nn.Module):
     kernel_size : int
         size of the convolutional kernel
 
+    rho_init : float
+        scale hyperparameter (to initialise the scale of the posterior)
+
     rho_prior : float
-        prior scale hyperparameter (to initialise the scale of the posterior)
+        scale hyperparameter (to set the scale of the prior)
 
     prior_dist : string
         string that indicates the type of distribution for the prior and posterior
@@ -514,7 +533,7 @@ class ProbConvTranspose1d(nn.Module):
         Linear layer object used to initialise the prior
     """
 
-    def __init__(self, in_channels, out_channels, kernel_size, rho_prior=-3.0,
+    def __init__(self, in_channels, out_channels, kernel_size, rho_init = -3.0, rho_prior=-3.0,
                  prior_dist='gaussian', stride=1, padding=0, 
                  output_padding=0, dilation=1, groups=1,
                  init_prior='weights', init_layer=None, init_layer_prior=None):
@@ -541,8 +560,10 @@ class ProbConvTranspose1d(nn.Module):
                 0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
             bias_mu_init = torch.zeros(out_channels)
 
-        weights_rho_init = torch.ones(in_channels, out_channels, kernel_size) * rho_prior
-        bias_rho_init = torch.ones(out_channels) * rho_prior
+        weights_rho_init = torch.ones(in_channels, out_channels, kernel_size) * rho_init
+        bias_rho_init = torch.ones(out_channels) * rho_init
+        weights_rho_prior = torch.ones(in_channels, out_channels, kernel_size) * rho_prior
+        bias_rho_prior = torch.ones(out_channels) * rho_prior
 
         # prior init
         if init_prior == 'zeros':
@@ -573,8 +594,8 @@ class ProbConvTranspose1d(nn.Module):
 
         self.weight = dist(weights_mu_init.clone(), weights_rho_init.clone(), fixed=False)
         self.bias = dist(bias_mu_init.clone(), bias_rho_init.clone(), fixed=False)
-        self.weight_prior = dist(weights_mu_prior.clone(), weights_rho_init.clone(), fixed=True)
-        self.bias_prior = dist(bias_mu_prior.clone(), bias_rho_init.clone(), fixed=True)
+        self.weight_prior = dist(weights_mu_prior.clone(), weights_rho_prior.clone(), fixed=True)
+        self.bias_prior = dist(bias_mu_prior.clone(), bias_rho_prior.clone(), fixed=True)
 
         self.kl_div = 0
 
@@ -598,7 +619,7 @@ class ProbDownsample1d(nn.Module):
     ''' This class is initialized with nn.conv1D layer from a deterministic network
     the init_layer and init_layer_prior must be 'Downsample1d' layer from deterministic network
     '''
-    def __init__(self, dim, rho_prior=-3.0, prior_dist='gaussian',
+    def __init__(self, dim, rho_init=-3.0, rho_prior=-3.0, prior_dist='gaussian',
                  init_prior='weights', init_downsample1d=None, init_downsample1d_prior=None):
         super().__init__()
         
@@ -607,7 +628,7 @@ class ProbDownsample1d(nn.Module):
         init_conv_prior = init_downsample1d_prior.conv if init_downsample1d_prior else None
         
         self.conv = ProbConv1d(
-            dim, dim, kernel_size=3, stride=2, padding=1,
+            dim, dim, kernel_size=3, stride=2, padding=1, rho_init=rho_init,
             rho_prior=rho_prior, prior_dist=prior_dist,
             init_prior=init_prior, init_layer=init_conv, init_layer_prior=init_conv_prior
         )
@@ -621,7 +642,7 @@ class ProbDownsample1d(nn.Module):
 
     
 class ProbUpsample1d(nn.Module):
-    def __init__(self, dim, rho_prior=-3.0, prior_dist='gaussian',
+    def __init__(self, dim, rho_init=-3.0, rho_prior=-3.0, prior_dist='gaussian',
                  init_prior='weights', init_upsample1d=None, init_upsample1d_prior=None):
         super().__init__()
         
@@ -630,7 +651,7 @@ class ProbUpsample1d(nn.Module):
         init_conv_prior = init_upsample1d_prior.conv if init_upsample1d_prior else None
         
         self.conv = ProbConvTranspose1d(
-            dim, dim, kernel_size=4, stride=2, padding=1,
+            dim, dim, kernel_size=4, stride=2, padding=1, rho_init = rho_init,
             rho_prior=rho_prior, prior_dist=prior_dist,
             init_prior=init_prior, init_layer=init_conv, init_layer_prior=init_conv_prior
         )
@@ -648,7 +669,7 @@ class ProbConv1dBlock(nn.Module):
     """
 
     def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8, 
-                 rho_prior=-3.0, prior_dist='gaussian',
+                 rho_init=-3.0, rho_prior=-3.0, prior_dist='gaussian',
                  init_prior='weights', init_conv1dblock=None, init_conv1dblock_prior=None):
         super().__init__()
 
@@ -657,7 +678,7 @@ class ProbConv1dBlock(nn.Module):
         init_conv_prior = init_conv1dblock_prior.block[0] if init_conv1dblock_prior else None
 
         self.conv = ProbConv1d(
-            inp_channels, out_channels, kernel_size, 
+            inp_channels, out_channels, kernel_size, rho_init = rho_init,
             rho_prior=rho_prior, prior_dist=prior_dist,
             padding=kernel_size // 2,  # Maintain same padding
             init_prior=init_prior, init_layer=init_conv, init_layer_prior=init_conv_prior
@@ -747,6 +768,7 @@ class ProbConditionalResidualBlock1D(nn.Module):
         kernel_size=3,
         n_groups=8,
         cond_predict_scale=False,
+        rho_init=-3.0,
         rho_prior=-3.0,
         prior_dist='gaussian',
         init_prior='weights', 
@@ -765,7 +787,7 @@ class ProbConditionalResidualBlock1D(nn.Module):
             [
                 ProbConv1dBlock(
                     in_channels, out_channels, kernel_size, 
-                    n_groups=n_groups, rho_prior=rho_prior,
+                    n_groups=n_groups, rho_init=rho_init, rho_prior=rho_prior,
                     prior_dist=prior_dist,
                     init_prior=init_prior, 
                     init_conv1dblock=init_conv1dblock1,
@@ -773,7 +795,7 @@ class ProbConditionalResidualBlock1D(nn.Module):
                 ),
                 ProbConv1dBlock(
                     out_channels, out_channels, kernel_size,
-                    n_groups=n_groups, rho_prior=rho_prior,
+                    n_groups=n_groups, rho_init=rho_init, rho_prior=rho_prior,
                     prior_dist=prior_dist,
                     init_prior=init_prior,
                     init_conv1dblock=init_conv1dblock2,
@@ -812,6 +834,7 @@ class ProbConditionalResidualBlock1D(nn.Module):
             nn.Mish(),
             ProbLinear(
                 cond_dim, cond_channels, 
+                rho_init=rho_init,
                 rho_prior=rho_prior, 
                 prior_dist=prior_dist, 
                 init_prior=init_prior,
@@ -828,7 +851,7 @@ class ProbConditionalResidualBlock1D(nn.Module):
         
         if in_channels != out_channels:
             self.residual_conv = ProbConv1d(
-                in_channels, out_channels, kernel_size=1,
+                in_channels, out_channels, kernel_size=1, rho_init=rho_init,
                 rho_prior=rho_prior, prior_dist=prior_dist,
                 padding=0,
                 init_prior=init_prior,
@@ -909,6 +932,7 @@ class BayesianConditionalUnet1D(nn.Module):
         cond_predict_scale=False,
         use_dropout=False,
         # Bayesian parameters
+        rho_init=-3.0,
         rho_prior=-3.0,
         prior_dist='gaussian',
         init_prior='weights',
@@ -1010,12 +1034,12 @@ class BayesianConditionalUnet1D(nn.Module):
 
         diffusion_step_encoder = nn.Sequential(
             SinusoidalPosEmb(dsed),
-            ProbLinear(dsed, dsed * 4, rho_prior=rho_prior, prior_dist=prior_dist, 
+            ProbLinear(dsed, dsed * 4, rho_init=rho_init, rho_prior=rho_prior, prior_dist=prior_dist, 
                       init_prior=init_prior, 
                       init_layer=init_step_encoder_linearlayer1, 
                       init_layer_prior=init_step_encoder_linearlayer1_prior),
             nn.Mish(),
-            ProbLinear(dsed * 4, dsed, rho_prior=rho_prior, prior_dist=prior_dist,
+            ProbLinear(dsed * 4, dsed, rho_init=rho_init, rho_prior=rho_prior, prior_dist=prior_dist,
                       init_prior=init_prior,
                       init_layer=init_step_encoder_linearlayer2, 
                       init_layer_prior=init_step_encoder_linearlayer2_prior),
@@ -1080,6 +1104,7 @@ class BayesianConditionalUnet1D(nn.Module):
         #                 kernel_size=kernel_size,
         #                 n_groups=n_groups,
         #                 cond_predict_scale=cond_predict_scale,
+        #                 rho_init=rho_init,
         #                 rho_prior=rho_prior,
         #                 prior_dist=prior_dist,
         #                 init_prior=init_prior,
@@ -1094,6 +1119,7 @@ class BayesianConditionalUnet1D(nn.Module):
         #                 kernel_size=kernel_size,
         #                 n_groups=n_groups,
         #                 cond_predict_scale=cond_predict_scale,
+        #                 rho_init=rho_init,
         #                 rho_prior=rho_prior,
         #                 prior_dist=prior_dist,
         #                 init_prior=init_prior,
@@ -1122,6 +1148,7 @@ class BayesianConditionalUnet1D(nn.Module):
                     kernel_size=kernel_size,
                     n_groups=n_groups,
                     cond_predict_scale=cond_predict_scale,
+                    rho_init=rho_init,
                     rho_prior=rho_prior,
                     prior_dist=prior_dist,
                     init_prior=init_prior,
@@ -1135,6 +1162,7 @@ class BayesianConditionalUnet1D(nn.Module):
                     kernel_size=kernel_size,
                     n_groups=n_groups,
                     cond_predict_scale=cond_predict_scale,
+                    rho_init=rho_init,
                     rho_prior=rho_prior,
                     prior_dist=prior_dist,
                     init_prior=init_prior,
@@ -1169,6 +1197,7 @@ class BayesianConditionalUnet1D(nn.Module):
                             kernel_size=kernel_size,
                             n_groups=n_groups,
                             cond_predict_scale=cond_predict_scale,
+                            rho_init=rho_init,
                             rho_prior=rho_prior,
                             prior_dist=prior_dist,
                             init_prior=init_prior,
@@ -1182,6 +1211,7 @@ class BayesianConditionalUnet1D(nn.Module):
                             kernel_size=kernel_size,
                             n_groups=n_groups,
                             cond_predict_scale=cond_predict_scale,
+                            rho_init=rho_init,
                             rho_prior=rho_prior,
                             prior_dist=prior_dist,
                             init_prior=init_prior,
@@ -1190,6 +1220,7 @@ class BayesianConditionalUnet1D(nn.Module):
                         ),
                         ProbDownsample1d(
                             dim_out, 
+                            rho_init=rho_init,
                             rho_prior=rho_prior,
                             prior_dist=prior_dist,
                             init_prior=init_prior,
@@ -1225,6 +1256,7 @@ class BayesianConditionalUnet1D(nn.Module):
                             kernel_size=kernel_size,
                             n_groups=n_groups,
                             cond_predict_scale=cond_predict_scale,
+                            rho_init=rho_init,
                             rho_prior=rho_prior,
                             prior_dist=prior_dist,
                             init_prior=init_prior,
@@ -1238,6 +1270,7 @@ class BayesianConditionalUnet1D(nn.Module):
                             kernel_size=kernel_size,
                             n_groups=n_groups,
                             cond_predict_scale=cond_predict_scale,
+                            rho_init=rho_init,
                             rho_prior=rho_prior,
                             prior_dist=prior_dist,
                             init_prior=init_prior,
@@ -1246,6 +1279,7 @@ class BayesianConditionalUnet1D(nn.Module):
                         ),
                         ProbUpsample1d(
                             dim_in,
+                            rho_init=rho_init,
                             rho_prior=rho_prior,
                             prior_dist=prior_dist,
                             init_prior=init_prior,
@@ -1270,7 +1304,7 @@ class BayesianConditionalUnet1D(nn.Module):
         final_conv = nn.Sequential(
             ProbConv1dBlock(
                 start_dim, start_dim, kernel_size=kernel_size,
-                n_groups=n_groups, rho_prior=rho_prior,
+                n_groups=n_groups, rho_init=rho_init, rho_prior=rho_prior,
                 prior_dist=prior_dist,
                 init_prior=init_prior, 
                 init_conv1dblock=init_conv_block,
@@ -1278,6 +1312,7 @@ class BayesianConditionalUnet1D(nn.Module):
             ),
             ProbConv1d(
                 start_dim, output_dim, kernel_size=1,
+                rho_init=rho_init,
                 rho_prior=rho_prior, prior_dist=prior_dist,
                 init_prior=init_prior,
                 init_layer=init_final_layer,
@@ -1293,6 +1328,7 @@ class BayesianConditionalUnet1D(nn.Module):
 
         # Store Bayesian parameters for reference
         self.rho_prior = rho_prior
+        self.rho_init = rho_init
         self.prior_dist = prior_dist
 
     def forward(

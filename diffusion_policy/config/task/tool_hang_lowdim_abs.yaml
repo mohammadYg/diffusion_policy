@@ -4,6 +4,9 @@ obs_dim: 53
 action_dim: 10
 keypoint_dim: 3
 
+n_repeat_runner: 1
+n_MC: 1
+
 obs_keys: &obs_keys ['object', 'robot0_eef_pos', 'robot0_eef_quat', 'robot0_gripper_qpos']
 task_name: &task_name tool_hang
 dataset_type: &dataset_type ph
@@ -44,3 +47,5 @@ dataset:
   rotation_rep: rotation_6d
   seed: 42
   val_ratio: 0.02
+  max_train_episodes: null
+  train_episodes_for_PAC_Bayes: 0
