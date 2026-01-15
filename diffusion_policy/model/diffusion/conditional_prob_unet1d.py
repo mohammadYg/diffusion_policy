@@ -133,7 +133,6 @@ class Gaussian(nn.Module):
         # Return a sample from the Gaussian distribution
 
         epsilon = torch.randn(self.sigma.size(), device=self.mu.device)
-        #epsilon = torch.randn(self.sigma.size())
         return self.mu + self.sigma * epsilon
 
     def compute_kl(self, other):
@@ -707,7 +706,7 @@ class ConditionalResidualBlock1D(nn.Module):
         cond_dim,
         kernel_size=3,
         n_groups=8,
-        cond_predict_scale=False,
+        cond_predict_scale=False
     ):
         super().__init__()
 
@@ -740,11 +739,11 @@ class ConditionalResidualBlock1D(nn.Module):
 
     def forward(self, x, cond):
         """
-        x : [ batch_size x in_channels x horizon ]
-        cond : [ batch_size x cond_dim]
+            x : [ batch_size x in_channels x horizon ]
+            cond : [ batch_size x cond_dim]
 
-        returns:
-        out : [ batch_size x out_channels x horizon ]
+            returns:
+            out : [ batch_size x out_channels x horizon ]
         """
         out = self.blocks[0](x)
         embed = self.cond_encoder(cond)
@@ -1051,83 +1050,55 @@ class BayesianConditionalUnet1D(nn.Module):
 
         in_out = list(zip(all_dims[:-1], all_dims[1:]))
 
-        # Deterministic local conditioning
+        # Probabilistic local conditioning
         local_cond_encoder = None
         if local_cond_dim is not None:
             _, dim_out = in_out[0]
             dim_in = local_cond_dim
+            
+            # Handle initialization from pretrained nets
+            init_local_cond = init_net.local_cond_encoder if init_net.local_cond_encoder else None
+            init_local_cond_prior = init_net_prior.local_cond_encoder if init_net_prior.local_cond_encoder else None
+            
+            init_local_condresblock_down = init_local_cond[0] if init_local_cond else None
+            init_local_condresblock_down_prior = init_local_cond_prior[0] if init_local_cond_prior else None
+            init_local_condresblock_up = init_local_cond[1] if init_local_cond else None
+            init_local_condresblock_up_prior = init_local_cond_prior[1] if init_local_cond_prior else None
+            
             local_cond_encoder = nn.ModuleList(
                 [
                     # down encoder
-                    ConditionalResidualBlock1D(
+                    ProbConditionalResidualBlock1D(
                         dim_in,
                         dim_out,
                         cond_dim=cond_dim,
                         kernel_size=kernel_size,
                         n_groups=n_groups,
                         cond_predict_scale=cond_predict_scale,
+                        rho_init=rho_init,
+                        rho_prior=rho_prior,
+                        prior_dist=prior_dist,
+                        init_prior=init_prior,
+                        init_condresblock=init_local_condresblock_down,
+                        init_condresblock_prior=init_local_condresblock_down_prior,
                     ),
                     # up encoder
-                    ConditionalResidualBlock1D(
+                    ProbConditionalResidualBlock1D(
                         dim_in,
                         dim_out,
                         cond_dim=cond_dim,
                         kernel_size=kernel_size,
                         n_groups=n_groups,
                         cond_predict_scale=cond_predict_scale,
+                        rho_init=rho_init,
+                        rho_prior=rho_prior,
+                        prior_dist=prior_dist,
+                        init_prior=init_prior,
+                        init_condresblock=init_local_condresblock_up,
+                        init_condresblock_prior=init_local_condresblock_up_prior,
                     ),
                 ]
             )
-        
-        # # Probabilistic local conditioning
-        # local_cond_encoder = None
-        # if local_cond_dim is not None:
-        #     _, dim_out = in_out[0]
-        #     dim_in = local_cond_dim
-            
-        #     # Handle initialization from pretrained nets
-        #     init_local_cond = init_net.local_cond_encoder if init_net.local_cond_encoder else None
-        #     init_local_cond_prior = init_net_prior.local_cond_encoder if init_net_prior.local_cond_encoder else None
-            
-        #     init_local_condresblock_down = init_local_cond[0] if init_local_cond else None
-        #     init_local_condresblock_down_prior = init_local_cond_prior[0] if init_local_cond_prior else None
-        #     init_local_condresblock_up = init_local_cond[1] if init_local_cond else None
-        #     init_local_condresblock_up_prior = init_local_cond_prior[1] if init_local_cond_prior else None
-            
-        #     local_cond_encoder = nn.ModuleList(
-        #         [
-        #             # down encoder
-        #             ProbConditionalResidualBlock1D(
-        #                 dim_in,
-        #                 dim_out,
-        #                 cond_dim=cond_dim,
-        #                 kernel_size=kernel_size,
-        #                 n_groups=n_groups,
-        #                 cond_predict_scale=cond_predict_scale,
-        #                 rho_init=rho_init,
-        #                 rho_prior=rho_prior,
-        #                 prior_dist=prior_dist,
-        #                 init_prior=init_prior,
-        #                 init_condresblock=init_local_condresblock_down,
-        #                 init_condresblock_prior=init_local_condresblock_down_prior,
-        #             ),
-        #             # up encoder
-        #             ProbConditionalResidualBlock1D(
-        #                 dim_in,
-        #                 dim_out,
-        #                 cond_dim=cond_dim,
-        #                 kernel_size=kernel_size,
-        #                 n_groups=n_groups,
-        #                 cond_predict_scale=cond_predict_scale,
-        #                 rho_init=rho_init,
-        #                 rho_prior=rho_prior,
-        #                 prior_dist=prior_dist,
-        #                 init_prior=init_prior,
-        #                 init_condresblock=init_local_condresblock_up,
-        #                 init_condresblock_prior=init_local_condresblock_up_prior,
-        #             ),
-        #         ]
-        #     )
 
         mid_dim = all_dims[-1]
         # Handle initialization for mid modules

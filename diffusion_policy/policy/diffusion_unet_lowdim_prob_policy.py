@@ -9,7 +9,8 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
-from diffusion_policy.model.diffusion.conditional_prob_unet1d import BayesianConditionalUnet1D
+#from diffusion_policy.model.diffusion.conditional_prob_unet1d import BayesianConditionalUnet1D
+from diffusion_policy.model.diffusion.prob_conditional_unet1d import BayesianConditionalUnet1D
 from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from diffusion_policy.common.SDE import VPSDE
 from diffusion_policy.common.likelihood import get_likelihood_fn

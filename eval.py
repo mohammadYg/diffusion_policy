@@ -38,6 +38,7 @@ def main(checkpoint, output_dir, device, override):
     
     # load checkpoint
     payload = torch.load(open(checkpoint, 'rb'), pickle_module=dill)
+    print ("payload keys:", payload["state_dicts"].keys())
     cfg = payload['cfg']
 
     # apply overrides (if any)

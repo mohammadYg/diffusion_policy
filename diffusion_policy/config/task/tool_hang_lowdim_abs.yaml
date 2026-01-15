@@ -27,7 +27,7 @@ env_runner:
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   n_latency_steps: ${n_latency_steps}
-  render_hw: [128,128]
+  render_hw: [512,512]
   fps: 10
   crf: 22
   past_action: ${past_action_visible}

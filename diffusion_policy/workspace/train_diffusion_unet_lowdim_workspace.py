@@ -304,8 +304,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             step_log['test_noise_pred_loss'] = noise_pred_loss
                             topk_ckpt_path_val = topk_manager_noise_pred.get_ckpt_path(step_log)
                             if topk_ckpt_path_val is not None:
-                                #self.save_checkpoint(path=topk_ckpt_path_val)
-                                self.save_weights_only(path=topk_ckpt_path_val)
+                                self.save_checkpoint(path=topk_ckpt_path_val, exclude_keys=['model', 'optimizer'])
+                                #self.save_weights_only(path=topk_ckpt_path_val)
                         
                         # compute train noise prediction loss
                         train_noise_pred_losses = list()
@@ -377,8 +377,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     # step_log['train_nll_bpd'] = NLL_train
                     topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
                     if topk_ckpt_path_nll is not None:
-                        #self.save_checkpoint(path=topk_ckpt_path_nll)
-                        self.save_weights_only(path=topk_ckpt_path_nll)
+                        self.save_checkpoint(path=topk_ckpt_path_nll, exclude_keys=['model', 'optimizer'])
+                        #self.save_weights_only(path=topk_ckpt_path_nll)
 
                 # # Compute memorization metric
                 # if (self.epoch % cfg.training.memorization_every)==0:
@@ -435,8 +435,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 if (self.epoch % cfg.training.checkpoint_every) == 0:
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
-                        #self.save_checkpoint()
-                        self.save_weights_only()
+                        self.save_checkpoint(exclude_keys=['model', 'optimizer'])
+                        #self.save_weights_only()
                     if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
 
@@ -451,8 +451,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     # therefore at this point the file might have been empty!
                     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
                     if topk_ckpt_path is not None:
-                        #self.save_checkpoint(path=topk_ckpt_path)
-                        self.save_weights_only(path=topk_ckpt_path)
+                        self.save_checkpoint(path=topk_ckpt_path,exclude_keys=['model', 'optimizer'])
+                        #self.save_weights_only(path=topk_ckpt_path)
 
 
                 # ========= eval end for this epoch ==========
