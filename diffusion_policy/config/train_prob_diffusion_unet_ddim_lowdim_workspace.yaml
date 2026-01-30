@@ -25,8 +25,8 @@ policy:
   _target_: diffusion_policy.policy.diffusion_unet_lowdim_prob_policy.DiffusionUnetLowdimProbPolicy
 
   model:
-    #_target_: diffusion_policy.model.diffusion.conditional_prob_unet1d.BayesianConditionalUnet1D
-    _target_: diffusion_policy.model.diffusion.prob_conditional_unet1d.BayesianConditionalUnet1D
+    _target_: diffusion_policy.model.diffusion.conditional_prob_unet1d.BayesianConditionalUnet1D
+    #_target_: diffusion_policy.model.diffusion.prob_conditional_unet1d.BayesianConditionalUnet1D
     input_dim: "${eval: ${task.action_dim} if ${obs_as_local_cond} or ${obs_as_global_cond} else ${task.obs_dim} + ${task.action_dim}}"
     local_cond_dim: "${eval: ${task.obs_dim} if ${obs_as_local_cond} else None}"
     global_cond_dim: "${eval: ${task.obs_dim}*${n_obs_steps} if ${obs_as_global_cond} else None}"
@@ -68,7 +68,7 @@ policy:
   action_dim: ${action_dim}
   n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
   n_obs_steps: ${n_obs_steps}
-  num_inference_steps: 8
+  num_inference_steps: 10
   obs_as_local_cond: ${obs_as_local_cond}
   obs_as_global_cond: ${obs_as_global_cond}
   pred_action_steps_only: ${pred_action_steps_only}
@@ -76,7 +76,9 @@ policy:
 
   # scheduler.step params
   # predict_epsilon: True
+  eta: 1.0
   use_clipped_model_output: True
+  
 
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
@@ -117,6 +119,7 @@ optimizer:
 # optimizer:
 #   _target_: torch.optim.SGD
 #   lr: 0.001
+#   momentum: 0.95
 
 training:
   device: "cuda:1"

@@ -162,7 +162,7 @@ class Laplace(nn.Module):
     def sample(self):
         # Return a sample from the Laplace distribution
         # we do scaling due to numerical issues
-        epsilon = (0.999*torch.rand(self.scale.size())-0.49999)
+        epsilon = (0.999*torch.rand(self.scale.size(), device=self.mu.device)-0.49999)
         result = self.mu - torch.mul(torch.mul(self.scale, torch.sign(epsilon)),
                                      torch.log(1-2*torch.abs(epsilon)))
         return result
@@ -333,20 +333,34 @@ class ProbConditionalResidualBlock1D(nn.Module):
         init_cond_encoder_linear_layer = init_condresblock.cond_encoder[1] if init_condresblock else None
         init_cond_encoder_prior_linear_layer = init_condresblock_prior.cond_encoder[1] if init_condresblock_prior else None
 
-        # Probabilistic conditioning pathway
+        # Deterministic conditioning pathway
+        cond_linear = nn.Linear(cond_dim, cond_channels)
+        if init_cond_encoder_prior_linear_layer is not None:
+            with torch.no_grad():
+                cond_linear.weight.copy_(init_cond_encoder_prior_linear_layer.weight)
+                if init_cond_encoder_prior_linear_layer.bias is not None:
+                    cond_linear.bias.copy_(init_cond_encoder_prior_linear_layer.bias)
+
         self.cond_encoder = nn.Sequential(
             nn.Mish(),
-            ProbLinear(
-                cond_dim, cond_channels, 
-                rho_init=rho_init,
-                rho_prior=rho_prior, 
-                prior_dist=prior_dist, 
-                init_prior=init_prior,
-                init_layer=init_cond_encoder_linear_layer,
-                init_layer_prior=init_cond_encoder_prior_linear_layer
-            ),
+            cond_linear,
             Rearrange("batch t -> batch t 1"),
         )
+
+        # # Probabilistic conditioning pathway
+        # self.cond_encoder = nn.Sequential(
+        #     nn.Mish(),
+        #     ProbLinear(
+        #         cond_dim, cond_channels, 
+        #         rho_init=rho_init,
+        #         rho_prior=rho_prior, 
+        #         prior_dist=prior_dist, 
+        #         init_prior=init_prior,
+        #         init_layer=init_cond_encoder_linear_layer,
+        #         init_layer_prior=init_cond_encoder_prior_linear_layer
+        #     ),
+        #     Rearrange("batch t -> batch t 1"),
+        # )
 
         # make sure dimensions compatible
         self.residual_conv = nn.Conv1d(in_channels, out_channels, 1) \
@@ -362,10 +376,13 @@ class ProbConditionalResidualBlock1D(nn.Module):
         """
         out = self.blocks[0](x)
         
-        # FiLM conditioning with probabilistic linear layer
-        embed = self.cond_encoder[0](cond)  # Mish activation
-        embed = self.cond_encoder[1](embed, stochastic=stochastic)  # ProbLinear
-        embed = self.cond_encoder[2](embed)  # Rearrange
+        # FiLM conditioning with deterministic linear layer
+        embed = self.cond_encoder(cond)
+
+        # # FiLM conditioning with probabilistic linear layer
+        # embed = self.cond_encoder[0](cond)  # Mish activation
+        # embed = self.cond_encoder[1](embed, stochastic=stochastic)  # ProbLinear
+        # embed = self.cond_encoder[2](embed)  # Rearrange
         
         if self.cond_predict_scale:
             embed = embed.reshape(embed.shape[0], 2, self.out_channels, 1)
@@ -420,33 +437,33 @@ class BayesianConditionalUnet1D(nn.Module):
         start_dim = down_dims[0]
         
         
-        dsed = diffusion_step_embed_dim
-        diffusion_step_encoder = nn.Sequential(
-            SinusoidalPosEmb(dsed),
-            nn.Linear(dsed, dsed * 4),
-            nn.Mish(),
-            nn.Linear(dsed * 4, dsed),
-        )
-
-        # # Probabilistic timestep encoding
-        # dsed = diffusion_step_embed_dim        
-        # init_step_encoder_linearlayer1 = init_net.diffusion_step_encoder[1] if init_net else None
-        # init_step_encoder_linearlayer2 = init_net.diffusion_step_encoder[3] if init_net else None
-        # init_step_encoder_linearlayer1_prior = init_net_prior.diffusion_step_encoder[1] if init_net_prior else None
-        # init_step_encoder_linearlayer2_prior = init_net_prior.diffusion_step_encoder[3] if init_net_prior else None
-
+        # dsed = diffusion_step_embed_dim
         # diffusion_step_encoder = nn.Sequential(
         #     SinusoidalPosEmb(dsed),
-        #     ProbLinear(dsed, dsed * 4, rho_init=rho_init, rho_prior=rho_prior, prior_dist=prior_dist, 
-        #               init_prior=init_prior, 
-        #               init_layer=init_step_encoder_linearlayer1, 
-        #               init_layer_prior=init_step_encoder_linearlayer1_prior),
+        #     nn.Linear(dsed, dsed * 4),
         #     nn.Mish(),
-        #     ProbLinear(dsed * 4, dsed, rho_init=rho_init, rho_prior=rho_prior, prior_dist=prior_dist,
-        #               init_prior=init_prior,
-        #               init_layer=init_step_encoder_linearlayer2, 
-        #               init_layer_prior=init_step_encoder_linearlayer2_prior),
+        #     nn.Linear(dsed * 4, dsed),
         # )
+
+        # Probabilistic timestep encoding
+        dsed = diffusion_step_embed_dim        
+        diffusion_step_encoder = nn.Sequential(
+            SinusoidalPosEmb(dsed),
+            ProbLinear(dsed, dsed * 4, 
+                      rho_init=rho_init, 
+                      rho_prior=rho_prior, 
+                      prior_dist=prior_dist, 
+                      init_prior=init_prior, 
+                      init_layer=None, 
+                      init_layer_prior=None),
+            nn.Mish(),
+            ProbLinear(dsed * 4, dsed, rho_init=rho_init, 
+                      rho_prior=rho_prior, 
+                      prior_dist=prior_dist,
+                      init_prior=init_prior,
+                      init_layer=None, 
+                      init_layer_prior=None),
+        )
         
         cond_dim = dsed
         if global_cond_dim is not None:
@@ -608,8 +625,6 @@ class BayesianConditionalUnet1D(nn.Module):
                 )
             )
 
-        self.dropout = nn.Dropout(0.25) if use_dropout else nn.Identity()
-        
         final_conv = nn.Sequential(
             Conv1dBlock(start_dim, start_dim, kernel_size=kernel_size),
             nn.Conv1d(start_dim, input_dim, 1),
@@ -658,14 +673,14 @@ class BayesianConditionalUnet1D(nn.Module):
             timesteps = timesteps[None].to(sample.device)
         timesteps = timesteps.expand(sample.shape[0])
 
-        # use deterministic encoding for timesteps
-        global_feature = self.diffusion_step_encoder(timesteps)
+        # # use deterministic encoding for timesteps
+        # global_feature = self.diffusion_step_encoder(timesteps)
         
-        # # Use stochastic sampling for diffusion step encoder
-        # global_feature = self.diffusion_step_encoder[0](timesteps)  # SinusoidalPosEmb
-        # global_feature = self.diffusion_step_encoder[1](global_feature, stochastic=stochastic)
-        # global_feature = self.diffusion_step_encoder[2](global_feature)  # Mish
-        # global_feature = self.diffusion_step_encoder[3](global_feature, stochastic=stochastic)
+        # Use stochastic sampling for diffusion step encoder
+        global_feature = self.diffusion_step_encoder[0](timesteps)  # SinusoidalPosEmb
+        global_feature = self.diffusion_step_encoder[1](global_feature, stochastic=stochastic)
+        global_feature = self.diffusion_step_encoder[2](global_feature)  # Mish
+        global_feature = self.diffusion_step_encoder[3](global_feature, stochastic=stochastic)
 
         if global_cond is not None:
             global_feature = torch.cat([global_feature, global_cond], axis=-1)
@@ -702,8 +717,6 @@ class BayesianConditionalUnet1D(nn.Module):
             x = upsample(x)
 
         # This works if self.dropout flag is True
-        x = self.dropout(x)
-
         x = self.final_conv(x)
 
         x = einops.rearrange(x, "b t h -> b h t")
@@ -718,29 +731,29 @@ class BayesianConditionalUnet1D(nn.Module):
             if hasattr(layer, 'kl_div'):
                 kl_div += layer.kl_div
         
-        # KL from local condition encoder
-        if self.local_cond_encoder is not None:
-            for layer in self.local_cond_encoder:
-                kl_div += layer.compute_kl()
+        # # KL from local condition encoder
+        # if self.local_cond_encoder is not None:
+        #     for layer in self.local_cond_encoder:
+        #         kl_div += layer.compute_kl()
         
-        # KL from mid modules
-        for layer in self.mid_modules:
-            kl_div += layer.compute_kl()
+        # # KL from mid modules
+        # for layer in self.mid_modules:
+        #     kl_div += layer.compute_kl()
         
-        # KL from down modules
-        for module_list in self.down_modules:
-            for layer in module_list:
-                if hasattr(layer, 'compute_kl'):
-                    kl_div += layer.compute_kl()
-                elif hasattr(layer, 'kl_div'):
-                    kl_div += layer.kl_div
+        # # KL from down modules
+        # for module_list in self.down_modules:
+        #     for layer in module_list:
+        #         if hasattr(layer, 'compute_kl'):
+        #             kl_div += layer.compute_kl()
+        #         elif hasattr(layer, 'kl_div'):
+        #             kl_div += layer.kl_div
         
-        # KL from up modules
-        for module_list in self.up_modules:
-            for layer in module_list:
-                if hasattr(layer, 'compute_kl'):
-                    kl_div += layer.compute_kl()
-                elif hasattr(layer, 'kl_div'):
-                    kl_div += layer.kl_div
+        # # KL from up modules
+        # for module_list in self.up_modules:
+        #     for layer in module_list:
+        #         if hasattr(layer, 'compute_kl'):
+        #             kl_div += layer.compute_kl()
+        #         elif hasattr(layer, 'kl_div'):
+        #             kl_div += layer.kl_div
          
         return kl_div

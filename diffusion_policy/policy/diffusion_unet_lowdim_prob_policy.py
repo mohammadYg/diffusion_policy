@@ -9,8 +9,8 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
-#from diffusion_policy.model.diffusion.conditional_prob_unet1d import BayesianConditionalUnet1D
-from diffusion_policy.model.diffusion.prob_conditional_unet1d import BayesianConditionalUnet1D
+from diffusion_policy.model.diffusion.conditional_prob_unet1d import BayesianConditionalUnet1D
+#from diffusion_policy.model.diffusion.prob_conditional_unet1d import BayesianConditionalUnet1D
 from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from diffusion_policy.common.SDE import VPSDE
 from diffusion_policy.common.likelihood import get_likelihood_fn
@@ -196,7 +196,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def compute_loss(self, batch, stochastic=False, train= True):
+    def compute_loss(self, batch, stochastic=False):
         # normalize input
         assert 'valid_mask' not in batch
         nbatch = self.normalizer.normalize(batch)
@@ -233,14 +233,13 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         # Sample noise that we'll add to the images
         noise = torch.randn(trajectory.shape, device=trajectory.device)
         bsz = trajectory.shape[0]
+        
         # Sample a random timestep for each image
-        if train:    
-            timesteps = torch.randint(
-                0, self.noise_scheduler.config.num_train_timesteps, 
-                (bsz,), device=trajectory.device
-            ).long()
-        else:
-            timesteps = torch.ones(bsz, device=trajectory.device).long() * 10
+        timesteps = torch.randint(
+            0, self.noise_scheduler.config.num_train_timesteps, 
+            (bsz,), device=trajectory.device
+        ).long()
+        
         # Add noise to the clean images according to the noise magnitude at each timestep
         # (this is the forward diffusion process)
         noisy_trajectory = self.noise_scheduler.add_noise(
@@ -271,10 +270,10 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         loss = loss.mean()
         return loss
     
-    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, kl_penalty = 0.005, mc_sampling=1000, stochastic = True, train = True, bounded = False):
+    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, kl_penalty = 0.005, mc_sampling=1000, stochastic = True, bounded = False):
         
         # DM emprical risk
-        loss_emp = self.compute_loss(batch, stochastic=stochastic, train=train)
+        loss_emp = self.compute_loss(batch, stochastic=stochastic)
         scale = 2.0
         if bounded:
             loss_emp_scaled = loss_emp/scale
@@ -388,7 +387,6 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
         
         for t in self.noise_scheduler.timesteps:
-            
             # 1. apply conditioning
             noisy_trajectory[cond_mask] = trajectory[cond_mask]
     
@@ -627,7 +625,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         z[cond_mask] = cond_data[cond_mask]
 
         # Noise Prediction
-        eps_hat = self.model(
+        output = self.model(
             z.flatten(0, 1),
             timesteps.flatten(),
             local_cond=local_cond.flatten(0, 1) if local_cond is not None else None ,
@@ -635,9 +633,17 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             stochastic=stochastic,
         ).view_as(eps)
 
+        pred_type = self.noise_scheduler.config.prediction_type 
+        if pred_type == 'epsilon':
+            target = eps
+        elif pred_type == 'sample':
+            target = x
+        else:
+            raise ValueError(f"Unsupported prediction type {pred_type}")
+
         # MSE loss
         loss_mask = (~cond_mask).float()
-        sse = ((eps - eps_hat) ** 2) * loss_mask
+        sse = ((target - output) ** 2) * loss_mask
 
         return sse.flatten(start_dim=2).sum(dim=2)  # (B, K)
 

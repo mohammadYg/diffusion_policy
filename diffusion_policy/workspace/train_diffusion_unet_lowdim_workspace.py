@@ -185,7 +185,6 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
         
-
         # compute covariance_spectrum of the training data
         self.model.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
         if cfg.training.use_ema:
@@ -209,7 +208,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
 
-                        raw_loss = self.model.compute_loss(batch, train = True)
+                        raw_loss = self.model.compute_loss(batch)
                             
                         loss = raw_loss / cfg.training.gradient_accumulate_every
                         loss.backward()
@@ -273,7 +272,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 #     step_log["test/var_mean_score"] = var_success_rate
 
                 # run rollout
-                if (self.epoch % cfg.training.rollout_every) == 0:
+                if (self.epoch % cfg.training.rollout_every) == 0 and (self.epoch>50):
                     runner_log = env_runner.run(policy)
                     # log all
                     step_log.update(runner_log)
@@ -294,7 +293,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 
                                 # device transfer
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                val_noise_pred_loss = policy.compute_loss(batch, train=False)
+                                val_noise_pred_loss = policy.compute_loss(batch)
                                 val_noise_pred_losses.append(val_noise_pred_loss.item() * n_samples)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
@@ -318,7 +317,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 
                                 # device transfer
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                train_noise_pred_loss = policy.compute_loss(batch, train=False)
+                                train_noise_pred_loss = policy.compute_loss(batch)
                                 train_noise_pred_losses.append(train_noise_pred_loss.item() * n_samples)
 
                                 if (cfg.training.max_val_steps is not None) \
@@ -432,7 +431,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 #             step_log['log_act_gen_err_between_epochs'] = np.log(loss_rec/n_total_samples)
 
                 # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0:
+                if (self.epoch % cfg.training.checkpoint_every) == 0 and (self.epoch>50):
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
                         self.save_checkpoint(exclude_keys=['model', 'optimizer'])

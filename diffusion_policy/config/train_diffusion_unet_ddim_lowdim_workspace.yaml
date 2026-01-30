@@ -53,7 +53,7 @@ policy:
   action_dim: ${action_dim}
   n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
   n_obs_steps: ${n_obs_steps}
-  num_inference_steps: 8
+  num_inference_steps: 10
   obs_as_local_cond: ${obs_as_local_cond}
   obs_as_global_cond: ${obs_as_global_cond}
   pred_action_steps_only: ${pred_action_steps_only}
@@ -62,6 +62,7 @@ policy:
   # scheduler.step params
   # predict_epsilon: True
   use_clipped_model_output: True
+  eta: 1.0
 
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel

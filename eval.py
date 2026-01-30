@@ -8,6 +8,7 @@ import sys
 sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
 sys.stderr = open(sys.stderr.fileno(), mode='w', buffering=1)
 
+import pickle
 import os
 import pathlib
 import click
@@ -38,7 +39,7 @@ def main(checkpoint, output_dir, device, override):
     
     # load checkpoint
     payload = torch.load(open(checkpoint, 'rb'), pickle_module=dill)
-    print ("payload keys:", payload["state_dicts"].keys())
+    print ("payload keys:", payload.keys())
     cfg = payload['cfg']
 
     # apply overrides (if any)
@@ -64,6 +65,7 @@ def main(checkpoint, output_dir, device, override):
     env_runner = hydra.utils.instantiate(
             cfg.task.env_runner,
             output_dir=output_dir)
+    env_runner.current_epoch = pickle.loads(payload["pickles"]["epoch"])
     success_rate = list()
     for _ in range (cfg.task.n_repeat_runner):
         if isinstance(policy, BaseLowdimProbPolicy):
@@ -112,28 +114,28 @@ def main(checkpoint, output_dir, device, override):
     avg_loss_pred_noise = np.mean(val_loss_noise_pred)
     var_loss_pred_noise = np.var(val_loss_noise_pred, ddof=ddof)
 
-    # Reconstructions loss
-    n_MC= 1
-    with torch.no_grad():
-        val_action_rec_loss = list()
-        n_total_samples = 0
-        with tqdm.tqdm(val_dataloader, desc=f"Validation: Action Prediction loss", 
-                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-            for batch in tepoch:
-                n_samples = len(batch["obs"])
-                n_total_samples += n_samples
-                # device transfer
-                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                # initial noise
-                shape = (n_samples, cfg.horizon, cfg.action_dim + cfg.obs_dim)
-                noise = torch.randn(shape, device=batch["action"].device)
-                for _ in range (n_MC):
-                    if isinstance(policy, BaseLowdimProbPolicy):
-                        rec_loss = policy.compute_action_reconst_loss(noise, batch, cfg.eval.stochastic, loss_type = "MSE", normalized=False)
-                    else:
-                         rec_loss = policy.compute_action_reconst_loss(noise, batch, loss_type = "MSE", normalized=False)
-                    val_action_rec_loss.append(rec_loss.item() * n_samples)
-        action_reconst_loss =np.sum(val_action_rec_loss)/(n_total_samples*n_MC)     
+    # # Reconstructions loss
+    # n_MC= 1
+    # with torch.no_grad():
+    #     val_action_rec_loss = list()
+    #     n_total_samples = 0
+    #     with tqdm.tqdm(val_dataloader, desc=f"Validation: Action Prediction loss", 
+    #             leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+    #         for batch in tepoch:
+    #             n_samples = len(batch["obs"])
+    #             n_total_samples += n_samples
+    #             # device transfer
+    #             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+    #             # initial noise
+    #             shape = (n_samples, cfg.horizon, cfg.action_dim + cfg.obs_dim)
+    #             noise = torch.randn(shape, device=batch["action"].device)
+    #             for _ in range (n_MC):
+    #                 if isinstance(policy, BaseLowdimProbPolicy):
+    #                     rec_loss = policy.compute_action_reconst_loss(noise, batch, cfg.eval.stochastic, loss_type = "MSE", normalized=False)
+    #                 else:
+    #                      rec_loss = policy.compute_action_reconst_loss(noise, batch, loss_type = "MSE", normalized=False)
+    #                 val_action_rec_loss.append(rec_loss.item() * n_samples)
+    #     action_reconst_loss =np.sum(val_action_rec_loss)/(n_total_samples*n_MC)     
     # dump log to json
     json_log = dict()
     json_log["test/mean_score_avg"] = avg_success_rate
@@ -142,7 +144,7 @@ def main(checkpoint, output_dir, device, override):
     json_log["test/loss_noise_pred_avg"] = avg_loss_pred_noise
     json_log["test/loss_noise_pred_var"] = var_loss_pred_noise
     json_log["test/loss_noise_pred_sd"] = np.sqrt(var_loss_pred_noise)
-    json_log["test/action_reconst_loss"] = action_reconst_loss
+    # json_log["test/action_reconst_loss"] = action_reconst_loss
 
     for key, value in runner_log.items():
         if isinstance(value, wandb.sdk.data_types.video.Video):

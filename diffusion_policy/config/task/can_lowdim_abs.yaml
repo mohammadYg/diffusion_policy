@@ -4,6 +4,9 @@ obs_dim: 23
 action_dim: 10
 keypoint_dim: 3
 
+n_repeat_runner: 1
+n_MC: 1
+
 obs_keys: &obs_keys ['object', 'robot0_eef_pos', 'robot0_eef_quat', 'robot0_gripper_qpos']
 task_name: &task_name can
 dataset_type: &dataset_type ph
@@ -31,6 +34,8 @@ env_runner:
   past_action: ${past_action_visible}
   abs_action: *abs_action
   n_envs: 28
+  disturbance_enabled: False
+  body_name: 'robot0_right_hand'
 
 dataset:
   _target_: diffusion_policy.dataset.robomimic_replay_lowdim_dataset.RobomimicReplayLowdimDataset
@@ -44,3 +49,5 @@ dataset:
   rotation_rep: rotation_6d
   seed: 42
   val_ratio: 0.02
+  max_train_episodes: null
+  train_episodes_for_PAC_Bayes: 0

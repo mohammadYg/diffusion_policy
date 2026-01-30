@@ -191,7 +191,6 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
         
-
         # compute covariance_spectrum of the training data
         self.model.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
         if cfg.training.use_ema:
@@ -218,10 +217,10 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             raw_loss, emp_risk_train, kl_train = self.model.compute_bound(batch, n_bound=len(pac_dataloader.dataset), objective=cfg.training.pac_objective,
                                                         delta=cfg.training.delta, 
                                                         kl_penalty=cfg.training.kl_penalty, 
-                                                        mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.training.stochastic, train = True, bounded=cfg.training.bounded)
+                                                        mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.training.stochastic, bounded=cfg.training.bounded)
                             
                         else:
-                            raw_loss = self.model.compute_loss(batch, stochastic=cfg.training.stochastic, train=True)
+                            raw_loss = self.model.compute_loss(batch, stochastic=cfg.training.stochastic)
                             emp_risk_train = raw_loss
                             kl_train = torch.tensor([0.0])
                             
@@ -289,13 +288,13 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 #     step_log["test/var_mean_score"] = var_success_rate
 
                 # run rollout
-                if (self.epoch % cfg.training.rollout_every) == 0:
+                if (self.epoch % cfg.training.rollout_every) == 0 and (self.epoch>50):
+                    env_runner.current_epoch = self.epoch
                     runner_log = env_runner.run_prob(policy, stochastic= cfg.eval.stochastic)
                     # log all
                     step_log.update(runner_log)
                     if self.epoch>cfg.training.num_epochs-500:
                         last_ten_success_rate.append(step_log["test/mean_score"])
-
 
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0:
@@ -311,7 +310,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 
                                 # device transfer
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                val_noise_pred_loss = policy.compute_loss(batch, stochastic=cfg.eval.stochastic, train=False)
+                                val_noise_pred_loss = policy.compute_loss(batch, stochastic=cfg.eval.stochastic)
                                 val_noise_pred_losses.append(val_noise_pred_loss.item() * n_samples)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
@@ -335,7 +334,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 
                                 # device transfer
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                train_noise_pred_loss = policy.compute_loss(batch, stochastic=cfg.eval.stochastic, train=False)
+                                train_noise_pred_loss = policy.compute_loss(batch, stochastic=cfg.eval.stochastic)
                                 train_noise_pred_losses.append(train_noise_pred_loss.item() * n_samples)
 
                                 if (cfg.training.max_val_steps is not None) \
@@ -437,7 +436,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 #         del mse
                 
                 # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0:
+                if (self.epoch % cfg.training.checkpoint_every) == 0 and (self.epoch>50):
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
                         self.save_checkpoint(exclude_keys=['model', 'optimizer'])

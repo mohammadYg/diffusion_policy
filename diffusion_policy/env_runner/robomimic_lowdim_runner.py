@@ -1,5 +1,6 @@
 import os
 import wandb
+import gym
 import numpy as np
 import torch
 import collections
@@ -39,6 +40,82 @@ def create_env(env_meta, obs_keys):
     )
     return env
 
+class DisturbanceWrapper(gym.Wrapper):
+    def __init__(self, env, body_name: str):
+        super().__init__(env)
+        self.body_name = body_name
+
+        # runtime flags
+        self.enabled = False
+        self.active = False
+
+        # disturbance params
+        self.start_step = 0
+        self.end_step = 0
+        self.force = None
+
+        # bookkeeping
+        self.step_count = 0
+        self.rng = None
+
+    def configure(self, *, seed: int, enabled: bool):
+        """
+        Called from init_fn (per-env, per-episode)
+        """
+        self.enabled = enabled
+        self.step_count = 0
+
+        if not enabled:
+            self.active = False
+            return
+
+        if self.body_name is None or self.body_name not in self.env.env.env.sim.model.body_names:
+            print("AVAILABLE BODIES:", self.env.env.env.sim.model.body_names)
+            raise AssertionError(f"Body {self.body_name} not found")
+
+        self.rng = np.random.RandomState(seed)
+
+        self.start_step = self.rng.randint(20, 200)
+        duration = self.rng.randint(10, 40)
+        self.end_step = self.start_step + duration
+
+        direction = self.rng.randn(3)
+        direction /= np.linalg.norm(direction) + 1e-8
+        magnitude = self.rng.uniform(5.0, 15.0)
+        self.force = direction * magnitude
+
+        self.active = True
+
+
+    def reset(self, **kwargs):
+        self.step_count = 0
+        self._clear_force()
+        return self.env.reset()
+
+    def step(self, action):
+        """
+        Apply force BEFORE stepping physics.
+        """
+        if self.enabled and self.active:
+            if self.start_step <= self.step_count < self.end_step:
+                self._apply_force()
+            else:
+                self._clear_force()
+
+        obs, reward, done, info = self.env.step(action)
+        self.step_count += 1
+        return obs, reward, done, info
+
+    def _apply_force(self):
+        sim = self.env.env.env.sim
+        body_id = sim.model.body_name2id(self.body_name)
+        sim.data.xfrc_applied[body_id, :3] = self.force
+        sim.data.xfrc_applied[body_id, 3:] = 0.0
+
+    def _clear_force(self):
+        sim = self.env.env.env.sim
+        body_id = sim.model.body_name2id(self.body_name)
+        sim.data.xfrc_applied[body_id, :] = 0.0
 
 class RobomimicLowdimRunner(BaseLowdimRunner):
     """
@@ -66,7 +143,9 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             past_action=False,
             abs_action=False,
             tqdm_interval_sec=5.0,
-            n_envs=None
+            n_envs=None,
+            disturbance_enabled=False,
+            body_name=None,
         ):
         """
         Assuming:
@@ -117,30 +196,39 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                 )
             # hard reset doesn't influence lowdim env
             # robomimic_env.env.hard_reset = False
-            return MultiStepWrapper(
-                    VideoRecordingWrapper(
-                        RobomimicLowdimWrapper(
-                            env=robomimic_env,
-                            obs_keys=obs_keys,
-                            init_state=None,
-                            render_hw=render_hw,
-                            render_camera_name=render_camera_name
-                        ),
-                        video_recoder=VideoRecorder.create_h264(
-                            fps=fps,
-                            codec='h264',
-                            input_pix_fmt='rgb24',
-                            crf=crf,
-                            thread_type='FRAME',
-                            thread_count=1
-                        ),
-                        file_path=None,
-                        steps_per_render=steps_per_render
-                    ),
-                    n_obs_steps=env_n_obs_steps,
-                    n_action_steps=env_n_action_steps,
-                    max_episode_steps=max_steps
+            env = RobomimicLowdimWrapper(
+                    env=robomimic_env,
+                    obs_keys=obs_keys,
+                    init_state=None,
+                    render_hw=render_hw,
+                    render_camera_name=render_camera_name
                 )
+            
+            env = DisturbanceWrapper(
+                            env,
+                            body_name=body_name
+                        )
+                
+            env = VideoRecordingWrapper(
+                                env,
+                                video_recoder=VideoRecorder.create_h264(
+                                    fps=fps,
+                                    codec="h264",
+                                    input_pix_fmt="rgb24",
+                                    crf=crf,
+                                    thread_type="FRAME",
+                                    thread_count=1
+                                ),
+                                file_path=None,
+                                steps_per_render=steps_per_render
+                            )
+
+            return MultiStepWrapper(
+                                env,
+                                n_obs_steps=env_n_obs_steps,
+                                n_action_steps=env_n_action_steps,
+                                max_episode_steps=max_steps
+                            )
 
         env_fns = [env_fn] * n_envs
         env_seeds = list()
@@ -155,22 +243,35 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                 init_state = f[f'data/demo_{train_idx}/states'][0]
 
                 def init_fn(env, init_state=init_state, 
-                    enable_render=enable_render):
+                    enable_render=enable_render, train_idx=train_idx):
                     # setup rendering
                     # video_wrapper
                     assert isinstance(env.env, VideoRecordingWrapper)
                     env.env.video_recoder.stop()
                     env.env.file_path = None
                     if enable_render:
+                        epoch = getattr(self, "current_epoch", 0)
+                        name = self.make_video_filename(epoch=epoch,idx=train_idx)
+                        # filename = pathlib.Path(output_dir).joinpath(
+                        #     'media', wv.util.generate_id() + ".mp4")
                         filename = pathlib.Path(output_dir).joinpath(
-                            'media', wv.util.generate_id() + ".mp4")
+                            'media', name + ".mp4")
                         filename.parent.mkdir(parents=False, exist_ok=True)
                         filename = str(filename)
                         env.env.file_path = filename
 
                     # switch to init_state reset
-                    assert isinstance(env.env.env, RobomimicLowdimWrapper)
-                    env.env.env.init_state = init_state
+                    assert isinstance(env.env.env.env, RobomimicLowdimWrapper)
+                    env.env.env.env.init_state = init_state
+
+                    # configure disturbance
+                    disturbance_wrapper = env.env.env                           # unwrap MultiStep → Video → Disturbance
+                    assert isinstance(disturbance_wrapper, DisturbanceWrapper)
+
+                    disturbance_wrapper.configure(
+                        seed=train_idx,
+                        enabled=disturbance_enabled
+                    )
 
                 env_seeds.append(train_idx)
                 env_prefixs.append('train/')
@@ -189,16 +290,30 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                 env.env.video_recoder.stop()
                 env.env.file_path = None
                 if enable_render:
+                    epoch = getattr(self, "current_epoch", 0)
+                    name = self.make_video_filename(
+                        epoch=epoch,
+                        idx=seed
+                    )
                     filename = pathlib.Path(output_dir).joinpath(
-                        'media', wv.util.generate_id() + ".mp4")
+                        'media', name + ".mp4")
+                    # filename = pathlib.Path(output_dir).joinpath(
+                    #     'media', wv.util.generate_id() + ".mp4")
                     filename.parent.mkdir(parents=False, exist_ok=True)
                     filename = str(filename)
                     env.env.file_path = filename
 
                 # switch to seed reset
-                assert isinstance(env.env.env, RobomimicLowdimWrapper)
-                env.env.env.init_state = None
+                assert isinstance(env.env.env.env, RobomimicLowdimWrapper)
+                env.env.env.env.init_state = None
                 env.seed(seed)
+                disturbance_wrapper = env.env.env
+                assert isinstance(disturbance_wrapper, DisturbanceWrapper)
+
+                disturbance_wrapper.configure(
+                    seed=seed,
+                    enabled=disturbance_enabled
+                )
 
             env_seeds.append(seed)
             env_prefixs.append('test/')
@@ -225,7 +340,11 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         self.rotation_transformer = rotation_transformer
         self.abs_action = abs_action
         self.tqdm_interval_sec = tqdm_interval_sec
+        self.current_epoch = 0
 
+    def make_video_filename(self, *, epoch, idx):
+            return f"epoch={epoch:04d}_seed={idx:05d}.mp4"
+    
     def run(self, policy: BaseLowdimPolicy):
         device = policy.device
         dtype = policy.dtype
@@ -378,7 +497,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             # init envs
             env.call_each('run_dill_function', 
                 args_list=[(x,) for x in this_init_fns])
-
+            
             # start rollout
             obs = env.reset()
             past_action = None
