@@ -13,20 +13,7 @@ import dill
 import copy
 import hydra
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-
-class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
+from diffusion_policy.model.diffusion.positional_embedding import SinusoidalPosEmb
     
 def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
     # type: (Tensor, float, float, float, float) -> Tensor
@@ -118,7 +105,6 @@ class Gaussian(nn.Module):
 
     def sample(self):
         # Return a sample from the Gaussian distribution
-
         epsilon = torch.randn(self.sigma.size(), device=self.mu.device)
         return self.mu + self.sigma * epsilon
 
@@ -130,8 +116,7 @@ class Gaussian(nn.Module):
         b0 = torch.pow(other.sigma, 2)
 
         term1 = torch.log(torch.div(b0, b1))
-        term2 = torch.div(
-            torch.pow(self.mu - other.mu, 2), b0)
+        term2 = torch.div(torch.pow(self.mu - other.mu, 2), b0)
         term3 = torch.div(b1, b0)
         kl_div = (torch.mul(term1 + term2 + term3 - 1, 0.5)).sum()
         return kl_div
@@ -189,31 +174,6 @@ class Laplace(nn.Module):
         kl_div = (term1 + term2 + term3 - 1).sum()
         return kl_div
 
-class Lambda_var(nn.Module):
-    """Class for the lambda variable included in the objective
-    flambda
-
-    Parameters
-    ----------
-    lamb : float
-        initial value
-
-    n : int
-        Scaling parameter (lamb_scaled is between 1/sqrt(n) and 1)
-
-    """
-
-    def __init__(self, lamb, n):
-        super().__init__()
-        self.lamb = nn.Parameter(torch.tensor([lamb]), requires_grad=True)
-        self.min = 1/np.sqrt(n)
-
-    @property
-    def lamb_scaled(self):
-        # We restrict lamb_scaled to be between 1/sqrt(n) and 1.
-        m = nn.Sigmoid()
-        return (m(self.lamb) * (1-self.min) + self.min)
-    
 class ProbLinear(nn.Module):
     """Implementation of a Probabilistic Linear layer.
 
@@ -281,6 +241,7 @@ class ProbLinear(nn.Module):
             weights_mu_prior = trunc_normal_(torch.Tensor(
                 out_features, in_features), 0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
             bias_mu_prior = torch.zeros(out_features) 
+            
         elif init_prior == 'weights': 
             if init_layer_prior:
                 weights_mu_prior = init_layer_prior.weight
@@ -330,27 +291,6 @@ class ProbLinear(nn.Module):
 
         return F.linear(input, weight, bias)
 
-class Conv1dBlock(nn.Module):
-    """
-    Conv1d --> GroupNorm --> Mish
-    """
-
-    def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8):
-        super().__init__()
-
-        self.block = nn.Sequential(
-            nn.Conv1d(
-                inp_channels, out_channels, kernel_size, padding=kernel_size // 2
-            ),
-            # Rearrange('batch channels horizon -> batch channels 1 horizon'),
-            nn.GroupNorm(n_groups, out_channels),
-            # Rearrange('batch channels 1 horizon -> batch channels horizon'),
-            nn.Mish(),
-        )
-
-    def forward(self, x):
-        return self.block(x)
-    
 class ProbConv1d(nn.Module):
     """Probabilistic 1D Convolutional Layer.
     Each weight and bias is modeled as a Gaussian random variable.
@@ -681,67 +621,7 @@ class ProbConv1dBlock(nn.Module):
     
     def compute_kl(self):
         return self.conv.kl_div
-    
-class ConditionalResidualBlock1D(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        cond_dim,
-        kernel_size=3,
-        n_groups=8,
-        cond_predict_scale=False
-    ):
-        super().__init__()
-
-        self.blocks = nn.ModuleList(
-            [
-                Conv1dBlock(in_channels, out_channels, kernel_size, n_groups=n_groups),
-                Conv1dBlock(out_channels, out_channels, kernel_size, n_groups=n_groups),
-            ]
-        )
-
-        # FiLM modulation https://arxiv.org/abs/1709.07871
-        # predicts per-channel scale and bias
-        cond_channels = out_channels
-        if cond_predict_scale:
-            cond_channels = out_channels * 2
-        self.cond_predict_scale = cond_predict_scale
-        self.out_channels = out_channels
-        self.cond_encoder = nn.Sequential(
-            nn.Mish(),
-            nn.Linear(cond_dim, cond_channels),
-            Rearrange("batch t -> batch t 1"),
-        )
-
-        # make sure dimensions compatible
-        self.residual_conv = (
-            nn.Conv1d(in_channels, out_channels, 1)
-            if in_channels != out_channels
-            else nn.Identity()
-        )
-
-    def forward(self, x, cond):
-        """
-            x : [ batch_size x in_channels x horizon ]
-            cond : [ batch_size x cond_dim]
-
-            returns:
-            out : [ batch_size x out_channels x horizon ]
-        """
-        out = self.blocks[0](x)
-        embed = self.cond_encoder(cond)
-        if self.cond_predict_scale:
-            embed = embed.reshape(embed.shape[0], 2, self.out_channels, 1)
-            scale = embed[:, 0, ...]
-            bias = embed[:, 1, ...]
-            out = scale * out + bias
-        else:
-            out = out + embed
-        out = self.blocks[1](out)
-        out = out + self.residual_conv(x)
-        return out
-    
+        
 class ProbConditionalResidualBlock1D(nn.Module):
     def __init__(
         self,

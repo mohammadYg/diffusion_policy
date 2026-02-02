@@ -35,6 +35,8 @@ env_runner:
   abs_action: *abs_action
   tqdm_interval_sec: 1.0
   n_envs: 28
+  disturbance_enabled: False
+  body_name: 'robot0_right_hand'
 
 dataset:
   _target_: diffusion_policy.dataset.robomimic_replay_lowdim_dataset.RobomimicReplayLowdimDataset

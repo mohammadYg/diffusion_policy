@@ -9,11 +9,16 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
-from diffusion_policy.model.diffusion.conditional_prob_unet1d import BayesianConditionalUnet1D
-#from diffusion_policy.model.diffusion.prob_conditional_unet1d import BayesianConditionalUnet1D
+#from diffusion_policy.model.diffusion.conditional_prob1_unet1d import BayesianConditionalUnet1D
+#from diffusion_policy.model.diffusion.conditional_prob2_unet1d import BayesianConditionalUnet1D
+#from diffusion_policy.model.diffusion.conditional_prob3_unet1d import BayesianConditionalUnet1D
+#from diffusion_policy.model.diffusion.conditional_prob4_unet1d import BayesianConditionalUnet1D
+from diffusion_policy.model.diffusion.conditional_prob5_unet1d import BayesianConditionalUnet1D
+
+
 from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from diffusion_policy.common.SDE import VPSDE
-from diffusion_policy.common.likelihood import get_likelihood_fn
+#from diffusion_policy.common.likelihood import get_likelihood_fn
 from diffusion_policy.common.pytorch_util import dict_apply
 
 import collections
@@ -108,7 +113,6 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
 
         return trajectory
 
-
     def predict_action(self, obs_dict: Dict[str, torch.Tensor], stochastic=False) -> Dict[str, torch.Tensor]:
         """
         obs_dict: must include "obs" key
@@ -196,7 +200,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def compute_loss(self, batch, stochastic=False):
+    def compute_loss(self, batch, stochastic=False, train=True):
         # normalize input
         assert 'valid_mask' not in batch
         nbatch = self.normalizer.normalize(batch)
@@ -234,11 +238,16 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         noise = torch.randn(trajectory.shape, device=trajectory.device)
         bsz = trajectory.shape[0]
         
-        # Sample a random timestep for each image
-        timesteps = torch.randint(
-            0, self.noise_scheduler.config.num_train_timesteps, 
-            (bsz,), device=trajectory.device
-        ).long()
+        if train:    
+            timesteps = torch.randint(
+                0, self.noise_scheduler.config.num_train_timesteps, 
+                (bsz,), device=trajectory.device).long()
+        else:
+            generator = torch.Generator(device=trajectory.device)
+            generator.manual_seed(42)
+            timesteps = torch.randint(
+                0, self.noise_scheduler.config.num_train_timesteps, 
+                (bsz,), device=trajectory.device, generator=generator).long()
         
         # Add noise to the clean images according to the noise magnitude at each timestep
         # (this is the forward diffusion process)
@@ -270,10 +279,10 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         loss = loss.mean()
         return loss
     
-    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, kl_penalty = 0.005, mc_sampling=1000, stochastic = True, bounded = False):
+    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, kl_penalty = 0.005, mc_sampling=1000, stochastic = True, bounded = False, train=True):
         
         # DM emprical risk
-        loss_emp = self.compute_loss(batch, stochastic=stochastic)
+        loss_emp = self.compute_loss(batch, stochastic=stochastic, train=train)
         scale = 2.0
         if bounded:
             loss_emp_scaled = loss_emp/scale
@@ -312,268 +321,9 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             loss_sum = loss_emp_scaled + kl_penalty * (kl / n_bound)
         else:
             raise RuntimeError(f"Wrong objective {self.objective}")
-        
-        # loss_kl = torch.div(
-        #         2*(kl_weight*kl + np.log((2*np.sqrt(n_bound))/delta)), n_bound)
 
-        # # scale the empirical risk to be inside [0,1]
-        # scale = 2.0
-        # if bounded:
-        #     loss_sum = loss_emp/scale + loss_kl + torch.sqrt((loss_emp/scale)*loss_kl)
-        # else:
-        #     loss_sum = loss_emp + loss_kl + torch.sqrt(loss_emp*loss_kl)
-        
         return loss_sum, loss_emp, kl
 
-    # ========= Compute Reconstruction Loss of PAC-Bayes Bounds for case where we do inference from last step ============
-    def compute_action_reconst_loss(self, init_noise, batch, stochastic, loss_type, normalized=False):
-        
-        nbatch = self.normalizer.normalize(batch)
-        nobs = nbatch['obs']
-        naction = nbatch['action']
-
-        B, _, Do = nobs.shape
-        To = self.n_obs_steps
-        assert Do == self.obs_dim
-        T = self.horizon
-        Da = self.action_dim
-
-        # build input
-        device = self.device
-        dtype = self.dtype
-
-        # handle different ways of passing observation
-        local_cond = None
-        global_cond = None
-        trajectory = naction
-
-        if self.obs_as_local_cond:
-            # condition through local feature
-            # all zero except first To timesteps
-            local_cond = torch.zeros(size=(B,T,Do), device=device, dtype=dtype)
-            local_cond[:,:To] = nobs[:,:To]
-            shape = (B, T, Da)
-            cond_mask = torch.zeros(size=shape, device=device, dtype=torch.bool)
-            init_noise = init_noise[...,:Da]
-        
-        elif self.obs_as_global_cond:
-            # condition throught global feature
-            global_cond = nobs[:,:To].reshape(nobs.shape[0], -1)
-            init_noise = init_noise[...,:Da]
-            shape = (B, T, Da)
-            if self.pred_action_steps_only:
-                shape = (B, self.n_action_steps, Da)
-                start = To
-                if self.oa_step_convention:
-                    start = To - 1
-                end = start + self.n_action_steps
-                trajectory = naction[:,start:end]
-                init_noise = init_noise[:, start:end]
-            cond_mask = torch.zeros(size=shape, device=device, dtype=torch.bool)
-        else:
-            # condition through impainting
-            shape = (B, T, Da+Do)
-            cond_mask = torch.zeros(size=shape, device=device, dtype=torch.bool)
-            cond_mask[:,:To,Da:] = True
-            trajectory = torch.cat([naction, nobs], dim=-1)
-        
-        # set timestep to last noising step for each sanmple
-        timestep = self.noise_scheduler.timesteps[0]
-
-        # Add noise to the clean images according to the noise magnitude at each timestep
-        noisy_trajectory = self.noise_scheduler.add_noise(trajectory, init_noise, timestep)
-        
-        # set step values
-        self.noise_scheduler.set_timesteps(self.num_inference_steps)
-        
-        for t in self.noise_scheduler.timesteps:
-            # 1. apply conditioning
-            noisy_trajectory[cond_mask] = trajectory[cond_mask]
-    
-            # 2. predict model output
-            model_output = self.model(noisy_trajectory, t, 
-                            local_cond=local_cond, global_cond=global_cond,
-                            stochastic = stochastic)
-
-            # 3. compute previous image: x_t -> x_t-1
-            noisy_trajectory = self.noise_scheduler.step(
-                model_output, t, noisy_trajectory,
-                generator = None,
-                **self.kwargs
-                ).prev_sample
-               
-        # finally make sure conditioning is enforced
-        noisy_trajectory[cond_mask] = trajectory[cond_mask]
-        
-        # extract only predicted actions
-        if not normalized:
-            action_pred = self.normalizer['action'].unnormalize(noisy_trajectory[...,:Da])
-            action_ref  = self.normalizer['action'].unnormalize(trajectory[...,:Da])
-        else:
-            action_pred = noisy_trajectory[...,:Da]
-            action_ref = trajectory[...,:Da]
-
-        # compute loss
-        if loss_type == "MSE":
-            loss = F.mse_loss(action_pred, action_ref)
-
-        elif loss_type == "RMSE":
-            loss = torch.sqrt(F.mse_loss(action_pred, action_ref))
-        else: 
-            loss = torch.linalg.norm(action_pred - action_ref, ord=2, dim=(1, 2)).mean()
-            
-        return loss
-    
-        ## ========= Memorization Evaluation ============
-    def eval_memorization(self, dataloader_eval, dataloader_train, stochastic, normalized, device, threshold=0.3):
-        # -----------------------------------------------------------
-        # 1. Load all training actions once
-        # -----------------------------------------------------------
-        train_actions_list = []
-        with torch.inference_mode():
-            with tqdm.tqdm(dataloader_train, desc=f"Memorization Eval: Load all training actions once", 
-                                leave=False, mininterval=1.0) as tepoch:
-                for batch in tepoch:
-                    batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                    if normalized:
-                        batch = self.normalizer.normalize(batch)
-                    train_actions_list.append(batch['action'])
-            train_actions = torch.cat(train_actions_list, dim=0)   # (N_train, H, A)
-        # -----------------------------------------------------------
-        # 2. Compute nearest-neighbor ratios for all eval samples
-        # -----------------------------------------------------------
-        all_ratios = []
-        with torch.inference_mode():
-            with tqdm.tqdm(dataloader_train, desc=f"Memorization Eval: Compute nearest-neighbor ratios for all eval samples", 
-                                leave=False, mininterval=1.0) as tepoch:
-                for batch in tepoch:
-                    batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-
-                    # Predict actions
-                    action = self.predict_action({'obs': batch['obs']}, stochastic=stochastic)
-                    gen_actions = action["action_pred_normalized"] if normalized else action["action_pred"]
-                    gen_actions = gen_actions.to(device)
-
-                    all_distances_train = []
-                    # Compute pairwise distances: (B_eval, N_train)
-                    diff = gen_actions[:, None, :, :] - train_actions[None, :, :, :]
-                    dist = torch.sqrt(torch.sum(diff ** 2, dim=(2, 3)))   # (B_eval, N_train)
-
-                    # Extract 2 nearest distances
-                    smallest_vals, _ = torch.topk(dist, k=2, largest=False)
-                    # smallest_vals: (B_eval, 2)
-
-                    # Compute ratio d1 / d2
-                    ratios = smallest_vals[:, 0] / smallest_vals[:, 1]
-                    all_ratios.append(ratios.cpu())
-
-        # Concatenate all batches
-        all_ratios = torch.cat(all_ratios, dim=0)   # (N_eval,)
-
-        # -----------------------------------------------------------
-        # 3. Compute required metrics
-        # -----------------------------------------------------------
-        mean_ratio = all_ratios.mean().item()
-
-        # Memorized samples
-        memorized_mask = all_ratios < threshold
-        memorized_count = memorized_mask.sum().item()
-
-        # Memorization fraction
-        total_generated = all_ratios.numel()
-        memorization_fraction = 100.0*memorized_count / total_generated
-
-        return mean_ratio, memorized_count, memorization_fraction
-    
-    # ========================== Lipschitz Constant of the Denoising ==========================
-    def lip_const(self, obs, stochastic=False):
-        nobs = self.normalizer['obs'].normalize(obs)
-        B, _, Do = nobs.shape
-        To = self.n_obs_steps
-        assert Do == self.obs_dim
-        T = self.horizon
-        Da = self.action_dim
-
-        model = self.model
-        scheduler = self.noise_scheduler
-
-        # build input
-        device = self.device
-        dtype = self.dtype
-
-        # handle different ways of passing observation
-        local_cond = None
-        global_cond = None
-        if self.obs_as_local_cond:
-            # condition through local feature
-            # all zero except first To timesteps
-            local_cond = torch.zeros(size=(B,T,Do), device=device, dtype=dtype)
-            local_cond[:,:To] = nobs[:,:To]
-            shape = (B, T, Da)
-            cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
-            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-        elif self.obs_as_global_cond:
-            # condition throught global feature
-            global_cond = nobs[:,:To].reshape(nobs.shape[0], -1)
-            shape = (B, T, Da)
-            if self.pred_action_steps_only:
-                shape = (B, self.n_action_steps, Da)
-            cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
-            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-        else:
-            # condition through impainting
-            shape = (B, T, Da+Do)
-            cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
-            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-            cond_data[:,:To,Da:] = nobs[:,:To]
-            cond_mask[:,:To,Da:] = True
-
-        trajectory = torch.randn(
-            size=cond_data.shape, 
-            dtype=cond_data.dtype,
-            device=device,
-            generator = None)
-    
-        # set step values
-        scheduler.set_timesteps(self.noise_scheduler.config.num_train_timesteps)
-        
-        # set a variable to save denoising results
-        denoise_step = collections.deque(maxlen=self.noise_scheduler.config.num_train_timesteps)
-
-        for t in scheduler.timesteps:
-            # 1. apply conditioning
-            trajectory[cond_mask] = cond_data[cond_mask]
-
-            # 1.1 save the output of each denoising step
-            denoise_step.append(trajectory)
-            
-            # 2. predict model output
-            model_output = model(trajectory, t, 
-                local_cond=local_cond, global_cond=global_cond,
-                stochastic= stochastic)
-
-            # 3. compute previous image: x_t -> x_t-1
-            trajectory = scheduler.step(
-                model_output, t, trajectory, 
-                generator=None,
-                **self.kwargs
-                ).prev_sample
-        
-        # finally make sure conditioning is enforced
-        trajectory[cond_mask] = cond_data[cond_mask]      
-
-        # save last step of denoising 
-        denoise_step.append(trajectory)
-
-        denoise_step = torch.stack(list(denoise_step))
-
-        delta_g_theta = denoise_step[1:,0] - denoise_step[1:,1]
-        delta_XY = denoise_step[:-1,0] - denoise_step[:-1,1]
-        k_theta = torch.linalg.norm(delta_g_theta, ord=2, dim=(1, 2))/ torch.linalg.norm(delta_XY, ord=2, dim=(1, 2))
-        k_theta_prod = torch.prod(k_theta)
-        
-        return torch.flip(k_theta, dims=[0]), k_theta_prod
-    
 # ========================== Compute upper bound on nll ==========================
     def noisy_channel(self, x, logsnr):
         """
@@ -849,71 +599,71 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         weights = scale * torch.tanh(clip / 2) / (torch.sigmoid((logsnr - loc)/scale) * torch.sigmoid(-(logsnr - loc)/scale))
         return logsnr, weights
 
-    def nll_sde(self, dataloader, stochastic=False):
-        SDE = VPSDE(self.noise_scheduler, beta_min=0.1, beta_max=20.0, N=1000)
-        logp_fn = get_likelihood_fn(SDE, continuous = False, exact = False)
+    # def nll_sde(self, dataloader, stochastic=False):
+    #     SDE = VPSDE(self.noise_scheduler, beta_min=0.1, beta_max=20.0, N=1000)
+    #     logp_fn = get_likelihood_fn(SDE, continuous = False, exact = False)
 
-        NLL = 0
-        n_samples = 0
-        with tqdm.tqdm(dataloader, desc=f"NLL computation_score based = ", 
-                        leave=False) as tepoch:
-            for batch in tepoch:
-                n_samples += len(batch["action"])
+    #     NLL = 0
+    #     n_samples = 0
+    #     with tqdm.tqdm(dataloader, desc=f"NLL computation_score based = ", 
+    #                     leave=False) as tepoch:
+    #         for batch in tepoch:
+    #             n_samples += len(batch["action"])
 
-                nbatch = self.normalizer.normalize(batch)
-                nobs = nbatch['obs']
-                naction = nbatch['action']
+    #             nbatch = self.normalizer.normalize(batch)
+    #             nobs = nbatch['obs']
+    #             naction = nbatch['action']
 
-                B, _, Do = nobs.shape
-                To = self.n_obs_steps
-                assert Do == self.obs_dim
-                T = self.horizon
-                Da = self.action_dim
+    #             B, _, Do = nobs.shape
+    #             To = self.n_obs_steps
+    #             assert Do == self.obs_dim
+    #             T = self.horizon
+    #             Da = self.action_dim
 
-                # build input
-                device = self.device
-                dtype = self.dtype
+    #             # build input
+    #             device = self.device
+    #             dtype = self.dtype
 
-                # handle different ways of passing observation
-                local_cond = None
-                global_cond = None
-                trajectory = naction
+    #             # handle different ways of passing observation
+    #             local_cond = None
+    #             global_cond = None
+    #             trajectory = naction
 
-                if self.obs_as_local_cond:
-                    # condition through local feature
-                    # all zero except first To timesteps
-                    local_cond = torch.zeros(size=(B,T,Do), device=device, dtype=dtype)
-                    local_cond[:,:To] = nobs[:,:To]
-                    shape = (B, T, Da)
-                    cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
-                    cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+    #             if self.obs_as_local_cond:
+    #                 # condition through local feature
+    #                 # all zero except first To timesteps
+    #                 local_cond = torch.zeros(size=(B,T,Do), device=device, dtype=dtype)
+    #                 local_cond[:,:To] = nobs[:,:To]
+    #                 shape = (B, T, Da)
+    #                 cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
+    #                 cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
 
-                elif self.obs_as_global_cond:
-                    # condition throught global feature
-                    global_cond = nobs[:,:To].reshape(nobs.shape[0], -1)
-                    shape = (B, T, Da)
-                    if self.pred_action_steps_only:
-                        shape = (B, self.n_action_steps, Da)
-                        start = To
-                        if self.oa_step_convention:
-                            start = To - 1
-                        end = start + self.n_action_steps
-                        trajectory = naction[:,start:end]
-                    cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
-                    cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-                else:
-                    # condition through impainting
-                    shape = (B, T, Da+Do)
-                    cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
-                    cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-                    cond_data[:,:To,Da:] = nobs[:,:To]
-                    cond_mask[:,:To,Da:] = True
-                    trajectory = torch.cat([naction, nobs], dim=-1)
+    #             elif self.obs_as_global_cond:
+    #                 # condition throught global feature
+    #                 global_cond = nobs[:,:To].reshape(nobs.shape[0], -1)
+    #                 shape = (B, T, Da)
+    #                 if self.pred_action_steps_only:
+    #                     shape = (B, self.n_action_steps, Da)
+    #                     start = To
+    #                     if self.oa_step_convention:
+    #                         start = To - 1
+    #                     end = start + self.n_action_steps
+    #                     trajectory = naction[:,start:end]
+    #                 cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
+    #                 cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+    #             else:
+    #                 # condition through impainting
+    #                 shape = (B, T, Da+Do)
+    #                 cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
+    #                 cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+    #                 cond_data[:,:To,Da:] = nobs[:,:To]
+    #                 cond_mask[:,:To,Da:] = True
+    #                 trajectory = torch.cat([naction, nobs], dim=-1)
 
-                logp, z, nfe = logp_fn (self.model, trajectory, local_cond, global_cond, stochastic=stochastic)
-                NLL+=logp.sum()
+    #             logp, z, nfe = logp_fn (self.model, trajectory, local_cond, global_cond, stochastic=stochastic)
+    #             NLL+=logp.sum()
 
-        return NLL/n_samples
+    #     return NLL/n_samples
     # # ========= PAC-Bayes Bounds ============
     # @torch.no_grad()
     # def test_nll(self, dataloader, epoch, npoints=100, xinterval=None):

@@ -12,7 +12,7 @@ from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1
 from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.common.SDE import VPSDE
-from diffusion_policy.common.likelihood import get_likelihood_fn
+#from diffusion_policy.common.likelihood import get_likelihood_fn
 
 from omegaconf import OmegaConf
 import collections
@@ -192,7 +192,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def compute_loss(self, batch):
+    def compute_loss(self, batch, train=True):
         # normalize input
         assert 'valid_mask' not in batch
         nbatch = self.normalizer.normalize(batch)
@@ -230,10 +230,16 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         noise = torch.randn(trajectory.shape, device=trajectory.device)
         bsz = trajectory.shape[0]
         # Sample a random timestep for each image
-        timesteps = torch.randint(
-            0, self.noise_scheduler.config.num_train_timesteps, 
-            (bsz,), device=trajectory.device
-        ).long()
+        if train:    
+            timesteps = torch.randint(
+                0, self.noise_scheduler.config.num_train_timesteps, 
+                (bsz,), device=trajectory.device).long()
+        else:
+            generator = torch.Generator(device=trajectory.device)
+            generator.manual_seed(42)
+            timesteps = torch.randint(
+                0, self.noise_scheduler.config.num_train_timesteps, 
+                (bsz,), device=trajectory.device, generator=generator).long()
         
         # Add noise to the clean images according to the noise magnitude at each timestep
         # (this is the forward diffusion process)
@@ -1019,71 +1025,71 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
         weights = scale * torch.tanh(clip / 2) / (torch.sigmoid((logsnr - loc)/scale) * torch.sigmoid(-(logsnr - loc)/scale))
         return logsnr, weights
 
-    def nll_sde(self, dataloader, cfg):
-        SDE = VPSDE(self.noise_scheduler, beta_min=0.1, beta_max=20.0, N=100)
-        logp_fn = get_likelihood_fn(SDE, continuous = False, exact = False)
+    # def nll_sde(self, dataloader, cfg):
+    #     SDE = VPSDE(self.noise_scheduler, beta_min=0.1, beta_max=20.0, N=100)
+    #     logp_fn = get_likelihood_fn(SDE, continuous = False, exact = False)
 
-        NLL = 0
-        n_samples = 0
-        with tqdm.tqdm(dataloader, desc=f"NLL computation_score based = ", 
-                        leave=False) as tepoch:
-            for batch in tepoch:
-                n_samples += len(batch["action"])
+    #     NLL = 0
+    #     n_samples = 0
+    #     with tqdm.tqdm(dataloader, desc=f"NLL computation_score based = ", 
+    #                     leave=False) as tepoch:
+    #         for batch in tepoch:
+    #             n_samples += len(batch["action"])
 
-                nbatch = self.normalizer.normalize(batch)
-                nobs = nbatch['obs']
-                naction = nbatch['action']
+    #             nbatch = self.normalizer.normalize(batch)
+    #             nobs = nbatch['obs']
+    #             naction = nbatch['action']
 
-                B, _, Do = nobs.shape
-                To = self.n_obs_steps
-                assert Do == self.obs_dim
-                T = self.horizon
-                Da = self.action_dim
+    #             B, _, Do = nobs.shape
+    #             To = self.n_obs_steps
+    #             assert Do == self.obs_dim
+    #             T = self.horizon
+    #             Da = self.action_dim
 
-                # build input
-                device = self.device
-                dtype = self.dtype
+    #             # build input
+    #             device = self.device
+    #             dtype = self.dtype
 
-                # handle different ways of passing observation
-                local_cond = None
-                global_cond = None
-                trajectory = naction
+    #             # handle different ways of passing observation
+    #             local_cond = None
+    #             global_cond = None
+    #             trajectory = naction
 
-                if self.obs_as_local_cond:
-                    # condition through local feature
-                    # all zero except first To timesteps
-                    local_cond = torch.zeros(size=(B,T,Do), device=device, dtype=dtype)
-                    local_cond[:,:To] = nobs[:,:To]
-                    shape = (B, T, Da)
-                    cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
-                    cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+    #             if self.obs_as_local_cond:
+    #                 # condition through local feature
+    #                 # all zero except first To timesteps
+    #                 local_cond = torch.zeros(size=(B,T,Do), device=device, dtype=dtype)
+    #                 local_cond[:,:To] = nobs[:,:To]
+    #                 shape = (B, T, Da)
+    #                 cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
+    #                 cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
 
-                elif self.obs_as_global_cond:
-                    # condition throught global feature
-                    global_cond = nobs[:,:To].reshape(nobs.shape[0], -1)
-                    shape = (B, T, Da)
-                    if self.pred_action_steps_only:
-                        shape = (B, self.n_action_steps, Da)
-                        start = To
-                        if self.oa_step_convention:
-                            start = To - 1
-                        end = start + self.n_action_steps
-                        trajectory = naction[:,start:end]
-                    cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
-                    cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-                else:
-                    # condition through impainting
-                    shape = (B, T, Da+Do)
-                    cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
-                    cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-                    cond_data[:,:To,Da:] = nobs[:,:To]
-                    cond_mask[:,:To,Da:] = True
-                    trajectory = torch.cat([naction, nobs], dim=-1)
+    #             elif self.obs_as_global_cond:
+    #                 # condition throught global feature
+    #                 global_cond = nobs[:,:To].reshape(nobs.shape[0], -1)
+    #                 shape = (B, T, Da)
+    #                 if self.pred_action_steps_only:
+    #                     shape = (B, self.n_action_steps, Da)
+    #                     start = To
+    #                     if self.oa_step_convention:
+    #                         start = To - 1
+    #                     end = start + self.n_action_steps
+    #                     trajectory = naction[:,start:end]
+    #                 cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
+    #                 cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+    #             else:
+    #                 # condition through impainting
+    #                 shape = (B, T, Da+Do)
+    #                 cond_data = torch.zeros(size=shape, device=device, dtype=dtype)
+    #                 cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+    #                 cond_data[:,:To,Da:] = nobs[:,:To]
+    #                 cond_mask[:,:To,Da:] = True
+    #                 trajectory = torch.cat([naction, nobs], dim=-1)
 
-                logp, z, nfe = logp_fn (self.model, trajectory, local_cond, global_cond, cfg)
-                NLL+=logp.sum()
+    #             logp, z, nfe = logp_fn (self.model, trajectory, local_cond, global_cond, cfg)
+    #             NLL+=logp.sum()
 
-        return NLL/n_samples
+    #     return NLL/n_samples
     
     
 

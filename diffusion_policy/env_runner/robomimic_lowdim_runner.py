@@ -50,9 +50,12 @@ class DisturbanceWrapper(gym.Wrapper):
         self.active = False
 
         # disturbance params
-        self.start_step = 0
-        self.end_step = 0
-        self.force = None
+        self.start1_step = 0
+        self.start2_step = 0
+        self.end1_step = 0
+        self.end2_step = 0
+        self.force1 = None
+        self.force2 = None
 
         # bookkeeping
         self.step_count = 0
@@ -75,21 +78,28 @@ class DisturbanceWrapper(gym.Wrapper):
 
         self.rng = np.random.RandomState(seed)
 
-        self.start_step = self.rng.randint(20, 200)
-        duration = self.rng.randint(10, 40)
-        self.end_step = self.start_step + duration
+        self.start1_step = self.rng.randint(3, 10)
+        self.start2_step = self.rng.randint(60, 90)
+        duration = 8
+        #duration = self.rng.randint(10, 40)
+        self.end1_step = self.start1_step + duration
+        self.end2_step = self.start2_step + duration
 
-        direction = self.rng.randn(3)
-        direction /= np.linalg.norm(direction) + 1e-8
-        magnitude = self.rng.uniform(5.0, 15.0)
-        self.force = direction * magnitude
+        direction1 = self.rng.randn(3)
+        direction1 /= np.linalg.norm(direction1) + 1e-8
+
+        direction2 = self.rng.randn(3)
+        direction2 /= np.linalg.norm(direction2) + 1e-8
+
+        self.force1 = np.array([direction1[0]*250, direction1[1]*250, direction1[2]*250 if direction1[2]>=0 else direction1[2]*100])
+        self.force2 = np.array([direction2[0]*250, direction2[1]*250, direction2[2]*250 if direction2[2]>=0 else direction2[2]*100])
 
         self.active = True
 
-
     def reset(self, **kwargs):
         self.step_count = 0
-        self._clear_force()
+        if self.body_name is not None:
+            self._clear_force()
         return self.env.reset()
 
     def step(self, action):
@@ -97,8 +107,10 @@ class DisturbanceWrapper(gym.Wrapper):
         Apply force BEFORE stepping physics.
         """
         if self.enabled and self.active:
-            if self.start_step <= self.step_count < self.end_step:
-                self._apply_force()
+            if self.start1_step <= self.step_count < self.end1_step:
+                self._apply_force(force=self.force1)
+            elif self.start2_step <= self.step_count < self.end2_step:
+                self._apply_force(force=self.force2)
             else:
                 self._clear_force()
 
@@ -106,10 +118,10 @@ class DisturbanceWrapper(gym.Wrapper):
         self.step_count += 1
         return obs, reward, done, info
 
-    def _apply_force(self):
+    def _apply_force(self, force: np.ndarray):
         sim = self.env.env.env.sim
         body_id = sim.model.body_name2id(self.body_name)
-        sim.data.xfrc_applied[body_id, :3] = self.force
+        sim.data.xfrc_applied[body_id, :3] = force
         sim.data.xfrc_applied[body_id, 3:] = 0.0
 
     def _clear_force(self):
@@ -144,8 +156,8 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             abs_action=False,
             tqdm_interval_sec=5.0,
             n_envs=None,
-            disturbance_enabled=False,
-            body_name=None,
+            disturbance_enabled=True,
+            body_name='robot0_right_hand',
         ):
         """
         Assuming:

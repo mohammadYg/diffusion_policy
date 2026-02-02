@@ -33,6 +33,8 @@ env_runner:
   past_action: ${past_action_visible}
   abs_action: *abs_action
   n_envs: 28
+  disturbance_enabled: False
+  body_name: 'robot0_right_hand'
 # seed 42 will crash MuJoCo for some reason.
 
 dataset:
