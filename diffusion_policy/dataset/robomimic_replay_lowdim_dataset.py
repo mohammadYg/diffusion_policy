@@ -35,7 +35,8 @@ class RobomimicReplayLowdimDataset(BaseLowdimDataset):
             seed=42,
             val_ratio=0.0,
             max_train_episodes=None,
-            train_episodes_for_PAC_Bayes= 0
+            train_episodes_for_posterior= 0        # This is selected from training data.
+
         ):
         obs_keys = list(obs_keys)
         rotation_transformer = RotationTransformer(
@@ -59,25 +60,31 @@ class RobomimicReplayLowdimDataset(BaseLowdimDataset):
             n_episodes=replay_buffer.n_episodes, 
             val_ratio=val_ratio,
             seed=seed)
+        
         train_mask = ~val_mask
         train_mask = downsample_mask(
             mask=train_mask, 
             max_n=max_train_episodes, 
             seed=seed)
+        
+        #val_mask = ~train_mask
 
-        val_mask = ~train_mask
-        pac_mask = np.zeros_like(train_mask, dtype=bool)
+        post_mask = np.zeros(replay_buffer.n_episodes, dtype=bool)
+        prior_mask = np.zeros(replay_buffer.n_episodes, dtype=bool)
 
-        if train_episodes_for_PAC_Bayes>0:    
-            # Get the indices of validation episodes
-            train_indices = np.where(train_mask)[0]
-            # Reproducible random generator
-            rng = np.random.default_rng(seed)
-            # Randomly choose demos from train dataset
-            n_train_pac = min(train_episodes_for_PAC_Bayes, len(train_indices))
-            train_pac_indices = rng.choice(train_indices, size=n_train_pac, replace=False)
-            pac_mask [train_pac_indices] = True
-            train_mask [train_pac_indices] = False
+        if train_episodes_for_posterior > 0:
+            if train_episodes_for_posterior > np.sum(train_mask):
+                raise ValueError(
+                    "train_episodes_for_posterior exceeds number of training episodes"
+                )
+
+            post_mask = downsample_mask(
+                mask=train_mask,
+                max_n=train_episodes_for_posterior,
+                seed=seed
+            )
+
+            prior_mask = train_mask & (~post_mask)
 
         sampler = SequenceSampler(
             replay_buffer=replay_buffer, 
@@ -95,8 +102,9 @@ class RobomimicReplayLowdimDataset(BaseLowdimDataset):
         self.use_legacy_normalizer = use_legacy_normalizer
         self.train_mask = train_mask
         self.val_mask = val_mask
-        self.pac_mask = pac_mask
-    
+        self.post_mask = post_mask
+        self.prior_mask = prior_mask
+
     def get_validation_dataset(self):
         val_set = copy.copy(self)
         val_set.sampler = SequenceSampler(
@@ -109,17 +117,29 @@ class RobomimicReplayLowdimDataset(BaseLowdimDataset):
         val_set.train_mask = self.val_mask
         return val_set
 
-    def get_pac_bayes_dataset(self):
-        pac_set = copy.copy(self)
-        pac_set.sampler = SequenceSampler(
+    def get_post_dataset(self):
+        post_set = copy.copy(self)
+        post_set.sampler = SequenceSampler(
             replay_buffer=self.replay_buffer, 
             sequence_length=self.horizon,
             pad_before=self.pad_before, 
             pad_after=self.pad_after,
-            episode_mask=self.pac_mask
+            episode_mask=self.post_mask
             )
-        pac_set.train_mask = self.pac_mask
-        return pac_set
+        post_set.train_mask = self.post_mask
+        return post_set
+    
+    def get_prior_dataset(self):
+        prior_set = copy.copy(self)
+        prior_set.sampler = SequenceSampler(
+            replay_buffer=self.replay_buffer, 
+            sequence_length=self.horizon,
+            pad_before=self.pad_before, 
+            pad_after=self.pad_after,
+            episode_mask=self.prior_mask
+            )
+        prior_set.train_mask = self.prior_mask
+        return prior_set
     
     def get_normalizer(self, **kwargs) -> LinearNormalizer:
         normalizer = LinearNormalizer()

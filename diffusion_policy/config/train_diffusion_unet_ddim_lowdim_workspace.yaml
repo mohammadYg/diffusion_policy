@@ -62,7 +62,7 @@ policy:
   # scheduler.step params
   # predict_epsilon: True
   use_clipped_model_output: True
-  eta: 1.0
+  # eta: 0.0
 
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
@@ -79,13 +79,6 @@ dataloader:
   pin_memory: True
   persistent_workers: False
 
-pac_dataloader:
-  batch_size: 256
-  num_workers: 1
-  shuffle: True
-  pin_memory: True
-  persistent_workers: False
-  
 val_dataloader:
   batch_size: 256
   num_workers: 1
@@ -118,21 +111,13 @@ training:
   rollout_every: 50
   checkpoint_every: 50
   val_every: 1
-  sample_every: 50
-  reconstraction_every: 50
+  sample_every: 5
   nll_every: 50
-  memorization_every: 50
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
   # misc
   tqdm_interval_sec: 1.0
-  PAC_loss_type: "Norm"
-  random_timestep: False
-  # PAC-Bayes Bounds 
-  num_expect: 10
-  diam: 2
-  delta: 0.05
 
 logging:
   project: diffusion_policy_debug

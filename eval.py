@@ -106,7 +106,7 @@ def main(checkpoint, output_dir, device, override):
                     
                     # device transfer
                     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                    emp_loss_test = policy.compute_loss(batch)
+                    emp_loss_test = policy.compute_loss(batch, train=False)
                     val_losses_noise_pred.append(emp_loss_test.item() * n_samples)
             
             val_loss_noise_pred.append(np.sum(val_losses_noise_pred)/n_total_samples)

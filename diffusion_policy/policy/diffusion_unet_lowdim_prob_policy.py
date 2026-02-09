@@ -1,30 +1,34 @@
 from typing import Dict
-from matplotlib.pyplot import cla
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
+
 from einops import rearrange, reduce
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
-#from diffusion_policy.model.diffusion.conditional_prob1_unet1d import BayesianConditionalUnet1D
-#from diffusion_policy.model.diffusion.conditional_prob2_unet1d import BayesianConditionalUnet1D
-#from diffusion_policy.model.diffusion.conditional_prob3_unet1d import BayesianConditionalUnet1D
-#from diffusion_policy.model.diffusion.conditional_prob4_unet1d import BayesianConditionalUnet1D
+from diffusion_policy.model.diffusion.conditional_prob1_unet1d import BayesianConditionalUnet1D
+from diffusion_policy.model.diffusion.conditional_prob2_unet1d import BayesianConditionalUnet1D
+from diffusion_policy.model.diffusion.conditional_prob3_unet1d import BayesianConditionalUnet1D
+from diffusion_policy.model.diffusion.conditional_prob4_unet1d import BayesianConditionalUnet1D
 from diffusion_policy.model.diffusion.conditional_prob5_unet1d import BayesianConditionalUnet1D
+
+from diffusion_policy.policy.diffusion_unet_lowdim_policy import DiffusionUnetLowdimPolicy
+from diffusion_policy.model.common.lr_scheduler import get_scheduler
+from diffusers.training_utils import EMAModel
 
 
 from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from diffusion_policy.common.SDE import VPSDE
 #from diffusion_policy.common.likelihood import get_likelihood_fn
-from diffusion_policy.common.pytorch_util import dict_apply
+from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 
-import collections
 import math 
 import tqdm
 import numpy as np
+import hydra
 
 class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     def __init__(self, 
@@ -98,8 +102,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
 
             # 2. predict model output
             model_output = model(trajectory, t, 
-                local_cond=local_cond, global_cond=global_cond, 
-                stochastic = stochastic)
+                local_cond=local_cond, global_cond=global_cond,stochastic = stochastic)
 
             # 3. compute previous image: x_t -> x_t-1
             trajectory = scheduler.step(
@@ -239,6 +242,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         bsz = trajectory.shape[0]
         
         if train:    
+            # Sample a random timestep for each image
             timesteps = torch.randint(
                 0, self.noise_scheduler.config.num_train_timesteps, 
                 (bsz,), device=trajectory.device).long()
@@ -369,8 +373,8 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         # Apply imputation
         local_cond = local_cond[:, None, ...].expand(B,K,*local_cond.shape[1:]) if local_cond is not None else None  # (B, K, T, D)
         global_cond = global_cond[:, None, ...].expand(B,K,*global_cond.shape[1:]) if global_cond is not None else None # (B, K, T, D)
-        cond_mask = cond_mask[:, None, ...].expand(B,*x.shape[1:])        # (B, K, T, D)
-        cond_data = cond_data[:, None, ...].expand(B,*x.shape[1:])        # (B, K, T, D)
+        cond_mask = cond_mask[:, None, ...].expand(B, K, *cond_mask.shape[1:])
+        cond_data = cond_data[:, None, ...].expand(B, K, *cond_data.shape[1:])
         
         z[cond_mask] = cond_data[cond_mask]
 
@@ -396,26 +400,6 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         sse = ((target - output) ** 2) * loss_mask
 
         return sse.flatten(start_dim=2).sum(dim=2)  # (B, K)
-
-    def nll(self, batch, logsnr_samples_per_x=1, stochastic = False):
-        """Monte-Carlo estimate of -log p(x)."""
-        total = 0
-        B = len(batch[0])
-
-        for _ in range(logsnr_samples_per_x):
-            logsnr, w = self.logistic_integrate(
-                B, *self.loc_scale, device=self.device
-            )
-            mses = self.mse(batch, logsnr, stochastic=stochastic)
-            total += self._nll_from_mse(mses, logsnr, w)
-        return total / logsnr_samples_per_x
-
-    def _nll_from_mse(self, mses, logsnr, weights):
-        # mse: (N, K)
-        # logsnr: (K,)
-        # weights: (N, K)
-        mmse_gap = mses.mean(dim=0) - self.mmse_g(logsnr)
-        return torch.mean(self.h_g + 0.5 * torch.sum(weights * mmse_gap))
 
     @torch.no_grad()
     def nll_bound(self, dataloader, epoch, npoints=100, stochastic = False):
@@ -598,6 +582,135 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         # importance weights
         weights = scale * torch.tanh(clip / 2) / (torch.sigmoid((logsnr - loc)/scale) * torch.sigmoid(-(logsnr - loc)/scale))
         return logsnr, weights
+
+    def rho_stats(self):
+        stats = {}
+        for name, p in self.model.named_parameters():
+            if name.endswith(".weight.rho") or name.endswith(".bias.rho"):
+                sigma = torch.nn.functional.softplus(p).detach()
+                stats[name] = {
+                    "mean": sigma.mean().item(),
+                    "median": sigma.median().item(),
+                    "max": sigma.max().item()
+                }
+        return stats
+        
+    def train_prior(self, prior_dataset, cfg):
+
+        global_step = 0
+        epoch = 0
+
+        model: DiffusionUnetLowdimPolicy
+        model = hydra.utils.instantiate(cfg.prior_policy)
+        # ema_model: DiffusionUnetLowdimPolicy = None
+        # if cfg.prior_training.use_ema:
+        #     ema_model = copy.deepcopy(model)
+
+        # configure training state
+        optimizer = hydra.utils.instantiate(
+            cfg.optimizer, params=model.parameters())
+        
+        # configure dataset and normalizer
+        train_dataloader = DataLoader(prior_dataset, **cfg.prior_dataloader)
+        normalizer = prior_dataset.get_normalizer()
+        model.set_normalizer(normalizer)
+        # if cfg.prior_training.use_ema:
+        #     ema_model.set_normalizer(normalizer)
+
+        # configure lr scheduler
+        lr_scheduler = get_scheduler(
+            cfg.prior_training.lr_scheduler,
+            optimizer=optimizer,
+            num_warmup_steps=cfg.prior_training.lr_warmup_steps,
+            num_training_steps=(
+                len(train_dataloader) * cfg.prior_training.num_epochs) \
+                    // cfg.prior_training.gradient_accumulate_every,
+            # pytorch assumes stepping LRScheduler every epoch
+            # however huggingface diffusers steps it every batch
+            last_epoch=global_step-1
+        )
+
+        # # configure ema
+        # ema: EMAModel = None
+        # if cfg.prior_training.use_ema:
+        #     ema = hydra.utils.instantiate(
+        #         cfg.ema,
+        #         model=ema_model)
+        
+        # device transfer
+        device = torch.device(cfg.prior_training.device)
+        model.to(device)
+        # if ema_model is not None:
+        #     ema_model.to(device)
+        optimizer_to(optimizer, device)
+
+        for local_epoch_idx in range(cfg.prior_training.num_epochs):
+            with tqdm.tqdm(train_dataloader, desc=f"Prior Training epoch {local_epoch_idx}",
+                leave=False, mininterval=cfg.prior_training.tqdm_interval_sec) as tepoch:
+                    
+                    for batch_idx, batch in enumerate(tepoch):
+                        # device transfer
+                        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                        raw_loss = model.compute_loss(batch, train=True)
+                        loss = raw_loss / cfg.prior_training.gradient_accumulate_every
+                        loss.backward()
+                        raw_loss_cpu = raw_loss.item()
+
+                        # step optimizer
+                        if global_step % cfg.prior_training.gradient_accumulate_every == 0:
+                            optimizer.step()
+                            optimizer.zero_grad()
+                            lr_scheduler.step()
+                        
+                        # # update ema
+                        # if cfg.prior_training.use_ema:
+                        #     ema.step(model)
+
+                        # logging
+                        tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
+                        global_step += 1
+
+        return model.model.eval()
+    
+    def prior_post_initialize(
+    self,
+    prior_model,
+    rho_post,
+    rho_prior=-5.0,
+    initialize_from_prior=True
+    ):
+        with torch.no_grad():
+            for name, param in self.model.state_dict().items():
+                if name.endswith(".weight_prior.mu"):
+                    w0_name = name.replace(".weight_prior.mu", ".weight")
+                    param.copy_(prior_model.state_dict()[w0_name])
+
+                elif name.endswith(".bias_prior.mu"):
+                    b0_name = name.replace(".bias_prior.mu", ".bias")
+                    param.copy_(prior_model.state_dict()[b0_name])
+
+                elif name.endswith(".weight.mu"):
+                    if initialize_from_prior:
+                        w0_name = name.replace(".weight.mu", ".weight")
+                        param.copy_(prior_model.state_dict()[w0_name])
+                
+                elif name.endswith(".bias.mu"):
+                    if initialize_from_prior:
+                        b0_name = name.replace(".bias.mu", ".bias")
+                        param.copy_(prior_model.state_dict()[b0_name])
+                
+                elif name.endswith(".bias_prior.rho") or name.endswith(".weight_prior.rho"):
+                    param.fill_(rho_prior)
+
+                elif name.endswith(".bias.rho") or name.endswith(".weight.rho"):
+                    param.fill_(rho_post)
+
+                else:
+                    if name in prior_model.state_dict():
+                        param.copy_(prior_model.state_dict()[name])
+                    else:
+                        # Allow unmatched params (e.g. new Bayesian-only params)
+                        pass
 
     # def nll_sde(self, dataloader, stochastic=False):
     #     SDE = VPSDE(self.noise_scheduler, beta_min=0.1, beta_max=20.0, N=1000)

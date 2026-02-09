@@ -9,7 +9,6 @@ if __name__ == "__main__":
 
 import os
 import hydra
-from hydra.utils import get_class, instantiate
 import torch
 from omegaconf import OmegaConf
 import pathlib
@@ -19,12 +18,11 @@ import numpy as np
 import random
 import wandb
 import tqdm
-import shutil
-import dill
+from pathlib import Path
 
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from diffusion_policy.policy.diffusion_unet_lowdim_prob_policy import DiffusionUnetLowdimProbPolicy
+from diffusion_policy.policy.diffusion_unet_lowdim_prob_policy import DiffusionUnetLowdimProbPolicy, DiffusionUnetLowdimPolicy
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager, CheckpointManager
@@ -32,15 +30,13 @@ from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from diffusers.training_utils import EMAModel
 
-import train
-
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 # %%
 class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
-    def __init__(self, cfg: OmegaConf, output_dir=None):
+    def __init__(self, cfg: OmegaConf, prior_model_path= None, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
 
         # set seed
@@ -56,16 +52,41 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
 
-        # configure training state
-        self.optimizer = hydra.utils.instantiate(
-            cfg.optimizer, params=self.model.parameters())
+        # configure dataset
+        self.dataset: BaseLowdimDataset
+        self.dataset = hydra.utils.instantiate(cfg.task.dataset)
+        assert isinstance(dataset, BaseLowdimDataset)
+        normalizer = dataset.get_normalizer()
+        self.model.set_normalizer(normalizer)
+        if cfg.training.use_ema:
+            self.ema_model.set_normalizer(normalizer)
 
+        # configure training state
+        self.optimizer = None
         self.global_step = 0
         self.epoch = 0
+        self.prior_model_path = prior_model_path
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
+        # configure validation dataset
+        val_dataset = self.dataset.get_validation_dataset()
+        val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
+
+        ## configure dataset for PAC-Bayes training 
+        prior_dataset = self.dataset.get_prior_dataset()
+        post_dataset = self.dataset.get_post_dataset() if cfg.task.dataset.train_episodes_for_posterior>0 else self.dataset
+        post_dataloader = DataLoader(post_dataset, **cfg.post_dataloader)
+
+        ## configure dataset for covariance_spectrum
+        dataloader = DataLoader(self.dataset, **cfg.dataloader)
+        print (len(selfdataset))
+        print (len(dataloader.dataset))
+        cov_dataloader = DataLoader(self.dataset, batch_size=len(self.dataset), 
+                                    num_workers=1,   pin_memory = True, 
+                                    persistent_workers = False)
+        
         # Resume training
         if cfg.training.resume:
             latest_ckpt_path = self.get_checkpoint_path()
@@ -85,40 +106,48 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
             
         # Otherwise start fresh
         else:
-            print("Starting training from scratch.")
+            if cfg.training.train_prior:
+                if cfg.task.dataset.train_episodes_for_posterior <= 0:
+                    raise ValueError("No demonstrations for training the posterior")
+                prior_dir = Path("data") / "prior_models" / cfg.task.name
+                # check directory exists
+                prior_dir.mkdir(parents=True, exist_ok=True)
+                # Model filename
+                prior_model_path = (
+                    prior_dir
+                    / f"prior_demos={cfg.task.dataset.max_train_episodes-cfg.task.dataset.train_episodes_for_posterior}"
+                    f"-post_demos={cfg.task.dataset.train_episodes_for_posterior}.pth"
+                )
+                if not os.path.isfile(prior_model_path):
+                    print("Training and initializing prior network...")
+                    init_net = self.model.train_prior(prior_dataset, cfg)
+                    # Save model
+                    torch.save(init_net.state_dict(), prior_model_path)
+                    print(f"Prior model saved to: {prior_model_path}")
+                else:
+                    print("Loading and initializing prior network...")
+                    # load model
+                    init_net: DiffusionUnetLowdimPolicy
+                    prior_policy = hydra.utils.instantiate(cfg.prior_policy)
+                    init_net = prior_policy.model
+                    init_net.load_state_dict(torch.load(prior_model_path, weights_only=True))
+                    init_net.eval()
+                                
+                self.model.prior_post_initialize(init_net, cfg.policy.model.rho_post, cfg.policy.model.rho_prior, initialize_from_prior=True)
+                if self.ema_model is not None:
+                    self.ema_model.load_state_dict(self.model.state_dict())
 
-        # configure dataset
-        dataset: BaseLowdimDataset
-        dataset = hydra.utils.instantiate(cfg.task.dataset)
-        assert isinstance(dataset, BaseLowdimDataset)
-        normalizer = dataset.get_normalizer()
-
-        # configure validation dataset
-        val_dataset = dataset.get_validation_dataset()
-        val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
-
-        ## configure seperate dataset for PAC-Bayes
-        #pac_bayes_dataset = dataset.get_pac_bayes_dataset()
-        pac_bayes_dataset = dataset
-        pac_dataloader = DataLoader(pac_bayes_dataset, **cfg.pac_dataloader) if len (pac_bayes_dataset) > 0 else None
+        # configure optimizer
+        self.optimizer = hydra.utils.instantiate(
+            cfg.optimizer, params=self.model.parameters())
         
-        ## configure dataset for covariance_spectrum
-        print ("length of the training dataset: ", len(pac_dataloader.dataset))
-        cov_dataloader = DataLoader(pac_bayes_dataset, batch_size=len(pac_dataloader.dataset), 
-                                    num_workers=1,   pin_memory = True, 
-                                    persistent_workers = False)
-        
-        self.model.set_normalizer(normalizer)
-        if cfg.training.use_ema:
-            self.ema_model.set_normalizer(normalizer)
-
         # configure lr scheduler
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
             num_training_steps=(
-                len(pac_dataloader) * cfg.training.num_epochs) \
+                len(post_dataloader) * cfg.training.num_epochs) \
                     // cfg.training.gradient_accumulate_every,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
@@ -193,7 +222,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
         
-        # compute covariance_spectrum of the training data
+        # compute covariance_spectrum of the whole training data
         self.model.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
         if cfg.training.use_ema:
             self.ema_model.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
@@ -207,7 +236,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 step_log = dict()
                 # ========= train for this epoch ==========
                 train_losses = list()
-                with tqdm.tqdm(pac_dataloader, desc=f"Training epoch {self.epoch}", 
+                with tqdm.tqdm(post_dataloader, desc=f"Training epoch {self.epoch}", 
                     leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     
                     for batch_idx, batch in enumerate(tepoch):
@@ -217,7 +246,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             train_sampling_batch = batch
 
                         if cfg.training.kl_penalty>0.0:
-                            raw_loss, emp_risk_train, kl_train = self.model.compute_bound(batch, n_bound=len(pac_dataloader.dataset), objective=cfg.training.pac_objective,
+                            raw_loss, emp_risk_train, kl_train = self.model.compute_bound(batch, n_bound=len(post_dataloader.dataset), objective=cfg.training.pac_objective,
                                                         delta=cfg.training.delta, 
                                                         kl_penalty=cfg.training.kl_penalty, 
                                                         mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.training.stochastic, bounded=cfg.training.bounded, train=True)
@@ -253,7 +282,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             'lr': lr_scheduler.get_last_lr()[0]
                         }
 
-                        is_last_batch = (batch_idx == (len(pac_dataloader)-1))
+                        is_last_batch = (batch_idx == (len(post_dataloader)-1))
                         if not is_last_batch:
                             # log of last step is combined with validation and rollout
                             wandb_run.log(step_log, step=self.global_step)
@@ -276,7 +305,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 policy.eval()
 
                 # run rollout
-                if (self.epoch % cfg.training.rollout_every) == 0:# and (self.epoch>cfg.training.num_epochs-500):
+                if (self.epoch % cfg.training.rollout_every) == 0 and (self.epoch>cfg.training.num_epochs-500):
                     env_runner.current_epoch = self.epoch
                     runner_log = env_runner.run_prob(policy, stochastic= cfg.eval.stochastic)
                     # log all
@@ -302,35 +331,33 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 val_noise_pred_losses.append(val_noise_pred_loss.item() * n_samples)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
-                                    break          
+                                    break   
+                                       
                         if len(val_noise_pred_losses) > 0:
                             noise_pred_loss = np.sum(val_noise_pred_losses)/n_total_samples
                             step_log['test_noise_pred_loss'] = noise_pred_loss
                             topk_ckpt_path_val = topk_manager_noise_pred.get_ckpt_path(step_log)
                             if topk_ckpt_path_val is not None:
                                 self.save_checkpoint(path=topk_ckpt_path_val, exclude_keys=['model', 'optimizer'])
-                                #self.save_weights_only(path=topk_ckpt_path_val)
                         
-                # if (self.epoch % cfg.training.nll_every)==0:
-                #     NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100, stochastic=cfg.eval.stochastic)
-                #     step_log['test_nll_bpd'] = NLL_test 
-                #     # NLL_train = policy.test_nll(pac_dataloader, self.epoch, npoints=100, xinterval=None,
-                #     #                         stochastic=cfg.eval.stochastic)
-                #     # step_log['train_nll_bpd'] = NLL_train
-                #     topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
-                #     if topk_ckpt_path_nll is not None:
-                #         self.save_checkpoint(path=topk_ckpt_path_nll, exclude_keys=['model', 'optimizer'])
-                #         #self.save_weights_only(path=topk_ckpt_path_nll)
+                # Compute upper bound on NLL
+                if (self.epoch % cfg.training.nll_every)==0:
+                    NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100, stochastic=cfg.eval.stochastic)
+                    step_log['test_nll_bpd'] = NLL_test 
+                    topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
+                    if topk_ckpt_path_nll is not None:
+                        self.save_checkpoint(path=topk_ckpt_path_nll, exclude_keys=['model', 'optimizer'])
 
                 # log learned rho values
                 if (self.epoch % cfg.training.rho_log_every) == 0:
                     log_rho[self.epoch] = policy.rho_stats()
 
                 # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0:# and (self.epoch>cfg.training.num_epochs-500):
+                if (self.epoch % cfg.training.checkpoint_every) == 0 and (self.epoch>cfg.training.num_epochs-500):
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
                         self.save_checkpoint(exclude_keys=['model', 'optimizer'])
+
                     if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
 
@@ -346,7 +373,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
                     if topk_ckpt_path is not None:
                         self.save_checkpoint(path=topk_ckpt_path,exclude_keys=['model', 'optimizer'])
-                        #self.save_weights_only(path=topk_ckpt_path)
+
                
                 #========= eval end for this epoch ==========
                 policy.train()
@@ -373,7 +400,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 json_logger.log(step_log)
                 self.global_step += 1
                 self.epoch += 1
-
+        
 @hydra.main(
     version_base=None,
     config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")), 

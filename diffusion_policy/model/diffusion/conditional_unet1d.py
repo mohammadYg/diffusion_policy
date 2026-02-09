@@ -65,6 +65,7 @@ class ConditionalResidualBlock1D(nn.Module):
         out = out + self.residual_conv(x)
         return out
 
+
 class ConditionalUnet1D(nn.Module):
     def __init__(self, 
         input_dim,
@@ -216,7 +217,7 @@ class ConditionalUnet1D(nn.Module):
             if idx == 0 and len(h_local) > 0:
                 x = x + h_local[0]
             x = resnet2(x, global_feature)
-            h.append(x)                     # skip connection
+            h.append(x)
             x = downsample(x)
 
         for mid_module in self.mid_modules:

@@ -12,255 +12,12 @@ from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.model.diffusion.conv1d_components import (
     Downsample1d, Upsample1d, Conv1dBlock)
 from diffusion_policy.model.diffusion.positional_embedding import SinusoidalPosEmb
+from diffusion_policy.model.diffusion.bayes_conv1d_components import ProbLinear
 
 import logging
 logger = logging.getLogger(__name__)
 
 
-def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
-    # type: (Tensor, float, float, float, float) -> Tensor
-    """Fills the input Tensor with values drawn from a truncated
-    normal distribution. The values are effectively drawn from the
-    normal distribution :N(mu, std^2)
-    with values outside :[a, b] redrawn until they are within
-    the bounds. The method used works best if 'mu' is
-    near the center of the interval.
-    Args:
-        tensor: an n-dimensional `torch.Tensor`
-        mean: the mean of the normal distribution
-        std: the standard deviation of the normal distribution
-        a: the minimum cutoff value
-        b: the maximum cutoff value
-    Examples:
-        >>> w = torch.empty(3, 5)
-        >>> nn.init.trunc_normal_(w)
-    """
-    return _no_grad_trunc_normal_(tensor, mean, std, a, b)
-   
-def _no_grad_trunc_normal_(tensor, mean, std, a, b):
-    # Method based on https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
-    def norm_cdf(x):
-        # Computes standard normal cumulative distribution function
-        # Here the CDF is computed based on the relationship between error function (math.erf) and normal CDF
-        # This CDF is for standard normal distribution: N(0,1)
-        return (1. + math.erf(x / math.sqrt(2.))) / 2.
-
-    with torch.no_grad():
-        # Get upper and lower cdf values
-        # Here, we first standardize the values a and b that are from 
-        # a normal distribution with mean and std
-        l = norm_cdf((a - mean) / std)
-        u = norm_cdf((b - mean) / std)
-
-        # Fill tensor with uniform values from [l, u]
-        tensor.uniform_(l, u)
-
-        # Use inverse cdf transform from normal distribution
-        tensor.mul_(2)
-        tensor.sub_(1)
-
-        # Ensure that the values are strictly between -1 and 1 for erfinv
-        eps = torch.finfo(tensor.dtype).eps
-        tensor.clamp_(min=-(1. - eps), max=(1. - eps))
-        tensor.erfinv_()
-
-        # Transform to proper mean, std
-        tensor.mul_(std * math.sqrt(2.))
-        tensor.add_(mean)
-
-        # Clamp one last time to ensure it's still in the proper range
-        tensor.clamp_(min=a, max=b)
-        return tensor    
-
-class Gaussian(nn.Module):
-    """Implementation of a Gaussian random variable, using softplus for
-    the standard deviation and with implementation of sampling and KL
-    divergence computation.
-
-    Parameters
-    ----------
-    mu : Tensor of floats
-        Centers of the Gaussian.
-
-    rho : Tensor of floats
-        Scale parameter of the Gaussian (to be transformed to std
-        via the softplus function)
-
-    fixed : bool
-        Boolean indicating whether the Gaussian is supposed to be fixed
-        or learnt.
-
-    """
-
-    def __init__(self, mu, rho, fixed=False):
-        super().__init__()
-        self.mu = nn.Parameter(mu, requires_grad=not fixed)
-        self.rho = nn.Parameter(rho, requires_grad=not fixed)
-
-    @property
-    def sigma(self):
-        # Computation of standard deviation:
-        # We use rho instead of sigma so that sigma is always positive during
-        # the optimisation. Specifically, we use sigma = log(exp(rho)+1)
-        return torch.log(1 + torch.exp(self.rho))
-        
-    def sample(self):
-        # Return a sample from the Gaussian distribution
-        epsilon = torch.randn(self.sigma.size(), device=self.mu.device)
-        #epsilon = torch.randn(self.sigma.size())
-        return self.mu + self.sigma * epsilon
-
-    def compute_kl(self, other):
-        # Compute KL divergence between two Gaussians (self and other)
-        # (refer to the paper)
-        # b is the variance of priors
-        b1 = torch.pow(self.sigma, 2)
-        b0 = torch.pow(other.sigma, 2)
-
-        term1 = torch.log(torch.div(b0, b1))
-        term2 = torch.div(
-            torch.pow(self.mu - other.mu, 2), b0)
-        term3 = torch.div(b1, b0)
-        kl_div = (torch.mul(term1 + term2 + term3 - 1, 0.5)).sum()
-        return kl_div
-
-
-class Laplace(nn.Module):
-    """Implementation of a Laplace random variable, using softplus for
-    the scale parameter and with implementation of sampling and KL
-    divergence computation.
-
-    Parameters
-    ----------
-    mu : Tensor of floats
-        Centers of the Laplace distr.
-
-    rho : Tensor of floats
-        Scale parameter for the distribution (to be transformed
-        via the softplus function)
-
-    fixed : bool
-        Boolean indicating whether the distribution is supposed to be fixed
-        or learnt.
-
-    """
-
-    def __init__(self, mu, rho, fixed=False):
-        super().__init__()
-        self.mu = nn.Parameter(mu, requires_grad=not fixed)
-        self.rho = nn.Parameter(rho, requires_grad=not fixed)
-
-    @property
-    def scale(self):
-        # We use rho instead of sigma so that sigma is always positive during
-        # the optimisation. We use sigma = log(exp(rho)+1)
-        m = nn.Softplus()
-        return m(self.rho)
-
-    def sample(self):
-        # Return a sample from the Laplace distribution
-        # we do scaling due to numerical issues
-        epsilon = (0.999*torch.rand(self.scale.size(), device=self.mu.device)-0.49999)
-        result = self.mu - torch.mul(torch.mul(self.scale, torch.sign(epsilon)),
-                                     torch.log(1-2*torch.abs(epsilon)))
-        return result
-
-    def compute_kl(self, other):
-        # Compute KL divergence between two Laplaces distr. (self and other)
-        # (refer to the paper)
-        # b is the variance of priors
-        b1 = self.scale
-        b0 = other.scale
-        term1 = torch.log(torch.div(b0, b1))
-        aux = torch.abs(self.mu - other.mu)
-        term2 = torch.div(aux, b0)
-        term3 = torch.div(b1, b0) * torch.exp(torch.div(-aux, b1))
-
-        kl_div = (term1 + term2 + term3 - 1).sum()
-        return kl_div
-
-class ProbLinear(nn.Module):
-    """Implementation of a Probabilistic Linear layer.
-
-    Parameters
-    ----------
-    in_features : int
-        Number of input features for the layer
-
-    out_features : int
-        Number of output features for the layer
-
-    rho_init : float
-        scale hyperparmeter (to initialise the scale of
-        the posterior)
-
-    rho_prior : float
-        scale hyperparmeter (to set the scale of
-        the prior)
-    
-    prior_dist : string
-        string that indicates the type of distribution for the
-        prior and posterior
-    """
-
-    def __init__(self, in_features, out_features, rho_init = -3.0, rho_prior=-3.0, prior_dist='gaussian'):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-
-        # Set sigma for the truncated gaussian of weights
-        sigma_weights = 1/np.sqrt(in_features)
-
-        # Initialise posterior distribution means using truncated normal
-        weights_mu_init = trunc_normal_(torch.Tensor(
-            out_features, in_features), 0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
-        bias_mu_init = torch.zeros(out_features)
-        weights_rho_init = torch.ones(out_features, in_features) * rho_init
-        bias_rho_init = torch.ones(out_features) * rho_init
-        
-        # Prior Initialization
-        weights_mu_prior = torch.zeros(out_features, in_features)
-        bias_mu_prior = torch.zeros(out_features) 
-        weights_rho_prior = torch.ones(out_features, in_features) * rho_prior
-        bias_rho_prior = torch.ones(out_features) * rho_prior
-
-        if prior_dist == 'gaussian':
-            dist = Gaussian
-        elif prior_dist == 'laplace':
-            dist = Laplace
-        else:
-            raise RuntimeError(f'Wrong prior_dist {prior_dist}')
-
-        self.bias = dist(bias_mu_init.clone(),
-                         bias_rho_init.clone(), fixed=False)
-        self.weight = dist(weights_mu_init.clone(),
-                           weights_rho_init.clone(), fixed=False)
-        self.weight_prior = dist(
-            weights_mu_prior.clone(), weights_rho_prior.clone(), fixed=True)
-        self.bias_prior = dist(
-            bias_mu_prior.clone(), bias_rho_prior.clone(), fixed=True)
-
-        self.kl_div = 0
-
-    def forward(self, input, stochastic=False):
-        #if self.training or stochastic:
-        if stochastic:
-            # during training we sample from the model distribution
-            # sample = True can also be set during testing if we
-            # want to use the stochastic/ensemble predictors
-            weight = self.weight.sample()
-            bias = self.bias.sample()
-        else:
-            # otherwise we use the posterior mean
-            weight = self.weight.mu
-            bias = self.bias.mu
-
-        if self.training:
-            # sum of the KL computed for weights and biases
-            self.kl_div = self.weight.compute_kl(self.weight_prior) + \
-                self.bias.compute_kl(self.bias_prior)
-
-        return F.linear(input, weight, bias)
 
 class ProbConditionalResidualBlock1D(nn.Module):
     def __init__(
@@ -271,7 +28,7 @@ class ProbConditionalResidualBlock1D(nn.Module):
         kernel_size=3,
         n_groups=8,
         cond_predict_scale=False,
-        rho_init=-3.0,
+        rho_post=-3.0,
         rho_prior=-3.0,
         prior_dist='gaussian'
     ):
@@ -294,7 +51,7 @@ class ProbConditionalResidualBlock1D(nn.Module):
             nn.Mish(),
             ProbLinear(
                 cond_dim, cond_channels, 
-                rho_init=rho_init,
+                rho_post=rho_post,
                 rho_prior=rho_prior, 
                 prior_dist=prior_dist
             ),
@@ -350,7 +107,7 @@ class BayesianConditionalUnet1D(nn.Module):
         cond_predict_scale=False,
         use_dropout=False,
         # Bayesian parameters
-        rho_init=-3.0,
+        rho_post=-3.0,
         rho_prior=-3.0,
         prior_dist='gaussian'
     ):
@@ -369,11 +126,11 @@ class BayesianConditionalUnet1D(nn.Module):
         diffusion_step_encoder = nn.Sequential(
             SinusoidalPosEmb(dsed),
             ProbLinear(dsed, dsed * 4, 
-                      rho_init=rho_init, 
+                      rho_post=rho_post, 
                       rho_prior=rho_prior, 
                       prior_dist=prior_dist),
             nn.Mish(),
-            ProbLinear(dsed * 4, dsed, rho_init=rho_init, 
+            ProbLinear(dsed * 4, dsed, rho_post=rho_post, 
                       rho_prior=rho_prior, 
                       prior_dist=prior_dist),
         )
@@ -400,7 +157,7 @@ class BayesianConditionalUnet1D(nn.Module):
                         kernel_size=kernel_size,
                         n_groups=n_groups,
                         cond_predict_scale=cond_predict_scale,
-                        rho_init=rho_init,
+                        rho_post=rho_post,
                         rho_prior=rho_prior,
                         prior_dist=prior_dist,
                     ),
@@ -412,7 +169,7 @@ class BayesianConditionalUnet1D(nn.Module):
                         kernel_size=kernel_size,
                         n_groups=n_groups,
                         cond_predict_scale=cond_predict_scale,
-                        rho_init=rho_init,
+                        rho_post=rho_post,
                         rho_prior=rho_prior,
                         prior_dist=prior_dist
                     ),
@@ -429,7 +186,7 @@ class BayesianConditionalUnet1D(nn.Module):
                     kernel_size=kernel_size,
                     n_groups=n_groups,
                     cond_predict_scale=cond_predict_scale,
-                    rho_init=rho_init,
+                    rho_post=rho_post,
                     rho_prior=rho_prior,
                     prior_dist=prior_dist
                 ),
@@ -440,7 +197,7 @@ class BayesianConditionalUnet1D(nn.Module):
                     kernel_size=kernel_size,
                     n_groups=n_groups,
                     cond_predict_scale=cond_predict_scale,
-                    rho_init=rho_init,
+                    rho_post=rho_post,
                     rho_prior=rho_prior,
                     prior_dist=prior_dist
                 ),
@@ -461,7 +218,7 @@ class BayesianConditionalUnet1D(nn.Module):
                             kernel_size=kernel_size,
                             n_groups=n_groups,
                             cond_predict_scale=cond_predict_scale,
-                            rho_init=rho_init,
+                            rho_post=rho_post,
                             rho_prior=rho_prior,
                             prior_dist=prior_dist
                         ),
@@ -472,7 +229,7 @@ class BayesianConditionalUnet1D(nn.Module):
                             kernel_size=kernel_size,
                             n_groups=n_groups,
                             cond_predict_scale=cond_predict_scale,
-                            rho_init=rho_init,
+                            rho_post=rho_post,
                             rho_prior=rho_prior,
                             prior_dist=prior_dist
                         ),
@@ -494,7 +251,7 @@ class BayesianConditionalUnet1D(nn.Module):
                             kernel_size=kernel_size,
                             n_groups=n_groups,
                             cond_predict_scale=cond_predict_scale,
-                            rho_init=rho_init,
+                            rho_post=rho_post,
                             rho_prior=rho_prior,
                             prior_dist=prior_dist
                         ),
@@ -505,7 +262,7 @@ class BayesianConditionalUnet1D(nn.Module):
                             kernel_size=kernel_size,
                             n_groups=n_groups,
                             cond_predict_scale=cond_predict_scale,
-                            rho_init=rho_init,
+                            rho_post=rho_post,
                             rho_prior=rho_prior,
                             prior_dist=prior_dist
                         ),
@@ -527,7 +284,7 @@ class BayesianConditionalUnet1D(nn.Module):
 
         # Store Bayesian parameters for reference
         self.rho_prior = rho_prior
-        self.rho_init = rho_init
+        self.rho_post = rho_post
         self.prior_dist = prior_dist
 
         logger.info(
@@ -616,29 +373,28 @@ class BayesianConditionalUnet1D(nn.Module):
         for layer in self.diffusion_step_encoder:
             if hasattr(layer, 'kl_div'):
                 kl_div += layer.kl_div
-        
+
         # KL from local condition encoder
         if self.local_cond_encoder is not None:
             for layer in self.local_cond_encoder:
-                kl_div += layer.compute_kl()
-        
+                if hasattr(layer, 'compute_kl'):
+                    kl_div += layer.compute_kl()
+
         # KL from mid modules
         for layer in self.mid_modules:
-            kl_div += layer.compute_kl()
-        
+            if hasattr(layer, 'compute_kl'):
+                kl_div += layer.compute_kl()
+
         # KL from down modules
         for module_list in self.down_modules:
             for layer in module_list:
                 if hasattr(layer, 'compute_kl'):
                     kl_div += layer.compute_kl()
-                elif hasattr(layer, 'kl_div'):
-                    kl_div += layer.kl_div
-        
+
         # KL from up modules
         for module_list in self.up_modules:
             for layer in module_list:
                 if hasattr(layer, 'compute_kl'):
                     kl_div += layer.compute_kl()
-                elif hasattr(layer, 'kl_div'):
-                    kl_div += layer.kl_div
+
         return kl_div

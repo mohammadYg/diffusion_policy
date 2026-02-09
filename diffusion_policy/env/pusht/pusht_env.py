@@ -34,13 +34,11 @@ class PushTEnv(gym.Env):
             block_cog=None, damping=None,
             render_action=True,
             render_size=96,
-            reset_to_state=None,
-            offset = 0.0
+            reset_to_state=None
         ):
         self._seed = None
         self.seed()
-        self.offset = offset   # the offset to enlarge the working space
-        self.window_size = ws = 512  + 2*offset # The size of the PyGame window
+        self.window_size = ws = 512  # The size of the PyGame window
         self.render_size = render_size
         self.sim_hz = 100
         # Local controller params.
@@ -93,50 +91,17 @@ class PushTEnv(gym.Env):
             self.block.center_of_gravity = self.block_cog
         if self.damping is not None:
             self.space.damping = self.damping
-
+        
         # use legacy RandomState for compatibility
         state = self.reset_to_state
-        
         if state is None:
-            valid = False
-            rs = np.random.default_rng(seed=seed)
-            ws = self.offset
-            while not valid:
-                if ws>0:
-                    state = np.array(
-                        [
-                            rs.uniform(50+ws, 450+ws),
-                            rs.uniform(50+ws, 450+ws),
-                            rs.uniform(100+ws, 400+ws),
-                            rs.uniform(100+ws, 400+ws),
-                            rs.uniform(-np.pi, np.pi + 1e-10)
-                        ]
-                    )
-                else:
-                    state = np.array(
-                        [
-                            rs.uniform(50, 450),
-                            rs.uniform(50, 450),
-                            rs.uniform(100, 400),
-                            rs.uniform(100, 400),
-                            rs.uniform(-np.pi, np.pi + 1e-10)
-                        ]
-                    )
-
-                self._set_state(state)
-                pos_CoM_Tblock = np.array(self.block.local_to_world(self.block.center_of_gravity))
-                pos_CoM_agent = np.array(self.agent.local_to_world(self.agent.center_of_gravity))
-                distance = np.linalg.norm(pos_CoM_Tblock - pos_CoM_agent)
-                if distance>95.0:
-                    valid = True
-
-        #     rs = np.random.RandomState(seed=seed)
-        #     state = np.array([
-        #         rs.randint(50, 450), rs.randint(50, 450),
-        #         rs.randint(100, 400), rs.randint(100, 400),
-        #         rs.randn() * 2 * np.pi - np.pi
-        #         ])
-        # self._set_state(state)
+            rs = np.random.RandomState(seed=seed)
+            state = np.array([
+                rs.randint(50, 450), rs.randint(50, 450),
+                rs.randint(100, 400), rs.randint(100, 400),
+                rs.randn() * 2 * np.pi - np.pi
+                ])
+        self._set_state(state)
 
         observation = self._get_obs()
         return observation
@@ -255,7 +220,7 @@ class PushTEnv(gym.Env):
         if self.render_action:
             if self.render_action and (self.latest_action is not None):
                 action = np.array(self.latest_action)
-                coord = (action / self.window_size * self.render_size).astype(np.int32)
+                coord = (action / 512 * 96).astype(np.int32)
                 marker_size = int(8/96*self.render_size)
                 thickness = int(1/96*self.render_size)
                 cv2.drawMarker(img, coord,
@@ -329,29 +294,18 @@ class PushTEnv(gym.Env):
         
         # Add walls.
         walls = [
-            self._add_segment((5, 506 + 2*self.offset), (5, 5), 2),
-            self._add_segment((5, 5), (506 + 2*self.offset, 5), 2),
-            self._add_segment((506 + 2*self.offset, 5), (506 + 2*self.offset, 506 + 2*self.offset), 2),
-            self._add_segment((5, 506 + 2*self.offset), (506 + 2*self.offset, 506 + 2*self.offset), 2)
+            self._add_segment((5, 506), (5, 5), 2),
+            self._add_segment((5, 5), (506, 5), 2),
+            self._add_segment((506, 5), (506, 506), 2),
+            self._add_segment((5, 506), (506, 506), 2)
         ]
-        # walls = [
-        #     self._add_segment((5, 506 + self.offset), (5, 5), 2),
-        #     self._add_segment((5, 5), (506 + self.offset, 5), 2),
-        #     self._add_segment((506 + self.offset, 5), (506 + self.offset, 506 + self.offset), 2),
-        #     self._add_segment((5, 506 + self.offset), (506 + self.offset, 506 + self.offset), 2)
-        # ]
         self.space.add(*walls)
 
         # Add agent, block, and goal zone.
-        self.agent = self.add_circle((256 + self.offset, 400 + self.offset), 15)
-        self.block = self.add_tee((256 + self.offset, 300 + self.offset), 0)
+        self.agent = self.add_circle((256, 400), 15)
+        self.block = self.add_tee((256, 300), 0)
         self.goal_color = pygame.Color('LightGreen')
-        self.goal_pose = np.array([256 + self.offset, 256 + self.offset, np.pi/4])  # x, y, theta (in radians)
-
-        # self.agent = self.add_circle((256, 400), 15)
-        # self.block = self.add_tee((256, 300), 0)
-        # self.goal_color = pygame.Color('LightGreen')
-        # self.goal_pose = np.array([256, 256, np.pi/4])  # x, y, theta (in radians)
+        self.goal_pose = np.array([256,256,np.pi/4])  # x, y, theta (in radians)
 
         # Add collision handling
         self.collision_handeler = self.space.add_collision_handler(0, 0)

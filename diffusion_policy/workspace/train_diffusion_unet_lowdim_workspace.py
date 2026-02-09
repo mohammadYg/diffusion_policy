@@ -9,7 +9,6 @@ if __name__ == "__main__":
 
 import os
 import hydra
-from matplotlib.pyplot import step
 import torch
 from omegaconf import OmegaConf
 import pathlib
@@ -19,7 +18,6 @@ import numpy as np
 import random
 import wandb
 import tqdm
-import shutil
 
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
@@ -97,7 +95,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
         print ("validation dataset size: ", len(val_dataset))
         
-        ## configure dataset for covariance_spectrum
+        # configure dataset for covariance_spectrum
         cov_dataloader = DataLoader(dataset, batch_size=len(dataset), num_workers=1, pin_memory = True, persistent_workers = False)
         
         self.model.set_normalizer(normalizer)
@@ -161,10 +159,10 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             **cfg.checkpoint_val.topk
         )
 
-        # configure checkpoint
-        topk_manager_every = CheckpointManager(
-            save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_every.topk
-        )
+        # # configure checkpoint
+        # topk_manager_every = CheckpointManager(
+        #     save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_every.topk
+        # )
 
         # device transfer
         device = torch.device(cfg.training.device)
@@ -192,7 +190,6 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
-        act_pre = []
         last_ten_success_rate = []
         with JsonLogger(log_path) as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs):
@@ -257,7 +254,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 policy.eval()
 
                 # run rollout
-                if (self.epoch % cfg.training.rollout_every) == 0 and (self.epoch>50):
+                if (self.epoch % cfg.training.rollout_every) == 0 and (self.epoch>cfg.training.num_epochs-500):
+                    env_runner.current_epoch = self.epoch
                     runner_log = env_runner.run(policy)
                     # log all
                     step_log.update(runner_log)
@@ -282,32 +280,29 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 val_noise_pred_losses.append(val_noise_pred_loss.item() * n_samples)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
-                                    break          
+                                    break   
+
                         if len(val_noise_pred_losses) > 0:
                             noise_pred_loss = np.sum(val_noise_pred_losses)/n_total_samples
                             step_log['test_noise_pred_loss'] = noise_pred_loss
                             topk_ckpt_path_val = topk_manager_noise_pred.get_ckpt_path(step_log)
                             if topk_ckpt_path_val is not None:
                                 self.save_checkpoint(path=topk_ckpt_path_val, exclude_keys=['model', 'optimizer'])
-                                #self.save_weights_only(path=topk_ckpt_path_val)
                         
                 # Compute upper bound on NLL
                 if (self.epoch % cfg.training.nll_every)==0:
-                    NLL_test = policy.test_nll(val_dataloader, self.epoch, npoints=100, xinterval=None)
-                    step_log['test_nll_bpd'] = NLL_test
-                    # NLL_train = policy.test_nll(train_dataloader, self.epoch, npoints=100, xinterval=None)
-                    # step_log['train_nll_bpd'] = NLL_train
+                    NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100)
+                    step_log['test_nll_bpd'] = NLL_test 
                     topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
                     if topk_ckpt_path_nll is not None:
                         self.save_checkpoint(path=topk_ckpt_path_nll, exclude_keys=['model', 'optimizer'])
-                        #self.save_weights_only(path=topk_ckpt_path_nll)
+
 
                 # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0 and (self.epoch>50):
+                if (self.epoch % cfg.training.checkpoint_every) == 0 and (self.epoch>cfg.training.num_epochs-500):
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
                         self.save_checkpoint(exclude_keys=['model', 'optimizer'])
-                        #self.save_weights_only()
                     if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
 
@@ -323,8 +318,6 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
                     if topk_ckpt_path is not None:
                         self.save_checkpoint(path=topk_ckpt_path,exclude_keys=['model', 'optimizer'])
-                        #self.save_weights_only(path=topk_ckpt_path)
-
 
                 # ========= eval end for this epoch ==========
                 policy.train()
@@ -352,9 +345,6 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 self.global_step += 1
                 self.epoch += 1
         
-        
-
-
 @hydra.main(
     version_base=None,
     config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")), 

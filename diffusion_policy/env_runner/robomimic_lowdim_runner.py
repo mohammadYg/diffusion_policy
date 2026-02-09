@@ -78,9 +78,9 @@ class DisturbanceWrapper(gym.Wrapper):
 
         self.rng = np.random.RandomState(seed)
 
-        self.start1_step = self.rng.randint(3, 10)
-        self.start2_step = self.rng.randint(60, 90)
-        duration = 8
+        self.start1_step = self.rng.randint(5, 10)
+        self.start2_step = 0 #self.rng.randint(70, 85)
+        duration = 6
         #duration = self.rng.randint(10, 40)
         self.end1_step = self.start1_step + duration
         self.end2_step = self.start2_step + duration
@@ -91,8 +91,8 @@ class DisturbanceWrapper(gym.Wrapper):
         direction2 = self.rng.randn(3)
         direction2 /= np.linalg.norm(direction2) + 1e-8
 
-        self.force1 = np.array([direction1[0]*250, direction1[1]*250, direction1[2]*250 if direction1[2]>=0 else direction1[2]*100])
-        self.force2 = np.array([direction2[0]*250, direction2[1]*250, direction2[2]*250 if direction2[2]>=0 else direction2[2]*100])
+        self.force1 = np.array([direction1[0]*200, direction1[1]*200, direction1[2]*200 if direction1[2]>=0 else direction1[2]*50])
+        self.force2 = np.array([0,0,0]) #np.array([direction2[0]*250, direction2[1]*250, direction2[2]*250 if direction2[2]>=0 else direction2[2]*100])
 
         self.active = True
 
@@ -467,7 +467,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             # visualize sim
             video_path = all_video_paths[i]
             if video_path is not None:
-                sim_video = wandb.Video(video_path)
+                sim_video = wandb.Video(video_path, format="gif")
                 log_data[prefix+f'sim_video_{seed}'] = sim_video
 
         # log aggregate metrics
