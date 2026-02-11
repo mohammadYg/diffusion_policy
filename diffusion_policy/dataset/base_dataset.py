@@ -1,7 +1,6 @@
 from typing import Dict
 
 import torch
-import torch.nn
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 
 class BaseLowdimDataset(torch.utils.data.Dataset):

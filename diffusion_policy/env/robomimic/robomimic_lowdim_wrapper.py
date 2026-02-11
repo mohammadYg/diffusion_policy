@@ -3,6 +3,7 @@ import numpy as np
 import gym
 from gym.spaces import Box
 from robomimic.envs.env_robosuite import EnvRobosuite
+import mujoco
 
 class RobomimicLowdimWrapper(gym.Env):
     def __init__(self, 
@@ -56,6 +57,10 @@ class RobomimicLowdimWrapper(gym.Env):
         self._seed = seed
     
     def reset(self):
+        # for i in range(self.env.env.sim.model.nbody):
+        #     print(f"id= {i}", self.env.env.sim.model.body_id2name(i))
+        # body_id = mujoco.mj_name2id(self.env.env.sim.model, mujoco.mjtObj.mjOBJ_BODY, "Can_main")
+        # print (body_id )
         if self.init_state is not None:
             # always reset to the same state
             # to be compatible with gym
@@ -82,6 +87,7 @@ class RobomimicLowdimWrapper(gym.Env):
         return obs
     
     def step(self, action):
+
         raw_obs, reward, done, info = self.env.step(action)
         obs = np.concatenate([
             raw_obs[key] for key in self.obs_keys
@@ -93,6 +99,38 @@ class RobomimicLowdimWrapper(gym.Env):
         return self.env.render(mode=mode, 
             height=h, width=w, 
             camera_name=self.render_camera_name)
+
+def _move_object(self):
+    sim = self.env.env.sim
+    model = sim.model
+    data = sim.data
+
+    joint_name = "object0_joint"  # CHANGE THIS
+    joint_id = model.joint_name2id(joint_name)
+    qpos_addr = model.joint_qpos_addr[joint_id]
+
+    # Current pose
+    qpos = data.qpos.copy()
+
+    # Sample new position
+    new_pos = np.array([
+        0.1 + 0.05 * np.random.randn(),
+        0.0 + 0.05 * np.random.randn(),
+        0.02
+    ])
+
+    # Keep orientation unchanged
+    old_quat = qpos[qpos_addr + 3 : qpos_addr + 7]
+
+    qpos[qpos_addr : qpos_addr + 3] = new_pos
+    qpos[qpos_addr + 3 : qpos_addr + 7] = old_quat
+
+    data.qpos[:] = qpos
+
+    # Optional but recommended: zero object velocity
+    data.qvel[:] = 0.0
+
+    sim.forward()
 
 
 def test():

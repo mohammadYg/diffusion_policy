@@ -62,7 +62,7 @@ policy:
   # scheduler.step params
   # predict_epsilon: True
   use_clipped_model_output: True
-  # eta: 0.0
+  eta: 0.0
 
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel

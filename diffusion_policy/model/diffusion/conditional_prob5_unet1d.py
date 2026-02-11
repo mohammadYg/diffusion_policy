@@ -86,7 +86,7 @@ class BayesianConditionalUnet1D(nn.Module):
         cond_predict_scale=False,
         use_dropout=False,
         # Bayesian parameters
-        rho_init=-3.0,
+        rho_post=-3.0,
         rho_prior=-3.0,
         prior_dist='gaussian'
     ):
@@ -105,11 +105,11 @@ class BayesianConditionalUnet1D(nn.Module):
         diffusion_step_encoder = nn.Sequential(
             SinusoidalPosEmb(dsed),
             ProbLinear(dsed, dsed * 4, 
-                      rho_init=rho_init, 
+                      rho_post=rho_post, 
                       rho_prior=rho_prior, 
                       prior_dist=prior_dist),
             nn.Mish(),
-            ProbLinear(dsed * 4, dsed, rho_init=rho_init, 
+            ProbLinear(dsed * 4, dsed, rho_post=rho_post, 
                       rho_prior=rho_prior, 
                       prior_dist=prior_dist),
         )
@@ -194,7 +194,7 @@ class BayesianConditionalUnet1D(nn.Module):
 
         # Store Bayesian parameters for reference
         self.rho_prior = rho_prior
-        self.rho_init = rho_init
+        self.rho_post = rho_post
         self.prior_dist = prior_dist
 
         logger.info(

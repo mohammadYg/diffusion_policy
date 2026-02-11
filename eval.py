@@ -67,17 +67,14 @@ def main(checkpoint, output_dir, device, override):
             output_dir=output_dir)
     env_runner.current_epoch = pickle.loads(payload["pickles"]["epoch"])
     success_rate = list()
-    for _ in range (cfg.task.n_repeat_runner):
-        if isinstance(policy, BaseLowdimProbPolicy):
-            runner_log = env_runner.run_prob(policy, cfg.eval.stochastic)
-        else:
-            runner_log = env_runner.run(policy)
-        success_rate.append(runner_log["test/mean_score"])
-
-    if cfg.task.n_repeat_runner > 1:
-        ddof = 1
+    
+    if isinstance(policy, BaseLowdimProbPolicy):
+        runner_log = env_runner.run_prob(policy, cfg.eval.stochastic)
     else:
-        ddof = 0
+        runner_log = env_runner.run(policy)
+    success_rate.append(runner_log["test/mean_score"])
+
+    ddof = 0
 
     avg_success_rate = np.mean(success_rate)
     var_success_rate = np.var(success_rate, ddof=ddof)
@@ -92,24 +89,23 @@ def main(checkpoint, output_dir, device, override):
     val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
     val_loss_noise_pred = list()
-    with torch.no_grad():
-        for _ in range (cfg.task.n_repeat_runner):
-            val_losses_noise_pred = list()
-            n_total_samples = 0
+    with torch.no_grad(): 
+        val_losses_noise_pred = list()
+        n_total_samples = 0
 
-            with tqdm.tqdm(val_dataloader, desc=f"Noise Prediction Validation", 
-                    leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                
-                for batch in tepoch:
-                    n_samples = len(batch["obs"])
-                    n_total_samples += n_samples
-                    
-                    # device transfer
-                    batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                    emp_loss_test = policy.compute_loss(batch, train=False)
-                    val_losses_noise_pred.append(emp_loss_test.item() * n_samples)
+        with tqdm.tqdm(val_dataloader, desc=f"Noise Prediction Validation", 
+                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
             
-            val_loss_noise_pred.append(np.sum(val_losses_noise_pred)/n_total_samples)
+            for batch in tepoch:
+                n_samples = len(batch["obs"])
+                n_total_samples += n_samples
+                
+                # device transfer
+                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                emp_loss_test = policy.compute_loss(batch, train=False)
+                val_losses_noise_pred.append(emp_loss_test.item() * n_samples)
+        
+        val_loss_noise_pred.append(np.sum(val_losses_noise_pred)/n_total_samples)
 
     avg_loss_pred_noise = np.mean(val_loss_noise_pred)
     var_loss_pred_noise = np.var(val_loss_noise_pred, ddof=ddof)

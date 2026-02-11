@@ -55,8 +55,8 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
         # configure dataset
         self.dataset: BaseLowdimDataset
         self.dataset = hydra.utils.instantiate(cfg.task.dataset)
-        assert isinstance(dataset, BaseLowdimDataset)
-        normalizer = dataset.get_normalizer()
+        assert isinstance(self.dataset, BaseLowdimDataset)
+        normalizer = self.dataset.get_normalizer()
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
@@ -80,9 +80,6 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
         post_dataloader = DataLoader(post_dataset, **cfg.post_dataloader)
 
         ## configure dataset for covariance_spectrum
-        dataloader = DataLoader(self.dataset, **cfg.dataloader)
-        print (len(selfdataset))
-        print (len(dataloader.dataset))
         cov_dataloader = DataLoader(self.dataset, batch_size=len(self.dataset), 
                                     num_workers=1,   pin_memory = True, 
                                     persistent_workers = False)
