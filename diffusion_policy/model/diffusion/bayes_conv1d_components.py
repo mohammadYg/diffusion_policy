@@ -213,8 +213,6 @@ class ProbLinear(nn.Module):
         weights_mu_init = trunc_normal_(torch.Tensor(
                 out_features, in_features), 0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
         bias_mu_init = torch.zeros(out_features)
-        # weights_mu_init = weights_mu_prior.clone()
-        # bias_mu_init = bias_mu_prior.clone()    
         weights_rho_post = torch.ones(out_features, in_features) * rho_post
         bias_rho_post = torch.ones(out_features) * rho_post
        
@@ -236,25 +234,25 @@ class ProbLinear(nn.Module):
 
         self.kl_div = 0
 
-    def forward(self, input, stochastic=False):
+    def forward(self, input, stochastic=False, local_reparam: bool = True):
         #if self.training or stochastic:
+        # Use local reparameterization (Kingma et al.) when stochastic and requested.
+        # This samples activations instead of sampling the full weight tensor — much faster.
+        # fallback: sample weights (original behaviour) or use posterior mean
         if stochastic:
-            # during training we sample from the model distribution
-            # sample = True can also be set during testing if we
-            # want to use the stochastic/ensemble predictors
             weight = self.weight.sample()
             bias = self.bias.sample()
         else:
-            # otherwise we use the posterior mean
             weight = self.weight.mu
             bias = self.bias.mu
+        result = F.linear(input, weight, bias)
 
         if self.training:
             # sum of the KL computed for weights and biases
             self.kl_div = self.weight.compute_kl(self.weight_prior) + \
                 self.bias.compute_kl(self.bias_prior)
 
-        return F.linear(input, weight, bias)
+        return result
 
 class ProbConv1d(nn.Module):
     """Probabilistic 1D Convolutional Layer.
@@ -321,8 +319,6 @@ class ProbConv1d(nn.Module):
         weights_mu_init = trunc_normal_(torch.Tensor(out_channels, in_channels, kernel_size),
                                     0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
         bias_mu_init = torch.zeros(out_channels)
-        # weights_mu_init = weights_mu_prior.clone()
-        # bias_mu_init = bias_mu_prior.clone()    
         weights_rho_post = torch.ones(out_channels, in_channels, kernel_size) * rho_post
         bias_rho_post = torch.ones(out_channels) * rho_post
 
@@ -341,8 +337,8 @@ class ProbConv1d(nn.Module):
 
         self.kl_div = 0
 
-    def forward(self, x, stochastic=False):
-        #if self.training or stochastic:
+    def forward(self, x, stochastic=False, local_reparam: bool = True):     
+        # fallback to original behaviour (sample weights or use posterior mean)
         if stochastic:
             weight = self.weight.sample()
             bias = self.bias.sample()
@@ -350,11 +346,13 @@ class ProbConv1d(nn.Module):
             weight = self.weight.mu
             bias = self.bias.mu
 
+        result = F.conv1d(x, weight, bias, stride=self.stride, padding=self.padding,
+                            dilation=self.dilation, groups=self.groups)
+
         if self.training:
             self.kl_div = self.weight.compute_kl(self.weight_prior) + self.bias.compute_kl(self.bias_prior)
 
-        return F.conv1d(x, weight, bias, stride=self.stride, padding=self.padding,
-                        dilation=self.dilation, groups=self.groups)
+        return result
     
 class ProbConvTranspose1d(nn.Module):
     """Probabilistic 1D Transposed Convolutional Layer.
@@ -423,8 +421,6 @@ class ProbConvTranspose1d(nn.Module):
             in_channels, out_channels, kernel_size),  # Note: transposed conv has different weight arrangement
             0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
         bias_mu_init = torch.zeros(out_channels)
-        # weights_mu_init = weights_mu_prior.clone()
-        # bias_mu_init = bias_mu_prior.clone()    
         weights_rho_post = torch.ones(in_channels, out_channels, kernel_size) * rho_post
         bias_rho_post = torch.ones(out_channels) * rho_post
 

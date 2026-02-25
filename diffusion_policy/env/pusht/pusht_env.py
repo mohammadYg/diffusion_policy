@@ -137,8 +137,8 @@ class PushTEnv(gym.Env):
 
         return observation, reward, done, info
 
-    def render(self, mode):
-        return self._render_frame(mode)
+    def render(self, mode, pred_action=None, pred_actions=None):
+        return self._render_frame(mode, pred_action=pred_action, pred_actions=pred_actions)
 
     def teleop_agent(self):
         TeleopAgent = collections.namedtuple('TeleopAgent', ['act'])
@@ -179,7 +179,7 @@ class PushTEnv(gym.Env):
             'n_contacts': n_contact_points_per_step}
         return info
 
-    def _render_frame(self, mode):
+    def _render_frame(self, mode, pred_action=None, pred_actions=None):
 
         if self.window is None and mode == "human":
             pygame.init()
@@ -220,12 +220,47 @@ class PushTEnv(gym.Env):
         if self.render_action:
             if self.render_action and (self.latest_action is not None):
                 action = np.array(self.latest_action)
-                coord = (action / 512 * 96).astype(np.int32)
+                coord = (action / 512 * self.render_size).astype(np.int32)
                 marker_size = int(8/96*self.render_size)
                 thickness = int(1/96*self.render_size)
                 cv2.drawMarker(img, coord,
                     color=(255,0,0), markerType=cv2.MARKER_CROSS,
                     markerSize=marker_size, thickness=thickness)
+        
+        if pred_actions is not None:
+                for i in range (len(pred_actions)):
+                    num = len(pred_actions[i])
+                    for j in range(num):
+                        action = np.array(pred_actions[i][j])
+                        coord = (action / 512 * self.render_size).astype(np.int32)
+                        marker_size = int(8 / 700 * self.render_size)
+                        thickness = int(1 / 500 * self.render_size)
+                        cv2.drawMarker(
+                            img,
+                            coord,
+                            color=(255 * (num - j) / num, 
+                                   0, 
+                                   255 * (j) / num),
+                            markerType=4,
+                            markerSize=marker_size,
+                            thickness=thickness,
+                        )
+
+        if pred_action is not None:
+                num = len(pred_action)
+                for j in range(num):
+                    action = np.array(pred_action[j])
+                    coord = (action / 512 * self.render_size).astype(np.int32)
+                    marker_size = int(8 / 700 * self.render_size)
+                    thickness = int(1 / 500 * self.render_size)
+                    cv2.drawMarker(
+                        img,
+                        coord,
+                        color=(0, 255, 0),
+                        markerType=2,
+                        markerSize=marker_size,
+                        thickness=thickness,
+                    )
         return img
 
 

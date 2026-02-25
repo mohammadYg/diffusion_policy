@@ -344,6 +344,11 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
                     if topk_ckpt_path_nll is not None:
                         self.save_checkpoint(path=topk_ckpt_path_nll, exclude_keys=['model', 'optimizer'])
+                
+                ## Compute Reconstruction loss
+                if (self.epoch % cfg.training.reconst_loss_every)==0:
+                    reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
+                    step_log['test_action_reconst_loss'] = reconst_loss.item()
 
                 # log learned rho values
                 if (self.epoch % cfg.training.rho_log_every) == 0:

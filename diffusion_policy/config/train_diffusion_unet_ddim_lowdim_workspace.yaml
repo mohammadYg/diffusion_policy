@@ -20,6 +20,7 @@ keypoint_visible_rate: 1.0
 obs_as_local_cond: False
 obs_as_global_cond: True
 pred_action_steps_only: False
+num_mc_samples: 100
 
 policy:
   _target_: diffusion_policy.policy.diffusion_unet_lowdim_policy.DiffusionUnetLowdimPolicy
@@ -113,6 +114,7 @@ training:
   val_every: 1
   sample_every: 5
   nll_every: 50
+  reconst_loss_every: 50
   # steps per epoch
   max_train_steps: null
   max_val_steps: null

@@ -156,7 +156,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             abs_action=False,
             tqdm_interval_sec=5.0,
             n_envs=None,
-            disturbance_enabled=True,
+            disturbance_enabled=False,
             body_name='robot0_right_hand',
         ):
         """

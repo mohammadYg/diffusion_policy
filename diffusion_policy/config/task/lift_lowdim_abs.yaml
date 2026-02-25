@@ -4,9 +4,6 @@ obs_dim: 19
 action_dim: 10
 keypoint_dim: 3
 
-n_repeat_runner: 1
-n_MC: 1
-
 obs_keys: &obs_keys ['object', 'robot0_eef_pos', 'robot0_eef_quat', 'robot0_gripper_qpos']
 task_name: &task_name lift
 dataset_type: &dataset_type ph
@@ -51,4 +48,4 @@ dataset:
   seed: 42
   val_ratio: 0.02
   max_train_episodes: null
-  train_episodes_for_PAC_Bayes: 0
+  train_episodes_for_posterior: 0        # This is selected from training data.

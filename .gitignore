@@ -12,6 +12,7 @@ _wandb
 fuse.cfg
 
 *.ai
+*.mp4
 
 # Generation results
 results/

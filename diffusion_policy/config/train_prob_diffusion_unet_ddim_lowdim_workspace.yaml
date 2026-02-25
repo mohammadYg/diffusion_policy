@@ -20,6 +20,7 @@ keypoint_visible_rate: 1.0
 obs_as_local_cond: False
 obs_as_global_cond: True
 pred_action_steps_only: False
+num_mc_samples: 100
 
 prior_policy:
   _target_: diffusion_policy.policy.diffusion_unet_lowdim_policy.DiffusionUnetLowdimPolicy
@@ -68,7 +69,7 @@ policy:
 
   model:
     #_target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
-    _target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
+    _target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D           # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
     #_target_: diffusion_policy.model.diffusion.conditional_prob3_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Probabilistic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob4_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Deterministic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob5_unet1d.BayesianConditionalUnet1D          # Determinstic FiLM conditioning  + Probabilistic timestep encoding 
@@ -186,6 +187,7 @@ training:
   sample_every: 50
   nll_every: 50
   rho_log_every: 5000
+  reconst_loss_every: 50
   # steps per epoch
   max_train_steps: null
   max_val_steps: null

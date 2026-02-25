@@ -123,8 +123,8 @@ class PushTKeypointsEnv(PushTEnv):
         return obs
     
     
-    def _render_frame(self, mode):
-        img = super()._render_frame(mode)
+    def _render_frame(self, mode, pred_action=None, pred_actions=None):
+        img = super()._render_frame(mode, pred_action=pred_action, pred_actions=pred_actions)
         if self.draw_keypoints:
             self.kp_manager.draw_keypoints(
                 img, self.draw_kp_map, radius=int(img.shape[0]/96))

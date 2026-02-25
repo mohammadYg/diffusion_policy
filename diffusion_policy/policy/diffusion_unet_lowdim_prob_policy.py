@@ -712,6 +712,50 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
                         # Allow unmatched params (e.g. new Bayesian-only params)
                         pass
 
+    # =============== Compute Reconstruction Loss of PAC-Bayes Bounds of Mbacke =======================
+    # see https://arxiv.org/pdf/2312.05989
+    
+    @torch.no_grad()
+    def compute_action_reconst_loss(self, dataloader, cfg):
+        loss_rec = 0
+        n_total_samples = 0
+        
+        with tqdm.tqdm(dataloader, desc=f"Reconstruction Loss", 
+                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+
+                for batch in tepoch:
+                    batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
+                    
+                    # extract observation
+                    obs_dict = {'obs': batch['obs']}
+                    ref_action = batch["action"]
+
+                    B = ref_action.shape[0]
+                    n_total_samples += B
+
+                    if cfg.pred_action_steps_only:
+                        start = cfg.n_obs_steps - 1
+                        end = start + cfg.n_action_steps
+                        ref_action = ref_action[:, start:end]
+
+                    for _ in range (cfg.num_mc_samples):
+                        result = self.predict_action(obs_dict, cfg.eval.stochastic)
+                        if cfg.pred_action_steps_only:
+                            pred_action = result['action']
+                        else:
+                            pred_action = result['action_pred']
+
+                        batch_loss = torch.linalg.norm(
+                                                pred_action - ref_action,
+                                                ord=2,
+                                                dim=(1, 2)
+                                            )  # (B,)
+                        # compute reconstruction loss
+                        loss_rec += batch_loss.sum()
+        
+        return loss_rec/(cfg.num_mc_samples*n_total_samples)
+
+    
     # def nll_sde(self, dataloader, stochastic=False):
     #     SDE = VPSDE(self.noise_scheduler, beta_min=0.1, beta_max=20.0, N=1000)
     #     logp_fn = get_likelihood_fn(SDE, continuous = False, exact = False)
