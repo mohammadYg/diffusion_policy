@@ -69,11 +69,16 @@ policy:
 
   model:
     #_target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
-    _target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D           # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
+    #_target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D           # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
     #_target_: diffusion_policy.model.diffusion.conditional_prob3_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Probabilistic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob4_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Deterministic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob5_unet1d.BayesianConditionalUnet1D          # Determinstic FiLM conditioning  + Probabilistic timestep encoding 
-    
+    #_target_: diffusion_policy.model.diffusion.conditional_prob6_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
+    #_target_: diffusion_policy.model.diffusion.conditional_prob7_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
+    _target_: diffusion_policy.model.diffusion.conditional_prob8_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
+    #_target_: diffusion_policy.model.diffusion.conditional_prob9_unet1d.BayesianConditionalUnet1D 
+
+
     input_dim: "${eval: ${task.action_dim} if ${obs_as_local_cond} or ${obs_as_global_cond} else ${task.obs_dim} + ${task.action_dim}}"
     local_cond_dim: "${eval: ${task.obs_dim} if ${obs_as_local_cond} else None}"
     global_cond_dim: "${eval: ${task.obs_dim}*${n_obs_steps} if ${obs_as_global_cond} else None}"
@@ -117,7 +122,6 @@ policy:
   eta: 0.0
   use_clipped_model_output: True
   
-
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
   update_after_step: 0

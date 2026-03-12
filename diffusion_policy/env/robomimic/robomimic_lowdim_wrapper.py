@@ -57,6 +57,10 @@ class RobomimicLowdimWrapper(gym.Env):
         self._seed = seed
     
     def reset(self):
+        # self.change=True
+        # self.nstep = 0
+        # for obj in self.env.env.model.mujoco_objects:
+        #     print (obj.name)
         # for i in range(self.env.env.sim.model.nbody):
         #     print(f"id= {i}", self.env.env.sim.model.body_id2name(i))
         # body_id = mujoco.mj_name2id(self.env.env.sim.model, mujoco.mjtObj.mjOBJ_BODY, "Can_main")
@@ -87,6 +91,22 @@ class RobomimicLowdimWrapper(gym.Env):
         return obs
     
     def step(self, action):
+        # self.nstep += 1
+        # if self.change and self.nstep==6:
+        #     for obj in self.env.env.model.mujoco_objects:
+        #         print (obj.name)
+        #         if obj.name == "SquareNut":
+        #             print (obj.joints[0])
+        #             joint_name = "SquareNut_joint0"   # replace with your object joint name
+        #             joint_id = self.env.env.sim.model.joint_name2id(joint_name)
+
+        #             qpos_addr = self.env.env.sim.model.jnt_qposadr[joint_id]
+        #             print(self.env.env.sim.data.qpos[qpos_addr : qpos_addr + 7])
+        #             state = self.env.env.sim.data.qpos[qpos_addr : qpos_addr + 7]
+        #             q_new = randomize_z_rotation(state[3:])
+        #             self.env.env.sim.data.set_joint_qpos(obj.joints[0], np.array([np.random.uniform(-0.115, -0.11),  np.random.uniform(0.11, 0.225),  state[2], q_new[1], q_new[2], q_new[3], q_new[0]]))
+        #             self.env.env.sim.forward()
+        #             self.change = False
 
         raw_obs, reward, done, info = self.env.step(action)
         obs = np.concatenate([
@@ -99,6 +119,50 @@ class RobomimicLowdimWrapper(gym.Env):
         return self.env.render(mode=mode, 
             height=h, width=w, 
             camera_name=self.render_camera_name)
+
+
+def quat_multiply(q1, q2):
+    """
+    Hamilton product of two quaternions (w, x, y, z)
+    """
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+
+    return np.array([
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2
+    ])
+
+
+def randomize_z_rotation(q, angle_range=(-np.pi, np.pi)):
+    """
+    Takes quaternion (w, x, y, z)
+    Adds random rotation about Z axis only.
+    
+    angle_range: tuple (min, max) in radians
+    
+    Returns new quaternion (w, x, y, z)
+    """
+    q = np.asarray(q, dtype=np.float64)
+    q = q / np.linalg.norm(q)
+
+    # Sample random yaw rotation
+    delta_yaw = np.random.uniform(*angle_range)
+
+    half = delta_yaw / 2.0
+    q_z = np.array([
+        np.cos(half),   # w
+        0.0,            # x
+        0.0,            # y
+        np.sin(half)    # z
+    ])
+
+    # Apply new Z rotation (world frame)
+    q_new = quat_multiply(q_z, q)
+
+    return q_new / np.linalg.norm(q_new)
 
 def _move_object(self):
     sim = self.env.env.sim

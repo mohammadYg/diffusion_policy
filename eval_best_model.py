@@ -64,132 +64,51 @@ def instantiate_workspace_from_cfg(cfg: OmegaConf, output_dir: Path) -> BaseWork
     workspace = cls(cfg, output_dir=str(output_dir))
     return workspace
 
-def run_env_runner_repeat(policy, cfg, output_dir: Path, n_repeat: int) -> Tuple[dict, float, float]:
+def run_env_runner(policy, cfg, output_dir: Path) -> Tuple[dict, float]:
     """Run the env_runner n_repeat times and return mean and variance of "test/mean_score"."""
-    scores = []
     # instantiate runner once per evaluation (cheaper)
     env_runner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir))
-    for _ in range(n_repeat):
-        if isinstance(policy, BaseLowdimProbPolicy):
-            runner_log = env_runner.run_prob(policy, cfg.eval.stochastic)
-        else:
-            runner_log = env_runner.run(policy)
-        scores.append(runner_log["test/mean_score"])
+    if isinstance(policy, BaseLowdimProbPolicy):
+        runner_log = env_runner.run_prob(policy, cfg.eval.stochastic)
+    else:
+        runner_log = env_runner.run(policy)
+    score=runner_log["test/mean_score"]
 
-    ddof = 1 if n_repeat > 1 else 0
-    return runner_log, float(np.mean(scores)), float(np.var(scores, ddof=ddof))
+    return runner_log, score.item()
 
 
-def eval_network(policy, dataloader: DataLoader, cfg, device: torch.device, n_repeat: int, n_MC: int, normalized = False) -> Tuple[float, float, float, float, float, float]:
+def eval_network(policy, dataloader: DataLoader, cfg, device: torch.device) -> float:
     """Evaluate noise prediction loss and action reconstruction loss across a dataloader.
 
     Returns: (avg_noise_pred_loss, avg_action_rec_loss)
     Both are averaged per-sample and averaged over n_MC where relevant.
     """
-    noise_loss_single_step = []
-    noise_loss_all_steps = []
-    recontruction_loss = []
-
     with torch.inference_mode():
-        for _ in range (n_repeat):
-            total_samples = 0
-            total_noise_loss_single_step = 0.0
-            total_noise_loss_all_steps = 0.0
-            total_rec_loss = 0.0
-            with tqdm.tqdm(dataloader, desc="Validation: noise prediction and action reconstruction error", leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                for batch in tepoch:
-                    n_samples = len(batch["obs"])
-                    total_samples += n_samples
+        total_samples = 0
+        total_noise_loss = 0.0
+        with tqdm.tqdm(dataloader, desc="Validation: noise prediction and action reconstruction error", leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+            for batch in tepoch:
+                n_samples = len(batch["obs"])
+                total_samples += n_samples
 
-                    # send to device
-                    batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                # send to device
+                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
-                    # noise prediction loss
-                    if isinstance(policy, BaseLowdimProbPolicy):
-                        noise_pred_loss_single_step = policy.compute_loss(batch, stochastic = cfg.eval.stochastic, train = False)
-                        noise_pred_loss_all_steps = policy.compute_loss(batch, stochastic = cfg.eval.stochastic, train = True)
-                    else:
-                        noise_pred_loss_single_step = policy.compute_loss(batch, train = False)
-                        noise_pred_loss_all_steps = policy.compute_loss(batch, train = True)
-                    total_noise_loss_single_step += float(noise_pred_loss_single_step.item() * n_samples)
-                    total_noise_loss_all_steps += float(noise_pred_loss_all_steps.item() * n_samples)
+                # noise prediction loss
+                if isinstance(policy, BaseLowdimProbPolicy):
+                    noise_pred_loss = policy.compute_loss(batch, stochastic = cfg.eval.stochastic, train = False)
+                else:
+                    noise_pred_loss = policy.compute_loss(batch, train = False)
+                total_noise_loss += float(noise_pred_loss.item() * n_samples)
+        
+        noise_loss = total_noise_loss / total_samples
 
-                    # action reconstruction loss (possibly probabilistic policy)
-                    shape = (n_samples, cfg.horizon, cfg.action_dim + cfg.obs_dim)
-                    # produce n_MC noises and average
-                    rec_loss_sum = 0.0
-                    for _ in range(n_MC):
-                        noise = torch.randn(shape, device=batch["action"].device)
-                        if isinstance(policy, BaseLowdimProbPolicy):
-                            rec_loss = policy.compute_action_reconst_loss(noise, batch, cfg.eval.stochastic, loss_type="MSE", normalized = normalized)
-                        else:
-                            rec_loss = policy.compute_action_reconst_loss(noise, batch, loss_type="MSE", normalized = normalized)
-                        rec_loss_sum += float(rec_loss.item() * n_samples)
-                    total_rec_loss += rec_loss_sum / max(1, n_MC)
-            
-            noise_loss_single_step.append(total_noise_loss_single_step / total_samples)
-            noise_loss_all_steps.append(total_noise_loss_all_steps / total_samples)
-            recontruction_loss.append(total_rec_loss / total_samples)
-
-    avg_noise_single_step = np.mean(noise_loss_single_step)
-    avg_noise_all_steps = np.mean(noise_loss_all_steps)
-    avg_rec = np.mean(recontruction_loss)
-    var_noise_single_step = np.var(noise_loss_single_step, ddof=1 if n_repeat > 1 else 0)
-    var_noise_all_steps = np.var(noise_loss_all_steps, ddof=1 if n_repeat > 1 else 0)
-    var_rec = np.var(recontruction_loss, ddof=1 if n_repeat > 1 else 0)        
-    return float(avg_noise_single_step), float(var_noise_single_step), float(avg_noise_all_steps), float(var_noise_all_steps), float(avg_rec), float(var_rec)
+    return noise_loss
 
 
 def save_json_log(out_path: Path, json_log: Dict):
     with out_path.open("w") as f:
         json.dump(json_log, f, indent=2, sort_keys=True)
-
-def eval_memorization_runner(policy, dataloader, gen_act, gen_act_norm, normalized, device, threshold=0.5) -> Tuple[float, float]:
-    """
-    Evaluate if the model has memorized the training dataset.
-    
-    Args:
-        dataloader: provides reference dataset, each batch with data['action'] of shape (batch, horizon, action_dim)
-        generated_actions: tensor of shape (m, horizon, action_dim)
-        cfg: config with .horizon, .action_dim, .obs_dim
-        threshold: fraction threshold to consider a sample memorized
-
-    Returns:
-        mean fraction over all generated samples
-    """
-    all_distances = []  # store distances to all dataset batches
-    generated_actions = gen_act
-    if normalized:
-        generated_actions = gen_act_norm
-    generated_actions = generated_actions.to(device)
-    
-    for batch in dataloader:
-        # send to device
-        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-        # normalize batch
-        if normalized:
-            batch = policy.normalizer.normalize(batch)
-        # batch['action']: shape (l, horizon, action_dim)
-        ref_actions = batch['action']  # (l, horizon, cfg.action_dim)
-        diff = generated_actions[:, None, :, :] - ref_actions[None, :, :, :]  # (m, l, horizon, action_dim)
-        dist_squared = torch.sum(diff ** 2, dim=(2, 3))  # (m, l)
-        dist = torch.sqrt(dist_squared)                  # (m, l)
-        all_distances.append(dist)
-
-    # Concatenate distances along dataset dimension
-    all_distances = torch.cat(all_distances, dim=1)  # (m, total_dataset_size)
-
-    # Find smallest and second smallest distance for each generated sample
-    smallest_vals, _ = torch.topk(all_distances, k=2, largest=False)  # (m, 2)
-
-    # Compute fraction
-    fraction = smallest_vals[:, 0] / smallest_vals[:, 1]  # (m,)
-
-    # Optionally count memorized samples
-    memorized_count = (fraction < threshold).sum().item()
-
-    mean_fraction = fraction.mean().item()
-    return mean_fraction, memorized_count
 
 # ----------------------------- Main -----------------------------
 @click.command()
@@ -211,10 +130,10 @@ def main(ckpts_dir, output_dir, device, override):
     # configure TopK manager for saving best checkpoint
     topk_manager = TopKCheckpointManager(
         save_dir=str(output_dir),
-        monitor_key="test_mean_score_avg",
+        monitor_key="test_mean_score",
         mode="max",
         k=1,
-        format_str='epoch={epoch:04d}-test_mean_score_avg={test_mean_score_avg:.3f}.ckpt'
+        format_str='epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
     )
 
     now = datetime.now().strftime("%Y.%m.%d_%H.%M.%S")
@@ -224,14 +143,20 @@ def main(ckpts_dir, output_dir, device, override):
     ckpt_files = list_ckpt_files(ckpts_dir)
     device = torch.device(device)
 
+    # # Trackers
+    # results_for_all_epochs = {"train_act_reconst_loss": [], "train_noise_pred_loss_SS": [],
+    #                           "test_act_reconst_loss": [], "test_noise_pred_loss_SS": [],
+    #                           "train_noise_pred_loss_AS": [], "test_noise_pred_loss_AS": [],
+    #                           "mean_memorization": [], "n_memorized": [],
+    #                           "mean_score_avg": [], "num_epochs": [],
+    #                           "memorization_fraction":[],
+    #                           "nll_test": [], "nll_train": []}
+
     # Trackers
-    results_for_all_epochs = {"train_act_reconst_loss": [], "train_noise_pred_loss_SS": [],
-                              "test_act_reconst_loss": [], "test_noise_pred_loss_SS": [],
-                              "train_noise_pred_loss_AS": [], "test_noise_pred_loss_AS": [],
-                              "mean_memorization": [], "n_memorized": [],
-                              "mean_score_avg": [], "num_epochs": [],
-                              "memorization_fraction":[],
-                              "nll_test": [], "nll_train": []}
+    results_for_all_epochs = {
+                              "test_noise_pred_loss": [],
+                              "test_mean_score": [], "num_epochs": [],
+                              "nll_test": []}
     sum_success_rate_last_10_epochs = 0.0
 
     for ckpt_path in ckpt_files:
@@ -262,116 +187,59 @@ def main(ckpts_dir, output_dir, device, override):
         # instantiate workspace and load payload
         workspace = instantiate_workspace_from_cfg(cfg, output_dir)
         workspace: BaseWorkspace
-        workspace.load_payload(payload, exclude_keys=None, include_keys=None)
+        workspace.load_payload(payload, exclude_keys=['optimizer','model'], include_keys=None)
 
         # choose policy (ema if configured)
         policy = workspace.model
-        if getattr(cfg.training, "use_ema", False):
+        if cfg.training.use_ema:
             policy = workspace.ema_model
 
         policy.to(device)
         policy.eval()
 
         # run env_runner repeated evaluations
-        runner_log, avg_success_rate, var_success_rate = run_env_runner_repeat(policy, cfg, output_dir, cfg.task.n_repeat_runner)
+        runner_log, success_rate = run_env_runner(policy, cfg, output_dir)
 
         # save best model via topk manager
-        success_info = {"test_mean_score_avg": float(avg_success_rate), "epoch": int(epoch)}
+        success_info = {"test_mean_score": float(success_rate), "epoch": int(epoch)}
         best_path = topk_manager.get_ckpt_path(success_info)
         if best_path is not None:
             workspace.save_checkpoint(path=best_path)
 
         # update running sum for last 10 epochs (preserve original logic)
         if epoch > cfg.training.num_epochs - 550:
-            sum_success_rate_last_10_epochs += avg_success_rate
+            sum_success_rate_last_10_epochs += success_rate
 
         # start_time = time.perf_counter()
         # prepare datasets (instantiate per-checkpoint in case cfg changed)
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseLowdimDataset)
-        train_dataloader = DataLoader(dataset, batch_size=1024, shuffle=False, pin_memory=False, persistent_workers=False)
-
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, batch_size=1024, shuffle=False, pin_memory=False, persistent_workers=False)
 
-        # evaluation of train and test splits
-        n_MC = 1
-
-        # train eval
-        train_noise_avg_SS, train_noise_var_SS, train_noise_avg_AS, train_noise_var_AS, train_rec_avg, train_rec_var = eval_network(policy, train_dataloader, cfg, device, cfg.task.n_repeat_runner, n_MC, normalized = False)
         # test eval
-        test_noise_avg_SS, test_noise_var_SS, test_noise_avg_AS, test_noise_var_AS, test_rec_avg, test_rec_var = eval_network(policy, val_dataloader, cfg, device, cfg.task.n_repeat_runner, n_MC, normalized = False)
-        # memorization eval for generated actions in env_runner 
-        #avg_memoraized, n_memorized = eval_memorization(policy, train_dataloader, runner_log['generated_actions'], runner_log['generated_actions_normalized'], True, device, threshold=0.5)
-        # memorization eval for generated actions given observations from test set
+        test_pred_noise_loss = eval_network(policy, val_dataloader, cfg, device)
+
         if isinstance(policy, BaseLowdimProbPolicy):
-            avg_memoraized, n_memorized, memorization_frac= policy.eval_memorization(val_dataloader, train_dataloader, stochastic.cfg.eval.stochastic, normalized = False, device, threshold=0.5)
-            NLL_test = policy.test_nll(val_dataloader, epoch, npoints=100, xinterval=None stochastic=cfg.eval.stochastic)
-            NLL_train = policy.test_nll(train_dataloader, epoch, npoints=100, xinterval=None stochastic=cfg.eval.stochastic)
+            NLL_test = 0 #policy.nll_bound(val_dataloader, epoch, npoints=100, stochastic=cfg.eval.stochastic)
         else:
-            avg_memoraized, n_memorized, memorization_frac= policy.eval_memorization(val_dataloader, train_dataloader, normalized = False, device, threshold=0.5)
-            NLL_test = policy.test_nll(val_dataloader, epoch, npoints=100, xinterval=None)
-            NLL_train = policy.test_nll(train_dataloader, epoch, npoints=100, xinterval=None)
-        # store per-epoch results
-        
-        # end_time = time.perf_counter()
-        # elapsed_time = end_time - start_time
-        # print (f"Elapsed time:{elapsed_time} seconds")
+            NLL_test = 0 #policy.nll_bound(val_dataloader, epoch, npoints=100)
         
         ## NLL evaluation
         epoch_key = f"model_at_epoch_{int(epoch):04d}"
         json_log[epoch_key] = {
-            "success_rate": {
-                "mean_score_avg": avg_success_rate,
-                "mean_score_var": var_success_rate,
-            },
-            "train": {
-                "loss_noise_pred_avg_SS": train_noise_avg_SS,
-                "loss_noise_pred_var_SS": train_noise_var_SS,
-                "loss_noise_pred_sd_SS": np.sqrt(train_noise_var_SS),
-                "loss_noise_pred_avg_AS": train_noise_avg_AS,
-                "loss_noise_pred_var_AS": train_noise_var_AS,
-                "loss_noise_pred_sd_AS": np.sqrt(train_noise_var_AS),
-                "action_reconst_loss_avg": train_rec_avg,
-                "action_reconst_loss_var": train_rec_var,
-                "action_reconst_loss_sd": np.sqrt(train_rec_var),
-                "nll_train": NLL_train
-            },
+            "success_rate": success_rate,
             "test": {
-                "loss_noise_pred_avg_SS": test_noise_avg_SS,
-                "loss_noise_pred_var_SS": test_noise_var_SS,
-                "loss_noise_pred_sd_SS": np.sqrt(test_noise_var_SS),
-                "loss_noise_pred_avg_AS": test_noise_avg_AS,
-                "loss_noise_pred_var_AS": test_noise_var_AS,
-                "loss_noise_pred_sd_AS": np.sqrt(test_noise_var_AS),
-                "action_reconst_loss_avg": test_rec_avg,
-                "action_reconst_loss_var": test_rec_var,
-                "action_reconst_loss_sd": np.sqrt(test_rec_var),
+                "loss_noise_pred": test_pred_noise_loss,
                 "nll_test": NLL_test
-            },
-            "memorization": {
-                "mean_fraction": avg_memoraized,
-                "n_memorized": n_memorized,
-                "memorization_fraction":memorization_frac
             }
         }
 
         # keep history for plotting / aggregation
-        results_for_all_epochs["train_act_reconst_loss"].append(train_rec_avg)
-        results_for_all_epochs["train_noise_pred_loss_SS"].append(train_noise_avg_SS)
-        results_for_all_epochs["train_noise_pred_loss_AS"].append(train_noise_avg_AS)
-        results_for_all_epochs["test_act_reconst_loss"].append(test_rec_avg)
-        results_for_all_epochs["test_noise_pred_loss_SS"].append(test_noise_avg_SS)
-        results_for_all_epochs["test_noise_pred_loss_AS"].append(test_noise_avg_AS)
-        results_for_all_epochs["mean_memorization"].append(avg_memoraized)
-        results_for_all_epochs["n_memorized"].append(n_memorized)
-        results_for_all_epochs["memorization_fraction"].append(memorization_frac)
-
-        results_for_all_epochs["mean_score_avg"].append(avg_success_rate)
+        results_for_all_epochs["test_noise_pred_loss"].append(test_pred_noise_loss)
+        results_for_all_epochs["test_mean_score"].append(success_rate)
         results_for_all_epochs["num_epochs"].append(epoch)
-
         results_for_all_epochs["nll_test"].append(NLL_test)
-        results_for_all_epochs["nll_train"].append(NLL_train)
 
         # write partial log after each epoch to be robust to crashes
         save_json_log(out_path, json_log)
@@ -392,19 +260,10 @@ def main(ckpts_dir, output_dir, device, override):
             torch.cuda.empty_cache()
 
     # final metadata
-    json_log["train_act_reconst_loss_over_epochs"] = results_for_all_epochs["train_act_reconst_loss"]
-    json_log["train_noise_pred_loss_SS_over_epochs"] = results_for_all_epochs["train_noise_pred_loss_SS"]
-    json_log["train_noise_pred_loss_AS_over_epochs"] = results_for_all_epochs["train_noise_pred_loss_AS"]
-    json_log["test_act_reconst_loss_over_epochs"] = results_for_all_epochs["test_act_reconst_loss"]
-    json_log["test_noise_pred_loss_SS_over_epochs"] = results_for_all_epochs["test_noise_pred_loss_SS"]
-    json_log["test_noise_pred_loss_AS_over_epochs"] = results_for_all_epochs["test_noise_pred_loss_AS"]
-    json_log["mean_memorization_over_epochs"] = results_for_all_epochs["mean_memorization"] 
-    json_log["n_memorized_over_epochs"] = results_for_all_epochs["n_memorized"]
-    json_log["memorization_fraction_over_epochs"] = results_for_all_epochs["memorization_fraction"]
-    json_log["mean_score_avg_over_epochs"] = results_for_all_epochs["mean_score_avg"]
+    json_log["test_noise_pred_loss_epochs"] = results_for_all_epochs["test_noise_pred_loss"]
+    json_log["test_mean_score_over_epochs"] = results_for_all_epochs["test_mean_score"]
     json_log["num_epochs"] = results_for_all_epochs["num_epochs"]
     json_log["nll_test_over_epochs"] = results_for_all_epochs["nll_test"]
-    json_log["nll_train_over_epochs"] = results_for_all_epochs["nll_train"]
 
     save_json_log(out_path, json_log)
     logger.info("Evaluation complete. Log written to %s", str(out_path))

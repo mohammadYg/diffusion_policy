@@ -13,6 +13,8 @@ fuse.cfg
 
 *.ai
 *.mp4
+*.png
+*.json
 
 # Generation results
 results/

@@ -122,7 +122,7 @@ def main(dp_checkpoint, bayes_checkpoint, output_dir):
     cls = hydra.utils.get_class(cfg_bayes._target_)
     workspace = cls(cfg_bayes, output_dir=output_dir)
     workspace: BaseWorkspace
-    workspace.load_payload(payload_bayes, exclude_keys=None, include_keys=None)
+    workspace.load_payload(payload_bayes, exclude_keys=['model', 'optimizer'], include_keys=None)
     Bayes_model = workspace.model.model
     if cfg_bayes.training.use_ema:
         Bayes_model = workspace.ema_model.model

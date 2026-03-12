@@ -18,11 +18,11 @@ env_runner:
   _target_: diffusion_policy.env_runner.robomimic_lowdim_runner.RobomimicLowdimRunner
   dataset_path: *dataset_path
   obs_keys: *obs_keys
-  n_train: 6
-  n_train_vis: 2
+  n_train: 0
+  n_train_vis: 0
   train_start_idx: 0
   n_test: 50
-  n_test_vis: 4
+  n_test_vis: 0
   test_start_seed: 100000
   max_steps: 700
   n_obs_steps: ${n_obs_steps}
@@ -33,7 +33,9 @@ env_runner:
   crf: 22
   past_action: ${past_action_visible}
   abs_action: *abs_action
-  n_envs: 28
+  n_envs: 1
+  disturbance_enabled: False
+  body_name: 'robot0_right_hand'
 # evaluation at this config requires a 16 core 64GB instance.
 
 dataset:
@@ -47,3 +49,5 @@ dataset:
   use_legacy_normalizer: False
   seed: 42
   val_ratio: 0.02
+  max_train_episodes: null
+  train_episodes_for_posterior: 0        # This is selected from training data.

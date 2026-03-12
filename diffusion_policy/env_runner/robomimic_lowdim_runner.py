@@ -50,12 +50,9 @@ class DisturbanceWrapper(gym.Wrapper):
         self.active = False
 
         # disturbance params
-        self.start1_step = 0
-        self.start2_step = 0
-        self.end1_step = 0
-        self.end2_step = 0
-        self.force1 = None
-        self.force2 = None
+        self.start_step = 0
+        self.end_step = 0
+        self.force = None
 
         # bookkeeping
         self.step_count = 0
@@ -78,25 +75,20 @@ class DisturbanceWrapper(gym.Wrapper):
 
         self.rng = np.random.RandomState(seed)
 
-        self.start1_step = self.rng.randint(5, 10)
-        self.start2_step = 0 #self.rng.randint(70, 85)
-        duration = 6
+        self.start_step = self.rng.randint(5, 15)
+        duration = 5
         #duration = self.rng.randint(10, 40)
-        self.end1_step = self.start1_step + duration
-        self.end2_step = self.start2_step + duration
+        self.end_step = self.start_step + duration
 
-        direction1 = self.rng.randn(3)
-        direction1 /= np.linalg.norm(direction1) + 1e-8
+        direction = self.rng.uniform(-1, 1, size=3)
+        direction = np.divide(direction, np.abs(direction))
 
-        direction2 = self.rng.randn(3)
-        direction2 /= np.linalg.norm(direction2) + 1e-8
-
-        self.force1 = np.array([direction1[0]*200, direction1[1]*200, direction1[2]*200 if direction1[2]>=0 else direction1[2]*50])
-        self.force2 = np.array([0,0,0]) #np.array([direction2[0]*250, direction2[1]*250, direction2[2]*250 if direction2[2]>=0 else direction2[2]*100])
-
+        self.force = [self.rng.uniform(100, 200, size=1)*direction[0], self.rng.uniform(100, 200, size=1)*direction[1], self.rng.uniform(50, 100)*direction[2] if direction[2] > 0 else 50]
         self.active = True
 
     def reset(self, **kwargs):
+        # for i in range(self.env.env.env.sim.model.nbody):
+        #     print(self.env.env.env.sim.model.body_id2name(i))
         self.step_count = 0
         if self.body_name is not None:
             self._clear_force()
@@ -107,10 +99,8 @@ class DisturbanceWrapper(gym.Wrapper):
         Apply force BEFORE stepping physics.
         """
         if self.enabled and self.active:
-            if self.start1_step <= self.step_count < self.end1_step:
-                self._apply_force(force=self.force1)
-            elif self.start2_step <= self.step_count < self.end2_step:
-                self._apply_force(force=self.force2)
+            if self.start_step <= self.step_count < self.end_step:
+                self._apply_force(force=self.force)
             else:
                 self._clear_force()
 
@@ -353,6 +343,8 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         self.abs_action = abs_action
         self.tqdm_interval_sec = tqdm_interval_sec
         self.current_epoch = 0
+        self.rng = torch.Generator(device="cuda")
+        self.rng.manual_seed(100)
 
     def make_video_filename(self, *, epoch, idx):
             return f"epoch={epoch:04d}_seed={idx:05d}.mp4"
@@ -415,8 +407,14 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                         device=device))
 
                 # run policy
-                with torch.no_grad():
-                    action_dict = policy.predict_action(obs_dict)
+                with torch.no_grad():                 
+                    noisy_obs_dict = {}
+                    eps = 1e-6
+                    relative_noise = 0.0  # 5% noise
+                    # scale = relative_noise * torch.clamp(torch.abs(value), min=eps)
+                    noise = 1 + relative_noise * torch.randn(obs_dict["obs"].shape, generator=self.rng, device=device)
+                    noisy_obs_dict["obs"] = obs_dict["obs"] * noise
+                    action_dict = policy.predict_action(noisy_obs_dict)
 
                 # device_transfer
                 np_action_dict = dict_apply(action_dict,
@@ -538,7 +536,13 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
 
                 # run policy
                 with torch.no_grad():
-                    action_dict = policy.predict_action(obs_dict, stochastic=stochastic)
+                    noisy_obs_dict = {}
+                    eps = 1e-6
+                    relative_noise = 0.0  # 5% noise
+                    # scale = relative_noise * torch.clamp(torch.abs(value), min=eps)
+                    noise = 1 + relative_noise * torch.randn(obs_dict["obs"].shape, generator=self.rng, device=device)
+                    noisy_obs_dict["obs"] = obs_dict["obs"] * noise
+                    action_dict = policy.predict_action(noisy_obs_dict, stochastic=stochastic)
 
                 # device_transfer
                 np_action_dict = dict_apply(action_dict,

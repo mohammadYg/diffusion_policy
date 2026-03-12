@@ -195,10 +195,10 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
             **cfg.checkpoint_val.topk
         )
 
-        # # configure checkpoint
-        # topk_manager_every = CheckpointManager(
-        #     save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_every.topk
-        # )
+        # configure checkpoint
+        topk_manager_every = CheckpointManager(
+            save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_every.topk
+        )
 
         # device transfer
         device = torch.device(cfg.training.device)
@@ -302,7 +302,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 policy.eval()
 
                 # run rollout
-                if (self.epoch % cfg.training.rollout_every) == 0 and (self.epoch>cfg.training.num_epochs-500):
+                if (self.epoch % cfg.training.rollout_every) == 0 and (self.epoch>0):
                     env_runner.current_epoch = self.epoch
                     runner_log = env_runner.run_prob(policy, stochastic= cfg.eval.stochastic)
                     # log all
@@ -335,7 +335,8 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             step_log['test_noise_pred_loss'] = noise_pred_loss
                             topk_ckpt_path_val = topk_manager_noise_pred.get_ckpt_path(step_log)
                             if topk_ckpt_path_val is not None:
-                                self.save_checkpoint(path=topk_ckpt_path_val, exclude_keys=['model', 'optimizer'])
+                                #self.save_checkpoint(path=topk_ckpt_path_val, exclude_keys=['model', 'optimizer'])
+                                self.save_checkpoint(path=topk_ckpt_path_val)
                         
                 # Compute upper bound on NLL
                 if (self.epoch % cfg.training.nll_every)==0:
@@ -343,22 +344,24 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     step_log['test_nll_bpd'] = NLL_test 
                     topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
                     if topk_ckpt_path_nll is not None:
-                        self.save_checkpoint(path=topk_ckpt_path_nll, exclude_keys=['model', 'optimizer'])
+                        #self.save_checkpoint(path=topk_ckpt_path_nll, exclude_keys=['model', 'optimizer'])
+                        self.save_checkpoint(path=topk_ckpt_path_nll)
                 
-                ## Compute Reconstruction loss
-                if (self.epoch % cfg.training.reconst_loss_every)==0:
-                    reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
-                    step_log['test_action_reconst_loss'] = reconst_loss.item()
+                # ## Compute Reconstruction loss
+                # if (self.epoch % cfg.training.reconst_loss_every)==0:
+                #     reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
+                #     step_log['test_action_reconst_loss'] = reconst_loss.item()
 
-                # log learned rho values
-                if (self.epoch % cfg.training.rho_log_every) == 0:
-                    log_rho[self.epoch] = policy.rho_stats()
+                # # log learned rho values
+                # if (self.epoch % cfg.training.rho_log_every) == 0:
+                #     log_rho[self.epoch] = policy.rho_stats()
 
                 # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0 and (self.epoch>cfg.training.num_epochs-500):
+                if (self.epoch % cfg.training.checkpoint_every) == 0 and (self.epoch>0):
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
-                        self.save_checkpoint(exclude_keys=['model', 'optimizer'])
+                        #self.save_checkpoint(exclude_keys=['model', 'optimizer'])
+                        self.save_checkpoint()
 
                     if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
@@ -374,7 +377,8 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     # therefore at this point the file might have been empty!
                     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
                     if topk_ckpt_path is not None:
-                        self.save_checkpoint(path=topk_ckpt_path,exclude_keys=['model', 'optimizer'])
+                        #self.save_checkpoint(path=topk_ckpt_path,exclude_keys=['model', 'optimizer'])
+                        self.save_checkpoint(path=topk_ckpt_path)
 
                
                 #========= eval end for this epoch ==========
@@ -384,16 +388,16 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 # if ((self.epoch % cfg.training.checkpoint_every) == 0):
                 #     # checkpointing
                 #     if cfg.checkpoint_every.save_last_ckpt:
-                #         self.save_checkpoint(exclude_keys=['model', 'optimizer'])
-                #         #self.save_weights_only()
+                #         #self.save_checkpoint(exclude_keys=['model', 'optimizer'])
+                #         self.save_checkpoint()
                 #     if cfg.checkpoint_every.save_last_snapshot:
                 #         self.save_snapshot()
 
                 #     topk_ckpt_path = topk_manager_every.get_ckpt_path(step_log)
                 #     if topk_ckpt_path is not None:
-                #         self.save_checkpoint(path=topk_ckpt_path, exclude_keys=['model', 'optimizer'])
-                #         #self.save_weights_only(path=topk_ckpt_path)
-
+                #         #self.save_checkpoint(path=topk_ckpt_path, exclude_keys=['model', 'optimizer'])
+                #         self.save_checkpoint(path=topk_ckpt_path)
+                        
                 # end of epoch
                 # log of last step is combined with validation and rollout
                 if local_epoch_idx == cfg.training.num_epochs-1:

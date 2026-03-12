@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader
 from omegaconf import OmegaConf
 import numpy as np
 import tqdm
+import matplotlib.pyplot as plt
 
 @click.command()
 @click.option('-c', '--checkpoint', required=True)
@@ -50,7 +51,7 @@ def main(checkpoint, output_dir, device, override):
     cls = hydra.utils.get_class(cfg._target_)
     workspace = cls(cfg, output_dir=output_dir)
     workspace: BaseWorkspace
-    workspace.load_payload(payload, exclude_keys=None, include_keys=None)
+    workspace.load_payload(payload, exclude_keys=['model', 'optimizer'], include_keys=None)
     
     # get policy from workspace
     policy = workspace.model
@@ -82,6 +83,16 @@ def main(checkpoint, output_dir, device, override):
     # configure dataset
     dataset: BaseLowdimDataset
     dataset = hydra.utils.instantiate(cfg.task.dataset)
+    plt.figure(figsize=(10, 5))
+    x_data = []
+    y_data = []
+    for i in range (len(dataset)):
+        x_data.append(dataset[i]["obs"][0][0].cpu().numpy())
+        y_data.append(dataset[i]["obs"][0][1].cpu().numpy())
+
+    plt.scatter(x_data, y_data)
+    plt.show()
+    plt.savefig(os.path.join(output_dir, 'dataset_visualization.png'))
     assert isinstance(dataset, BaseLowdimDataset)
 
     # configure validation dataset

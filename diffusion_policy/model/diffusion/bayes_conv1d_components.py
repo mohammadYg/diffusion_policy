@@ -91,6 +91,7 @@ class Gaussian(nn.Module):
         # We use rho instead of sigma so that sigma is always positive during
         # the optimisation. Specifically, we use sigma = log(exp(rho)+1)
         return torch.nn.functional.softplus(self.rho)
+        #return torch.exp(self.rho)
 
     def sample(self):
         # Return a sample from the Gaussian distribution

@@ -8,6 +8,8 @@ from omegaconf import OmegaConf
 import dill
 import torch
 import threading
+import numpy as np
+import random
 
 
 class BaseWorkspace:
@@ -32,7 +34,7 @@ class BaseWorkspace:
         """
         pass
 
-    def save_checkpoint(self, path=None, tag='latest', 
+    def save_checkpoint(self, path=None, tag='latest', ddp=False,
             exclude_keys=None,
             include_keys=None,
             use_thread=True):
@@ -49,61 +51,43 @@ class BaseWorkspace:
         payload = {
             'cfg': self.cfg,
             'state_dicts': dict(),
-            'pickles': dict()
-        } 
+            'pickles': dict(),
+            'last_epoch': self.epoch + 1,
+            'last_global_step': self.global_step + 1
+        }
+
+        #save randomness
+        payload['rng_state'] = {
+            'cpu_rng_state': torch.get_rng_state(),
+            'gpu_rng_state': torch.cuda.get_rng_state(),
+            'numpy_rng_state': np.random.get_state(),
+            'py_rng_state': random.getstate()
+        }
 
         for key, value in self.__dict__.items():
             if hasattr(value, 'state_dict') and hasattr(value, 'load_state_dict'):
                 # modules, optimizers and samplers etc
-                if key not in exclude_keys:
+                if key not in exclude_keys and key=='model':
                     if use_thread:
-                        payload['state_dicts'][key] = _copy_to_cpu(value.state_dict())
+                        payload['state_dicts'][key] = _copy_to_cpu(value.module.state_dict() if ddp else value.state_dict()) 
+                    else:
+                        payload['state_dicts'][key] = value.module.state_dict() if ddp else value.state_dict()
+                if key not in exclude_keys and key!='model':
+                    if use_thread:
+                        payload['state_dicts'][key] = _copy_to_cpu(value.state_dict()) 
                     else:
                         payload['state_dicts'][key] = value.state_dict()
             elif key in include_keys:
-                payload['pickles'][key] = dill.dumps(value)
+                if key=='model':
+                    payload['pickles'][key] = dill.dumps(value.module if ddp else value)
+                else:
+                    payload['pickles'][key] = dill.dumps(value)
         if use_thread:
             self._saving_thread = threading.Thread(
                 target=lambda : torch.save(payload, path.open('wb'), pickle_module=dill))
             self._saving_thread.start()
         else:
             torch.save(payload, path.open('wb'), pickle_module=dill)
-        return str(path.absolute())
-    
-    def save_weights_only(
-        self,
-        path=None,
-        tag="latest",
-    ):
-        # resolve path (same behavior as save_checkpoint)
-        if path is None:
-            path = pathlib.Path(self.output_dir).joinpath(
-                "checkpoints", f"{tag}.pt"
-            )
-        else:
-            path = pathlib.Path(path)
-
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        # choose which weights to save
-        if getattr(self, "ema_model", None) is not None:
-            state_dict = self.ema_model.state_dict()
-            key = "ema_model"
-        else:
-            state_dict = self.model.state_dict()
-            key = "model"
-
-        # move tensors to cpu for portability & smaller GPU memory use
-        state_dict = {k: v.detach().cpu() for k, v in state_dict.items()}
-
-        # save
-        torch.save(
-            {
-                key: state_dict
-            },
-            path.open("wb")
-        )
-
         return str(path.absolute())
 
     def get_checkpoint_path(self, tag='latest'):
@@ -121,7 +105,15 @@ class BaseWorkspace:
         for key in include_keys:
             if key in payload['pickles']:
                 self.__dict__[key] = dill.loads(payload['pickles'][key])
-    
+        # load checkpoint
+        self.epoch = payload['last_epoch']
+        self.global_step = payload['last_global_step']
+        # load randomness
+        torch.set_rng_state(payload['rng_state']['cpu_rng_state'])
+        torch.cuda.set_rng_state(payload['rng_state']['gpu_rng_state'])
+        np.random.set_state(payload['rng_state']['numpy_rng_state'])
+        random.setstate(payload['rng_state']['py_rng_state'])
+
     def load_checkpoint(self, path=None, tag='latest',
             exclude_keys=None, 
             include_keys=None, 

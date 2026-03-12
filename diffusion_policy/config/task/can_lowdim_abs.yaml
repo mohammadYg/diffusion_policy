@@ -10,6 +10,7 @@ dataset_type: &dataset_type ph
 dataset_path: &dataset_path data/robomimic/datasets/${task.task_name}/${task.dataset_type}/low_dim_abs.hdf5
 abs_action: &abs_action True
 
+#object_name: Can
 env_runner:
   _target_: diffusion_policy.env_runner.robomimic_lowdim_runner.RobomimicLowdimRunner
   dataset_path: *dataset_path
