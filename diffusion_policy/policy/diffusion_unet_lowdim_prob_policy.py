@@ -345,7 +345,7 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         scheduler_alpha = self.noise_scheduler.alphas_cumprod.to(self.device) # (T,)
         diff = torch.abs(alpha[..., None] - scheduler_alpha)
         timesteps = diff.argmin(dim=-1)  # (B, K)
-
+        #print (timesteps)
         eps = torch.randn_like(x)
 
         noisy_x = self.noise_scheduler.add_noise(

@@ -64,16 +64,13 @@ def instantiate_workspace_from_cfg(cfg: OmegaConf, output_dir: Path) -> BaseWork
     workspace = cls(cfg, output_dir=str(output_dir))
     return workspace
 
-def run_env_runner(policy, cfg, output_dir: Path) -> Tuple[dict, float]:
+def run_env_runner(env_runner, policy, cfg) -> Tuple[dict, float]:
     """Run the env_runner n_repeat times and return mean and variance of "test/mean_score"."""
-    # instantiate runner once per evaluation (cheaper)
-    env_runner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir))
     if isinstance(policy, BaseLowdimProbPolicy):
         runner_log = env_runner.run_prob(policy, cfg.eval.stochastic)
     else:
         runner_log = env_runner.run(policy)
-    score=runner_log["test/mean_score"]
-
+    score = runner_log["test/mean_score"]
     return runner_log, score.item()
 
 
@@ -143,21 +140,31 @@ def main(ckpts_dir, output_dir, device, override):
     ckpt_files = list_ckpt_files(ckpts_dir)
     device = torch.device(device)
 
-    # # Trackers
-    # results_for_all_epochs = {"train_act_reconst_loss": [], "train_noise_pred_loss_SS": [],
-    #                           "test_act_reconst_loss": [], "test_noise_pred_loss_SS": [],
-    #                           "train_noise_pred_loss_AS": [], "test_noise_pred_loss_AS": [],
-    #                           "mean_memorization": [], "n_memorized": [],
-    #                           "mean_score_avg": [], "num_epochs": [],
-    #                           "memorization_fraction":[],
-    #                           "nll_test": [], "nll_train": []}
-
     # Trackers
     results_for_all_epochs = {
                               "test_noise_pred_loss": [],
                               "test_mean_score": [], "num_epochs": [],
                               "nll_test": []}
     sum_success_rate_last_10_epochs = 0.0
+
+    # instantiate env_runner
+    cfg = load_payload(ckpt_files[-1])['cfg']
+    # apply overrides
+    if override:
+        override_cfg = OmegaConf.from_dotlist(list(override))
+        cfg = OmegaConf.merge(cfg, override_cfg)
+        
+    env_runner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir))
+
+    # prepare datasets (instantiate per-checkpoint in case cfg changed)
+    dataset = hydra.utils.instantiate(cfg.task.dataset)
+    assert isinstance(dataset, BaseLowdimDataset)
+    val_dataset = dataset.get_validation_dataset()
+    val_dataloader = DataLoader(val_dataset, batch_size=1024, shuffle=False, pin_memory=False, persistent_workers=False)
+    ## configure dataset for covariance_spectrum
+    cov_dataloader = DataLoader(dataset, batch_size=len(dataset), 
+                                num_workers=1,   pin_memory = True, 
+                                persistent_workers = False)
 
     for ckpt_path in ckpt_files:
         ckpt_name = ckpt_path.name
@@ -174,15 +181,9 @@ def main(ckpts_dir, output_dir, device, override):
         logger.info("Evaluating checkpoint %s (epoch %d)", ckpt_name, epoch)
 
         payload = load_payload(ckpt_path)
-        cfg = payload.get("cfg")
         if cfg is None:
             logger.warning("No cfg in payload %s, skipping", ckpt_name)
             continue
-
-        # apply overrides
-        if override:
-            override_cfg = OmegaConf.from_dotlist(list(override))
-            cfg = OmegaConf.merge(cfg, override_cfg)
 
         # instantiate workspace and load payload
         workspace = instantiate_workspace_from_cfg(cfg, output_dir)
@@ -198,7 +199,7 @@ def main(ckpts_dir, output_dir, device, override):
         policy.eval()
 
         # run env_runner repeated evaluations
-        runner_log, success_rate = run_env_runner(policy, cfg, output_dir)
+        runner_log, success_rate = run_env_runner(env_runner, policy, cfg)
 
         # save best model via topk manager
         success_info = {"test_mean_score": float(success_rate), "epoch": int(epoch)}
@@ -210,20 +211,16 @@ def main(ckpts_dir, output_dir, device, override):
         if epoch > cfg.training.num_epochs - 550:
             sum_success_rate_last_10_epochs += success_rate
 
-        # start_time = time.perf_counter()
-        # prepare datasets (instantiate per-checkpoint in case cfg changed)
-        dataset = hydra.utils.instantiate(cfg.task.dataset)
-        assert isinstance(dataset, BaseLowdimDataset)
-        val_dataset = dataset.get_validation_dataset()
-        val_dataloader = DataLoader(val_dataset, batch_size=1024, shuffle=False, pin_memory=False, persistent_workers=False)
-
+        # compute covariance_spectrum of the whole training data
+        policy.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
+       
         # test eval
         test_pred_noise_loss = eval_network(policy, val_dataloader, cfg, device)
 
         if isinstance(policy, BaseLowdimProbPolicy):
-            NLL_test = 0 #policy.nll_bound(val_dataloader, epoch, npoints=100, stochastic=cfg.eval.stochastic)
+            NLL_test = policy.nll_bound(val_dataloader, epoch, npoints=100, stochastic=cfg.eval.stochastic)
         else:
-            NLL_test = 0 #policy.nll_bound(val_dataloader, epoch, npoints=100)
+            NLL_test = policy.nll_bound(val_dataloader, epoch, npoints=100)
         
         ## NLL evaluation
         epoch_key = f"model_at_epoch_{int(epoch):04d}"
@@ -231,7 +228,7 @@ def main(ckpts_dir, output_dir, device, override):
             "success_rate": success_rate,
             "test": {
                 "loss_noise_pred": test_pred_noise_loss,
-                "nll_test": NLL_test
+                "nll_test": NLL_test.item()
             }
         }
 
@@ -239,7 +236,7 @@ def main(ckpts_dir, output_dir, device, override):
         results_for_all_epochs["test_noise_pred_loss"].append(test_pred_noise_loss)
         results_for_all_epochs["test_mean_score"].append(success_rate)
         results_for_all_epochs["num_epochs"].append(epoch)
-        results_for_all_epochs["nll_test"].append(NLL_test)
+        results_for_all_epochs["nll_test"].append(NLL_test.item())
 
         # write partial log after each epoch to be robust to crashes
         save_json_log(out_path, json_log)
@@ -248,10 +245,7 @@ def main(ckpts_dir, output_dir, device, override):
         try:
             del policy
             del workspace
-            del dataset
-            del val_dataset
             del payload
-            del cfg
         except Exception:
             pass
 
