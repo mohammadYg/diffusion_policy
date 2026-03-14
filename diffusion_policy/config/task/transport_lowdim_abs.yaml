@@ -34,8 +34,8 @@ env_runner:
   past_action: ${past_action_visible}
   abs_action: *abs_action
   n_envs: 1
-  disturbance_enabled: False
-  body_name: 'robot0_right_hand'
+  noise_enabled: False
+  relative_noise: 0.0'
 # evaluation at this config requires a 16 core 64GB instance.
 
 dataset:

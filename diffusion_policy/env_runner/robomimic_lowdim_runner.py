@@ -40,84 +40,37 @@ def create_env(env_meta, obs_keys):
     )
     return env
 
-class DisturbanceWrapper(gym.Wrapper):
-    def __init__(self, env, body_name: str):
+class ObservationNoiseWrapper(gym.Wrapper):
+    def __init__(self, env, relative_noise=0.0):
         super().__init__(env)
-        self.body_name = body_name
-
-        # runtime flags
-        self.enabled = False
-        self.active = False
-
-        # disturbance params
-        self.start_step = 0
-        self.end_step = 0
-        self.force = None
-
-        # bookkeeping
-        self.step_count = 0
+        self.relative_noise = relative_noise
         self.rng = None
 
     def configure(self, *, seed: int, enabled: bool):
-        """
-        Called from init_fn (per-env, per-episode)
-        """
         self.enabled = enabled
-        self.step_count = 0
-
-        if not enabled:
-            self.active = False
-            return
-
-        if self.body_name is None or self.body_name not in self.env.env.env.sim.model.body_names:
-            print("AVAILABLE BODIES:", self.env.env.env.sim.model.body_names)
-            raise AssertionError(f"Body {self.body_name} not found")
-
-        self.rng = np.random.RandomState(seed)
-
-        self.start_step = self.rng.randint(5, 15)
-        duration = 5
-        #duration = self.rng.randint(10, 40)
-        self.end_step = self.start_step + duration
-
-        direction = self.rng.uniform(-1, 1, size=3)
-        direction = np.divide(direction, np.abs(direction))
-
-        self.force = [self.rng.uniform(100, 200, size=1)*direction[0], self.rng.uniform(100, 200, size=1)*direction[1], self.rng.uniform(50, 100)*direction[2] if direction[2] > 0 else 50]
-        self.active = True
+        if enabled:
+            self.rng = np.random.RandomState(seed)
 
     def reset(self, **kwargs):
-        # for i in range(self.env.env.env.sim.model.nbody):
-        #     print(self.env.env.env.sim.model.body_id2name(i))
-        self.step_count = 0
-        if self.body_name is not None:
-            self._clear_force()
-        return self.env.reset()
+        obs = self.env.reset()
+        return self._add_noise(obs)
 
     def step(self, action):
-        """
-        Apply force BEFORE stepping physics.
-        """
-        if self.enabled and self.active:
-            if self.start_step <= self.step_count < self.end_step:
-                self._apply_force(force=self.force)
-            else:
-                self._clear_force()
-
         obs, reward, done, info = self.env.step(action)
-        self.step_count += 1
+        obs = self._add_noise(obs)
         return obs, reward, done, info
 
-    def _apply_force(self, force: np.ndarray):
-        sim = self.env.env.env.sim
-        body_id = sim.model.body_name2id(self.body_name)
-        sim.data.xfrc_applied[body_id, :3] = force
-        sim.data.xfrc_applied[body_id, 3:] = 0.0
+    def _add_noise(self, obs):
+        if not self.enabled or self.relative_noise == 0:
+            return obs
 
-    def _clear_force(self):
-        sim = self.env.env.env.sim
-        body_id = sim.model.body_name2id(self.body_name)
-        sim.data.xfrc_applied[body_id, :] = 0.0
+        obs = obs.copy()
+
+        eps = 1e-6
+        scale = self.relative_noise * np.maximum(np.abs(obs), eps)
+        obs = obs + scale * self.rng.randn(*obs.shape)
+
+        return obs
 
 class RobomimicLowdimRunner(BaseLowdimRunner):
     """
@@ -146,8 +99,8 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             abs_action=False,
             tqdm_interval_sec=5.0,
             n_envs=None,
-            disturbance_enabled=False,
-            body_name='robot0_right_hand',
+            noise_enabled=False,
+            relative_noise=0.0,
         ):
         """
         Assuming:
@@ -206,10 +159,10 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                     render_camera_name=render_camera_name
                 )
             
-            env = DisturbanceWrapper(
-                            env,
-                            body_name=body_name
-                        )
+            env = ObservationNoiseWrapper(
+                env,
+                relative_noise=relative_noise
+            )
                 
             env = VideoRecordingWrapper(
                                 env,
@@ -266,13 +219,13 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                     assert isinstance(env.env.env.env, RobomimicLowdimWrapper)
                     env.env.env.env.init_state = init_state
 
-                    # configure disturbance
-                    disturbance_wrapper = env.env.env                           # unwrap MultiStep → Video → Disturbance
-                    assert isinstance(disturbance_wrapper, DisturbanceWrapper)
+                    # configure noise wrapper
+                    noise_wrapper = env.env.env                           # unwrap MultiStep → Video → ObservationNoise
+                    assert isinstance(noise_wrapper, ObservationNoiseWrapper)
 
-                    disturbance_wrapper.configure(
+                    noise_wrapper.configure(
                         seed=train_idx,
-                        enabled=disturbance_enabled
+                        enabled=noise_enabled
                     )
 
                 env_seeds.append(train_idx)
@@ -309,12 +262,12 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                 assert isinstance(env.env.env.env, RobomimicLowdimWrapper)
                 env.env.env.env.init_state = None
                 env.seed(seed)
-                disturbance_wrapper = env.env.env
-                assert isinstance(disturbance_wrapper, DisturbanceWrapper)
+                noise_wrapper = env.env.env
+                assert isinstance(noise_wrapper, ObservationNoiseWrapper)
 
-                disturbance_wrapper.configure(
+                noise_wrapper.configure(
                     seed=seed,
-                    enabled=disturbance_enabled
+                    enabled=noise_enabled
                 )
 
             env_seeds.append(seed)
@@ -408,13 +361,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
 
                 # run policy
                 with torch.no_grad():                 
-                    noisy_obs_dict = {}
-                    eps = 1e-6
-                    relative_noise = 0.0  # 5% noise
-                    # scale = relative_noise * torch.clamp(torch.abs(value), min=eps)
-                    noise = 1 + relative_noise * torch.randn(obs_dict["obs"].shape, generator=self.rng, device=device)
-                    noisy_obs_dict["obs"] = obs_dict["obs"] * noise
-                    action_dict = policy.predict_action(noisy_obs_dict)
+                    action_dict = policy.predict_action(obs_dict)
 
                 # device_transfer
                 np_action_dict = dict_apply(action_dict,
@@ -536,13 +483,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
 
                 # run policy
                 with torch.no_grad():
-                    noisy_obs_dict = {}
-                    eps = 1e-6
-                    relative_noise = 0.0  # 5% noise
-                    # scale = relative_noise * torch.clamp(torch.abs(value), min=eps)
-                    noise = 1 + relative_noise * torch.randn(obs_dict["obs"].shape, generator=self.rng, device=device)
-                    noisy_obs_dict["obs"] = obs_dict["obs"] * noise
-                    action_dict = policy.predict_action(noisy_obs_dict, stochastic=stochastic)
+                    action_dict = policy.predict_action(obs_dict, stochastic=stochastic)
 
                 # device_transfer
                 np_action_dict = dict_apply(action_dict,

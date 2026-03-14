@@ -159,12 +159,12 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 cfg.ema,
                 model=self.ema_model)
 
-        # configure env runner
-        env_runner: BaseLowdimRunner
-        env_runner = hydra.utils.instantiate(
-            cfg.task.env_runner,
-            output_dir=self.output_dir)
-        assert isinstance(env_runner, BaseLowdimRunner)
+        # # configure env runner
+        # env_runner: BaseLowdimRunner
+        # env_runner = hydra.utils.instantiate(
+        #     cfg.task.env_runner,
+        #     output_dir=self.output_dir)
+        # assert isinstance(env_runner, BaseLowdimRunner)
 
         # configure logging
         wandb_run = wandb.init(
@@ -302,14 +302,14 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 #     policy = self.ema_model
                 # policy.eval()
 
-                # # run rollout
-                # if (self.epoch % cfg.training.rollout_every) == 0 and (self.epoch>0):
-                #     env_runner.current_epoch = self.epoch
-                #     runner_log = env_runner.run_prob(policy, stochastic= cfg.eval.stochastic)
-                #     # log all
-                #     step_log.update(runner_log)
-                #     if self.epoch>cfg.training.num_epochs-500:
-                #         last_ten_success_rate.append(step_log["test/mean_score"])
+                # # # run rollout
+                # # if (self.epoch % cfg.training.rollout_every) == 0 and (self.epoch>0):
+                # #     env_runner.current_epoch = self.epoch
+                # #     runner_log = env_runner.run_prob(policy, stochastic= cfg.eval.stochastic)
+                # #     # log all
+                # #     step_log.update(runner_log)
+                # #     if self.epoch>cfg.training.num_epochs-500:
+                # #         last_ten_success_rate.append(step_log["test/mean_score"])
 
                 # # run validation
                 # if (self.epoch % cfg.training.val_every) == 0:
