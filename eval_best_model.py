@@ -258,6 +258,7 @@ def main(ckpts_dir, output_dir, device, override):
     json_log["test_mean_score_over_epochs"] = results_for_all_epochs["test_mean_score"]
     json_log["num_epochs"] = results_for_all_epochs["num_epochs"]
     json_log["nll_test_over_epochs"] = results_for_all_epochs["nll_test"]
+    json_log["mean_success_rate_last_10_checkpoints"] = sum_success_rate_last_10_epochs/10
 
     save_json_log(out_path, json_log)
     logger.info("Evaluation complete. Log written to %s", str(out_path))
