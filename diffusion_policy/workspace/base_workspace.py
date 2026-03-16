@@ -105,9 +105,11 @@ class BaseWorkspace:
         for key in include_keys:
             if key in payload['pickles']:
                 self.__dict__[key] = dill.loads(payload['pickles'][key])
+        
         # load checkpoint
         self.epoch = payload['last_epoch']
         self.global_step = payload['last_global_step']
+        
         # load randomness
         torch.set_rng_state(payload['rng_state']['cpu_rng_state'])
         torch.cuda.set_rng_state(payload['rng_state']['gpu_rng_state'])

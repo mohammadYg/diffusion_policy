@@ -33,7 +33,7 @@ env_runner:
   abs_action: *abs_action
   n_envs: 2
   noise_enabled: False
-  relative_noise: 0.0'
+  relative_noise: 0.0
 
 dataset:
   _target_: diffusion_policy.dataset.robomimic_replay_lowdim_dataset.RobomimicReplayLowdimDataset

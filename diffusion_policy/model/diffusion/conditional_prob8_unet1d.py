@@ -63,6 +63,14 @@ class ProbConditionalResidualBlock1D(nn.Module):
         self.residual_conv = nn.Conv1d(in_channels, out_channels, 1) \
             if in_channels != out_channels else nn.Identity()
 
+    def sample_weights(self):
+        self.blocks[0].sample_weights()
+        self.blocks[1].sample_weights()
+
+    def clear_sample(self):
+        self.blocks[0].clear_sample()
+        self.blocks[1].clear_sample()
+
     def forward(self, x, cond, stochastic=False):
         """
         x : [ batch_size x in_channels x horizon ]
@@ -299,6 +307,58 @@ class BayesianConditionalUnet1D(nn.Module):
         self.rho_prior = rho_prior
         self.rho_post = rho_post
         self.prior_dist = prior_dist
+    
+    def sample_weights(self):
+        # Sample weights for all probabilistic layers in the model
+        for layer in self.diffusion_step_encoder:
+            if hasattr(layer, "sample_weights"):
+                layer.sample_weights()
+        
+        if self.local_cond_encoder is not None:
+            for layer in self.local_cond_encoder:
+                layer.sample_weights()
+
+        for layer in self.mid_modules:
+            layer.sample_weights()
+        
+        for module_list in self.down_modules:
+            for layer in module_list:
+                if hasattr(layer, "sample_weights"):
+                    layer.sample_weights()
+        
+        for module_list in self.up_modules:
+            for layer in module_list:
+                if hasattr(layer, "sample_weights"):
+                    layer.sample_weights()
+    
+        if hasattr(self.final_conv[0], "sample_weights"): self.final_conv[0].sample_weights()
+        if hasattr(self.final_conv[1], "sample_weights"): self.final_conv[1].sample_weights()
+
+    def clear_sampled_weights(self):
+        # Clear sampled weights for all probabilistic layers in the model
+        for layer in self.diffusion_step_encoder:
+            if hasattr(layer, "clear_sample"):
+                layer.clear_sample()
+
+        if self.local_cond_encoder is not None:
+            for layer in self.local_cond_encoder:
+                layer.clear_sample()
+
+        for layer in self.mid_modules:
+            layer.clear_sample()
+        
+        for module_list in self.down_modules:
+            for layer in module_list:
+                if hasattr(layer, "clear_sample"):
+                    layer.clear_sample()
+
+        for module_list in self.up_modules:
+            for layer in module_list:
+                if hasattr(layer, "clear_sample"):
+                    layer.clear_sample()
+        
+        if hasattr(self.final_conv[0], "clear_sample"): self.final_conv[0].clear_sample()
+        if hasattr(self.final_conv[1], "clear_sample"): self.final_conv[1].clear_sample()
 
     def forward(
         self,

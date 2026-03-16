@@ -200,6 +200,8 @@ class ProbLinear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
+        self.sampled_weight = None
+        self.sampled_bias = None
 
         # Set sigma for the truncated gaussian of weights
         sigma_weights = 1/np.sqrt(in_features)
@@ -235,14 +237,26 @@ class ProbLinear(nn.Module):
 
         self.kl_div = 0
 
+    def sample_weights(self):
+        self.sampled_weight = self.weight.sample()
+        self.sampled_bias = self.bias.sample()
+
+    def clear_sample(self):
+        self.sampled_weight = None
+        self.sampled_bias = None
+
     def forward(self, input, stochastic=False, local_reparam: bool = True):
         #if self.training or stochastic:
         # Use local reparameterization (Kingma et al.) when stochastic and requested.
         # This samples activations instead of sampling the full weight tensor — much faster.
         # fallback: sample weights (original behaviour) or use posterior mean
         if stochastic:
-            weight = self.weight.sample()
-            bias = self.bias.sample()
+            if self.sampled_weight is None:
+                weight = self.weight.sample()
+                bias = self.bias.sample()
+            else:
+                weight = self.sampled_weight
+                bias = self.sampled_bias
         else:
             weight = self.weight.mu
             bias = self.bias.mu
@@ -304,6 +318,8 @@ class ProbConv1d(nn.Module):
         self.padding = padding
         self.dilation = dilation
         self.groups = groups
+        self.sampled_weight = None
+        self.sampled_bias = None
 
         # He-style sigma for initialization
         in_features = self.in_channels
@@ -338,11 +354,23 @@ class ProbConv1d(nn.Module):
 
         self.kl_div = 0
 
+    def sample_weights(self):
+        self.sampled_weight = self.weight.sample()
+        self.sampled_bias = self.bias.sample()
+
+    def clear_sample(self):
+        self.sampled_weight = None
+        self.sampled_bias = None
+
     def forward(self, x, stochastic=False, local_reparam: bool = True):     
         # fallback to original behaviour (sample weights or use posterior mean)
         if stochastic:
-            weight = self.weight.sample()
-            bias = self.bias.sample()
+            if self.sampled_weight is None:
+                weight = self.weight.sample()
+                bias = self.bias.sample()
+            else:
+                weight = self.sampled_weight
+                bias = self.sampled_bias
         else:
             weight = self.weight.mu
             bias = self.bias.mu
@@ -407,6 +435,8 @@ class ProbConvTranspose1d(nn.Module):
         self.output_padding = output_padding
         self.dilation = dilation
         self.groups = groups
+        self.sampled_weight = None
+        self.sampled_bias = None
 
         # He-style sigma for initialization
         sigma_weights = 1. / np.sqrt(in_channels * kernel_size)
@@ -440,11 +470,23 @@ class ProbConvTranspose1d(nn.Module):
 
         self.kl_div = 0
 
+    def sample_weights(self):
+        self.sampled_weight = self.weight.sample()
+        self.sampled_bias = self.bias.sample()
+
+    def clear_sample(self):
+        self.sampled_weight = None
+        self.sampled_bias = None
+
     def forward(self, x, stochastic=False):
         #if self.training or stochastic:
         if stochastic:
-            weight = self.weight.sample()
-            bias = self.bias.sample()
+            if self.sampled_weight is None:
+                weight = self.weight.sample()
+                bias = self.bias.sample()
+            else:
+                weight = self.sampled_weight
+                bias = self.sampled_bias
         else:
             weight = self.weight.mu
             bias = self.bias.mu
@@ -467,6 +509,11 @@ class ProbDownsample1d(nn.Module):
             dim, dim, kernel_size=3, stride=2, padding=1, rho_post=rho_post,
             rho_prior=rho_prior, prior_dist=prior_dist
         )
+    def sample_weights(self):
+        self.conv.sample_weights()
+
+    def clear_sample(self):
+        self.conv.clear_sample()
 
     def forward(self, x, stochastic=False):
         return self.conv(x, stochastic=stochastic)
@@ -481,9 +528,15 @@ class ProbUpsample1d(nn.Module):
         super().__init__()
         
         self.conv = ProbConvTranspose1d(
-            dim, dim, kernel_size=4, stride=2, padding=1, rho_post = rho_post,
+            dim, dim, kernel_size=4, stride=2, padding=1, rho_post=rho_post,
             rho_prior=rho_prior, prior_dist=prior_dist)
-
+    
+    def sample_weights(self):
+        self.conv.sample_weights()
+        
+    def clear_sample(self):
+        self.conv.clear_sample()
+    
     def forward(self, x, stochastic=False):
         return self.conv(x, stochastic=stochastic)
     
@@ -510,6 +563,11 @@ class ProbConv1dBlock(nn.Module):
             # Rearrange('batch channels 1 horizon -> batch channels horizon'),
             nn.Mish(),
         )
+    
+    def sample_weights(self):
+        self.block[0].sample_weights()
+    def clear_sample(self):
+        self.block[0].clear_sample()
 
     def forward(self, x, stochastic=False):
         # Apply probabilistic convolution

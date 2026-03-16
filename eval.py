@@ -21,6 +21,7 @@ from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
 from diffusion_policy.common.pytorch_util import dict_apply
+from diffusers.training_utils import enable_full_determinism
 from torch.utils.data import DataLoader
 from omegaconf import OmegaConf
 import numpy as np

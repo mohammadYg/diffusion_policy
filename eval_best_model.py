@@ -174,7 +174,7 @@ def main(ckpts_dir, output_dir, device, override):
         if epoch is None:
             logger.info("Skipping %s (no epoch parsed)", ckpt_name)
             continue
-        if epoch < -1:
+        if epoch < 4050:
             logger.info("Skipping %s (epoch %d < 50)", ckpt_name, epoch)
             continue
 

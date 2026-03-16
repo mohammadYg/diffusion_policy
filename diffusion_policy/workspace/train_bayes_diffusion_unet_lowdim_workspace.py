@@ -63,7 +63,9 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
             self.ema_model.set_normalizer(normalizer)
 
         # configure training state
-        self.optimizer = None
+        self.optimizer = hydra.utils.instantiate(
+            cfg.optimizer, params=self.model.parameters())
+        
         self.global_step = 0
         self.epoch = 0
         self.prior_model_path = prior_model_path
@@ -135,9 +137,9 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 if self.ema_model is not None:
                     self.ema_model.load_state_dict(self.model.state_dict())
 
-        # configure optimizer
-        self.optimizer = hydra.utils.instantiate(
-            cfg.optimizer, params=self.model.parameters())
+        # # configure optimizer
+        # self.optimizer = hydra.utils.instantiate(
+        #     cfg.optimizer, params=self.model.parameters())
         
         # configure lr scheduler
         lr_scheduler = get_scheduler(
@@ -145,7 +147,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
             num_training_steps=(
-                len(post_dataloader) * cfg.training.num_epochs) \
+                len(post_dataloader) * (cfg.training.num_epochs - self.epoch)) \
                     // cfg.training.gradient_accumulate_every,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
@@ -230,7 +232,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
         last_ten_success_rate = []
         log_rho = {}
         with JsonLogger(log_path) as json_logger:
-            for local_epoch_idx in range(cfg.training.num_epochs):
+            for local_epoch_idx in range(self.epoch, cfg.training.num_epochs):
                 step_log = dict()
                 # ========= train for this epoch ==========
                 train_losses = list()
@@ -302,14 +304,14 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 #     policy = self.ema_model
                 # policy.eval()
 
-                # # # run rollout
-                # # if (self.epoch % cfg.training.rollout_every) == 0 and (self.epoch>0):
-                # #     env_runner.current_epoch = self.epoch
-                # #     runner_log = env_runner.run_prob(policy, stochastic= cfg.eval.stochastic)
-                # #     # log all
-                # #     step_log.update(runner_log)
-                # #     if self.epoch>cfg.training.num_epochs-500:
-                # #         last_ten_success_rate.append(step_log["test/mean_score"])
+                # # run rollout
+                # if (self.epoch % cfg.training.rollout_every) == 0 and (self.epoch>0):
+                #     env_runner.current_epoch = self.epoch
+                #     runner_log = env_runner.run_prob(policy, stochastic= cfg.eval.stochastic)
+                #     # log all
+                #     step_log.update(runner_log)
+                #     if self.epoch>cfg.training.num_epochs-500:
+                #         last_ten_success_rate.append(step_log["test/mean_score"])
 
                 # # run validation
                 # if (self.epoch % cfg.training.val_every) == 0:

@@ -99,14 +99,17 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     
         # set step values
         scheduler.set_timesteps(self.num_inference_steps)
-
+        
+        # sample once for the whole trajectory, to be used in all steps of the reverse process
+        #model.sample_weights()   
+        
         for t in scheduler.timesteps:
             # 1. apply conditioning
             trajectory[condition_mask] = condition_data[condition_mask]
 
             # 2. predict model output
             model_output = model(trajectory, t, 
-                local_cond=local_cond, global_cond=global_cond,stochastic = stochastic)
+                local_cond=local_cond, global_cond=global_cond, stochastic=stochastic)
 
             # 3. compute previous image: x_t -> x_t-1
             trajectory = scheduler.step(
@@ -114,6 +117,9 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
                 generator=generator,
                 **kwargs
                 ).prev_sample
+        
+        # clear sampled weights
+        #model.clear_sampled_weights()
         
         # finally make sure conditioning is enforced
         trajectory[condition_mask] = condition_data[condition_mask]        
@@ -165,21 +171,28 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
             cond_data[:,:To,Da:] = nobs[:,:To]
             cond_mask[:,:To,Da:] = True
-
-        # run sampling
-        nsample = self.conditional_sample(
-            cond_data, 
-            cond_mask,
-            local_cond=local_cond,
-            global_cond=global_cond,
-            stochastic=stochastic,
-            **self.kwargs)
         
-        # unnormalize prediction
-        naction_pred = nsample[...,:Da]
-        action_pred_normalized = naction_pred
-        action_pred = self.normalizer['action'].unnormalize(naction_pred)
+        num_samples = 5
+        #naction_pred = torch.zeros(size=(B,T,Da), device=device, dtype=dtype)
+        action_pred = torch.zeros(size=(B,T,Da), device=device, dtype=dtype)
+        for _ in range (num_samples):
+            # run sampling
+            nsample = self.conditional_sample(
+                cond_data, 
+                cond_mask,
+                local_cond=local_cond,
+                global_cond=global_cond,
+                stochastic=stochastic,
+                **self.kwargs)
+            
+            # unnormalize prediction
+            #naction_pred += nsample[...,:Da]
+            #naction_pred = naction_pred/num_samples
+            naction_pred = nsample[...,:Da]
+            action_pred_normalized = naction_pred
+            action_pred += self.normalizer['action'].unnormalize(naction_pred)
 
+        action_pred = action_pred/num_samples
         # get action
         if self.pred_action_steps_only:
             action = action_pred

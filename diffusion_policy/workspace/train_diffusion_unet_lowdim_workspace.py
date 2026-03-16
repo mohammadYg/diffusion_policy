@@ -63,15 +63,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
-        # Resume training
-        if cfg.training.resume:
-            latest_ckpt_path = self.get_checkpoint_path()
-            if latest_ckpt_path.is_file():
-                print("Resuming from checkpoint:", latest_ckpt_path)
-                self.load_checkpoint(path=latest_ckpt_path)
-
         # Retrain from a specific checkpoint
-        elif cfg.training.retrain:
+        if cfg.training.retrain:
             if cfg.training.desired_ckpt_path is None:
                 raise ValueError("desired_ckpt_path must be set when retraining.")
             desired_ckpt_path = cfg.training.desired_ckpt_path
@@ -79,10 +72,15 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 raise ValueError(f"No such file: {desired_ckpt_path}")
             print("Retraining from checkpoint:", desired_ckpt_path)
             self.load_checkpoint(path=desired_ckpt_path)
-            
-        # Otherwise start fresh
         else:
-            print("Starting training from scratch.")
+            latest_ckpt_path = self.get_checkpoint_path()
+            # Resume training
+            if latest_ckpt_path.is_file():
+                print("Resuming from checkpoint:", latest_ckpt_path)
+                self.load_checkpoint(path=latest_ckpt_path)
+            # Otherwise start fresh
+            else:
+                print("Starting training from scratch.")
 
         # configure dataset
         dataset: BaseLowdimDataset
@@ -109,7 +107,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
             num_training_steps=(
-                len(train_dataloader) * cfg.training.num_epochs) \
+                len(train_dataloader) * (cfg.training.num_epochs - self.epoch)) \
                     // cfg.training.gradient_accumulate_every,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
@@ -193,7 +191,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         last_ten_success_rate = []
         with JsonLogger(log_path) as json_logger:
-            for local_epoch_idx in range(cfg.training.num_epochs):
+            for local_epoch_idx in range(self.epoch, cfg.training.num_epochs):
                 step_log = dict()
                 # ========= train for this epoch ==========
                 train_losses = list()

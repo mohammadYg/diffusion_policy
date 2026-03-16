@@ -98,7 +98,6 @@ training:
   device: "cuda:1"
   seed: 42
   debug: False
-  resume: False
   retrain: False
   desired_ckpt_path: "data/outputs/2025.10.12/11.33.45_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0400-test_mean_score=0.780.ckpt"
   # optimization
