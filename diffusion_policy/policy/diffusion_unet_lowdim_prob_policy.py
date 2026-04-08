@@ -100,9 +100,6 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
         # set step values
         scheduler.set_timesteps(self.num_inference_steps)
         
-        # sample once for the whole trajectory, to be used in all steps of the reverse process
-        #model.sample_weights()   
-        
         for t in scheduler.timesteps:
             # 1. apply conditioning
             trajectory[condition_mask] = condition_data[condition_mask]
@@ -117,9 +114,6 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
                 generator=generator,
                 **kwargs
                 ).prev_sample
-        
-        # clear sampled weights
-        #model.clear_sampled_weights()
         
         # finally make sure conditioning is enforced
         trajectory[condition_mask] = condition_data[condition_mask]        
@@ -172,27 +166,19 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             cond_data[:,:To,Da:] = nobs[:,:To]
             cond_mask[:,:To,Da:] = True
         
-        num_samples = 5
-        #naction_pred = torch.zeros(size=(B,T,Da), device=device, dtype=dtype)
-        action_pred = torch.zeros(size=(B,T,Da), device=device, dtype=dtype)
-        for _ in range (num_samples):
-            # run sampling
-            nsample = self.conditional_sample(
-                cond_data, 
-                cond_mask,
-                local_cond=local_cond,
-                global_cond=global_cond,
-                stochastic=stochastic,
-                **self.kwargs)
-            
-            # unnormalize prediction
-            #naction_pred += nsample[...,:Da]
-            #naction_pred = naction_pred/num_samples
-            naction_pred = nsample[...,:Da]
-            action_pred_normalized = naction_pred
-            action_pred += self.normalizer['action'].unnormalize(naction_pred)
+        # run sampling
+        nsample = self.conditional_sample(
+            cond_data, 
+            cond_mask,
+            local_cond=local_cond,
+            global_cond=global_cond,
+            stochastic=stochastic,
+            **self.kwargs)
 
-        action_pred = action_pred/num_samples
+        naction_pred = nsample[...,:Da]
+        action_pred_normalized = naction_pred
+        action_pred = self.normalizer['action'].unnormalize(naction_pred)
+        
         # get action
         if self.pred_action_steps_only:
             action = action_pred
@@ -269,6 +255,8 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
             timesteps = torch.randint(
                 0, self.noise_scheduler.config.num_train_timesteps, 
                 (bsz,), device=trajectory.device, generator=generator).long()
+            # base_timesteps = torch.tensor([0], device=trajectory.device)
+            # timesteps = base_timesteps.repeat(bsz)
         
         # Add noise to the clean images according to the noise magnitude at each timestep
         # (this is the forward diffusion process)
@@ -734,12 +722,13 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
     
     @torch.no_grad()
     def compute_action_reconst_loss(self, dataloader, cfg):
-        loss_rec = 0
-        n_total_samples = 0
-        
-        with tqdm.tqdm(dataloader, desc=f"Reconstruction Loss", 
-                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-
+        total_loss_rec = 0
+        for _ in range (cfg.num_mc_samples):
+            # sample once for the whole trajectory, to be used in all steps of the reverse process
+            self.model.sample_weights()   
+            loss_rec=0
+            with tqdm.tqdm(dataloader, desc=f"Reconstruction Loss", 
+                        leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                 for batch in tepoch:
                     batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
                     
@@ -747,30 +736,29 @@ class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
                     obs_dict = {'obs': batch['obs']}
                     ref_action = batch["action"]
 
-                    B = ref_action.shape[0]
-                    n_total_samples += B
-
                     if cfg.pred_action_steps_only:
                         start = cfg.n_obs_steps - 1
                         end = start + cfg.n_action_steps
                         ref_action = ref_action[:, start:end]
 
-                    for _ in range (cfg.num_mc_samples):
-                        result = self.predict_action(obs_dict, cfg.eval.stochastic)
-                        if cfg.pred_action_steps_only:
-                            pred_action = result['action']
-                        else:
-                            pred_action = result['action_pred']
+                    result = self.predict_action(obs_dict, cfg.eval.stochastic)
+                    if cfg.pred_action_steps_only:
+                        pred_action = result['action']
+                    else:
+                        pred_action = result['action_pred']
 
-                        batch_loss = torch.linalg.norm(
-                                                pred_action - ref_action,
-                                                ord=2,
-                                                dim=(1, 2)
-                                            )  # (B,)
-                        # compute reconstruction loss
-                        loss_rec += batch_loss.sum()
-        
-        return loss_rec/(cfg.num_mc_samples*n_total_samples)
+                    batch_loss = torch.linalg.norm(
+                                            pred_action - ref_action,
+                                            ord=2,
+                                            dim=(1, 2)
+                                        )  # (B,)
+                    # compute reconstruction loss
+                    loss_rec += batch_loss.sum()
+            total_loss_rec += loss_rec
+            # clear sampled weights
+            self.model.clear_sampled_weights()
+
+        return total_loss_rec/(cfg.num_mc_samples*len(dataloader.dataset))
 
     
     # def nll_sde(self, dataloader, stochastic=False):

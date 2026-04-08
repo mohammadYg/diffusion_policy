@@ -57,14 +57,6 @@ class RobomimicLowdimWrapper(gym.Env):
         self._seed = seed
     
     def reset(self):
-        # self.change=True
-        # self.nstep = 0
-        # for obj in self.env.env.model.mujoco_objects:
-        #     print (obj.name)
-        # for i in range(self.env.env.sim.model.nbody):
-        #     print(f"id= {i}", self.env.env.sim.model.body_id2name(i))
-        # body_id = mujoco.mj_name2id(self.env.env.sim.model, mujoco.mjtObj.mjOBJ_BODY, "Can_main")
-        # print (body_id )
         if self.init_state is not None:
             # always reset to the same state
             # to be compatible with gym
@@ -91,23 +83,6 @@ class RobomimicLowdimWrapper(gym.Env):
         return obs
     
     def step(self, action):
-        # self.nstep += 1
-        # if self.change and self.nstep==6:
-        #     for obj in self.env.env.model.mujoco_objects:
-        #         print (obj.name)
-        #         if obj.name == "SquareNut":
-        #             print (obj.joints[0])
-        #             joint_name = "SquareNut_joint0"   # replace with your object joint name
-        #             joint_id = self.env.env.sim.model.joint_name2id(joint_name)
-
-        #             qpos_addr = self.env.env.sim.model.jnt_qposadr[joint_id]
-        #             print(self.env.env.sim.data.qpos[qpos_addr : qpos_addr + 7])
-        #             state = self.env.env.sim.data.qpos[qpos_addr : qpos_addr + 7]
-        #             q_new = randomize_z_rotation(state[3:])
-        #             self.env.env.sim.data.set_joint_qpos(obj.joints[0], np.array([np.random.uniform(-0.115, -0.11),  np.random.uniform(0.11, 0.225),  state[2], q_new[1], q_new[2], q_new[3], q_new[0]]))
-        #             self.env.env.sim.forward()
-        #             self.change = False
-
         raw_obs, reward, done, info = self.env.step(action)
         obs = np.concatenate([
             raw_obs[key] for key in self.obs_keys

@@ -66,10 +66,7 @@ def instantiate_workspace_from_cfg(cfg: OmegaConf, output_dir: Path) -> BaseWork
 
 def run_env_runner(env_runner, policy, cfg) -> Tuple[dict, float]:
     """Run the env_runner n_repeat times and return mean and variance of "test/mean_score"."""
-    if isinstance(policy, BaseLowdimProbPolicy):
-        runner_log = env_runner.run_prob(policy, cfg.eval.stochastic)
-    else:
-        runner_log = env_runner.run(policy)
+    runner_log = env_runner.run(policy, cfg)
     score = runner_log["test/mean_score"]
     return runner_log, score.item()
 
@@ -166,6 +163,8 @@ def main(ckpts_dir, output_dir, device, override):
                                 num_workers=1,   pin_memory = True, 
                                 persistent_workers = False)
 
+    test_pred_noise_loss = 0.0
+    NLL_test = 0.0
     for ckpt_path in ckpt_files:
         ckpt_name = ckpt_path.name
         epoch = parse_epoch_from_ckpt_name(ckpt_name)
@@ -174,7 +173,7 @@ def main(ckpts_dir, output_dir, device, override):
         if epoch is None:
             logger.info("Skipping %s (no epoch parsed)", ckpt_name)
             continue
-        if epoch < 4050:
+        if epoch < 50:
             logger.info("Skipping %s (epoch %d < 50)", ckpt_name, epoch)
             continue
 
@@ -214,13 +213,12 @@ def main(ckpts_dir, output_dir, device, override):
         # compute covariance_spectrum of the whole training data
         policy.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
        
-        # test eval
-        test_pred_noise_loss = eval_network(policy, val_dataloader, cfg, device)
-
-        if isinstance(policy, BaseLowdimProbPolicy):
-            NLL_test = policy.nll_bound(val_dataloader, epoch, npoints=100, stochastic=cfg.eval.stochastic)
-        else:
-            NLL_test = policy.nll_bound(val_dataloader, epoch, npoints=100)
+        # # test eval
+        # test_pred_noise_loss = eval_network(policy, val_dataloader, cfg, device)
+        # if isinstance(policy, BaseLowdimProbPolicy):
+        #     NLL_test = policy.nll_bound(val_dataloader, epoch, npoints=100, stochastic=cfg.eval.stochastic).item()
+        # else:
+        #     NLL_test = policy.nll_bound(val_dataloader, epoch, npoints=100).item()
         
         ## NLL evaluation
         epoch_key = f"model_at_epoch_{int(epoch):04d}"
@@ -228,7 +226,7 @@ def main(ckpts_dir, output_dir, device, override):
             "success_rate": success_rate,
             "test": {
                 "loss_noise_pred": test_pred_noise_loss,
-                "nll_test": NLL_test.item()
+                "nll_test": NLL_test
             }
         }
 
@@ -236,7 +234,7 @@ def main(ckpts_dir, output_dir, device, override):
         results_for_all_epochs["test_noise_pred_loss"].append(test_pred_noise_loss)
         results_for_all_epochs["test_mean_score"].append(success_rate)
         results_for_all_epochs["num_epochs"].append(epoch)
-        results_for_all_epochs["nll_test"].append(NLL_test.item())
+        results_for_all_epochs["nll_test"].append(NLL_test)
 
         # write partial log after each epoch to be robust to crashes
         save_json_log(out_path, json_log)

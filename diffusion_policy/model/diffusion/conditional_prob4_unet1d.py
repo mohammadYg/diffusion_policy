@@ -61,6 +61,12 @@ class ProbConditionalResidualBlock1D(nn.Module):
         self.residual_conv = nn.Conv1d(in_channels, out_channels, 1) \
             if in_channels != out_channels else nn.Identity()
 
+    def sample_weights(self):
+        self.cond_encoder[1].sample_weights()
+
+    def clear_sample(self):
+        self.cond_encoder[1].clear_sample()
+
     def forward(self, x, cond, stochastic=False):
         """
         x : [ batch_size x in_channels x horizon ]
@@ -283,7 +289,44 @@ class BayesianConditionalUnet1D(nn.Module):
         logger.info(
             "number of parameters: %e", sum(p.numel() for p in self.parameters())
         )
+    def sample_weights(self):
+        
+        if self.local_cond_encoder is not None:
+            for layer in self.local_cond_encoder:
+                layer.sample_weights()
 
+        for layer in self.mid_modules:
+            layer.sample_weights()
+        
+        for module_list in self.down_modules:
+            for layer in module_list:
+                if hasattr(layer, "sample_weights"):
+                    layer.sample_weights()
+        
+        for module_list in self.up_modules:
+            for layer in module_list:
+                if hasattr(layer, "sample_weights"):
+                    layer.sample_weights()
+
+    def clear_sampled_weights(self):
+
+        if self.local_cond_encoder is not None:
+            for layer in self.local_cond_encoder:
+                layer.clear_sample()
+
+        for layer in self.mid_modules:
+            layer.clear_sample()
+        
+        for module_list in self.down_modules:
+            for layer in module_list:
+                if hasattr(layer, "clear_sample"):
+                    layer.clear_sample()
+
+        for module_list in self.up_modules:
+            for layer in module_list:
+                if hasattr(layer, "clear_sample"):
+                    layer.clear_sample()
+        
     def forward(
         self,
         sample: torch.Tensor,

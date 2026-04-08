@@ -63,24 +63,24 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
-        # Retrain from a specific checkpoint
-        if cfg.training.retrain:
-            if cfg.training.desired_ckpt_path is None:
-                raise ValueError("desired_ckpt_path must be set when retraining.")
-            desired_ckpt_path = cfg.training.desired_ckpt_path
-            if not os.path.isfile(desired_ckpt_path):
-                raise ValueError(f"No such file: {desired_ckpt_path}")
-            print("Retraining from checkpoint:", desired_ckpt_path)
-            self.load_checkpoint(path=desired_ckpt_path)
-        else:
-            latest_ckpt_path = self.get_checkpoint_path()
-            # Resume training
-            if latest_ckpt_path.is_file():
-                print("Resuming from checkpoint:", latest_ckpt_path)
-                self.load_checkpoint(path=latest_ckpt_path)
-            # Otherwise start fresh
+        # Resume training
+        if cfg.training.resume:
+            if cfg.training.desired_ckpt_path is not None:
+                desired_ckpt_path = cfg.training.desired_ckpt_path
+                if not os.path.isfile(desired_ckpt_path):
+                    raise ValueError(f"No such file: {desired_ckpt_path}")
+                print("Resuming from checkpoint:", desired_ckpt_path)
+                self.load_checkpoint(path=desired_ckpt_path)
             else:
-                print("Starting training from scratch.")
+                latest_ckpt_path = self.get_checkpoint_path()
+                if latest_ckpt_path.is_file():
+                    print("Resuming from checkpoint:", latest_ckpt_path)
+                    self.load_checkpoint(path=latest_ckpt_path)
+                else:
+                    print("Starting training from scratch.")
+        else:
+            # Otherwise start fresh
+            print("Starting training from scratch.")
 
         # configure dataset
         dataset: BaseLowdimDataset
@@ -246,11 +246,11 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 train_loss = np.mean(train_losses)
                 step_log['train_loss'] = train_loss
 
-                # # ========= eval for this epoch ==========
-                # policy = self.model
-                # if cfg.training.use_ema:
-                #     policy = self.ema_model
-                # policy.eval()
+                # ========= eval for this epoch ==========
+                policy = self.model
+                if cfg.training.use_ema:
+                    policy = self.ema_model
+                policy.eval()
 
                 # # run rollout
                 # if (self.epoch % cfg.training.rollout_every) == 0 and (self.epoch>0):
@@ -261,47 +261,47 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 #     if self.epoch>cfg.training.num_epochs-500:
                 #         last_ten_success_rate.append(step_log["test/mean_score"])
 
-                # # run validation
-                # if (self.epoch % cfg.training.val_every) == 0:
-                #     with torch.no_grad():
-                #         # compute test noise prediction loss
-                #         val_noise_pred_losses = list()
-                #         n_total_samples = 0
-                #         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}: Noise Prediction Loss on test set", 
-                #                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                #             for batch_idx, batch in enumerate(tepoch):
-                #                 n_samples = len(batch["obs"])
-                #                 n_total_samples += n_samples
+                # run validation
+                if (self.epoch % cfg.training.val_every) == 0:
+                    with torch.no_grad():
+                        # compute test noise prediction loss
+                        val_noise_pred_losses = list()
+                        n_total_samples = 0
+                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}: Noise Prediction Loss on test set", 
+                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                            for batch_idx, batch in enumerate(tepoch):
+                                n_samples = len(batch["obs"])
+                                n_total_samples += n_samples
                                 
-                #                 # device transfer
-                #                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                #                 val_noise_pred_loss = policy.compute_loss(batch, train=False)
-                #                 val_noise_pred_losses.append(val_noise_pred_loss.item() * n_samples)
-                #                 if (cfg.training.max_val_steps is not None) \
-                #                     and batch_idx >= (cfg.training.max_val_steps-1):
-                #                     break   
+                                # device transfer
+                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                                val_noise_pred_loss = policy.compute_loss(batch, train=False)
+                                val_noise_pred_losses.append(val_noise_pred_loss.item() * n_samples)
+                                if (cfg.training.max_val_steps is not None) \
+                                    and batch_idx >= (cfg.training.max_val_steps-1):
+                                    break   
 
-                #         if len(val_noise_pred_losses) > 0:
-                #             noise_pred_loss = np.sum(val_noise_pred_losses)/n_total_samples
-                #             step_log['test_noise_pred_loss'] = noise_pred_loss
-                #             topk_ckpt_path_val = topk_manager_noise_pred.get_ckpt_path(step_log)
-                #             if topk_ckpt_path_val is not None:
-                #                 #self.save_checkpoint(path=topk_ckpt_path_val, exclude_keys=['model', 'optimizer'])
-                #                 self.save_checkpoint(path=topk_ckpt_path_val)
+                        if len(val_noise_pred_losses) > 0:
+                            noise_pred_loss = np.sum(val_noise_pred_losses)/n_total_samples
+                            step_log['test_noise_pred_loss'] = noise_pred_loss
+                            topk_ckpt_path_val = topk_manager_noise_pred.get_ckpt_path(step_log)
+                            if topk_ckpt_path_val is not None:
+                                #self.save_checkpoint(path=topk_ckpt_path_val, exclude_keys=['model', 'optimizer'])
+                                self.save_checkpoint(path=topk_ckpt_path_val)
 
-                # # Compute upper bound on NLL
-                # if (self.epoch % cfg.training.nll_every)==0:
-                #     NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100)
-                #     step_log['test_nll_bpd'] = NLL_test 
-                #     topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
-                #     if topk_ckpt_path_nll is not None:
-                #         #self.save_checkpoint(path=topk_ckpt_path_nll, exclude_keys=['model', 'optimizer'])
-                #         self.save_checkpoint(path=topk_ckpt_path_nll)
+                # Compute upper bound on NLL
+                if (self.epoch % cfg.training.nll_every)==0:
+                    NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100)
+                    step_log['test_nll_bpd'] = NLL_test 
+                    topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
+                    if topk_ckpt_path_nll is not None:
+                        #self.save_checkpoint(path=topk_ckpt_path_nll, exclude_keys=['model', 'optimizer'])
+                        self.save_checkpoint(path=topk_ckpt_path_nll)
                 
-                # # # Compute Reconstruction loss
-                # if (self.epoch % cfg.training.reconst_loss_every)==0:
-                #     reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
-                #     step_log['test_action_reconst_loss'] = reconst_loss.item()
+                # # Compute Reconstruction loss
+                if (self.epoch % cfg.training.reconst_loss_every)==0:
+                    reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
+                    step_log['test_action_reconst_loss'] = reconst_loss.item()
 
                 # # checkpoint
                 # if (self.epoch % cfg.training.checkpoint_every) == 0 and (self.epoch>0):
@@ -327,8 +327,8 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 #         self.save_checkpoint(path=topk_ckpt_path)
 
 
-                # # ========= eval end for this epoch ==========
-                # policy.train()
+                # ========= eval end for this epoch ==========
+                policy.train()
 
                 # checkpoint
                 if (self.epoch % cfg.training.checkpoint_every) == 0:

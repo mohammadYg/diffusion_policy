@@ -69,15 +69,15 @@ policy:
 
   model:
     #_target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
-    #_target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D           # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
+    #_target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
     #_target_: diffusion_policy.model.diffusion.conditional_prob3_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Probabilistic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob4_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Deterministic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob5_unet1d.BayesianConditionalUnet1D          # Determinstic FiLM conditioning  + Probabilistic timestep encoding 
-    _target_: diffusion_policy.model.diffusion.conditional_prob6_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
+    #_target_: diffusion_policy.model.diffusion.conditional_prob6_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
     #_target_: diffusion_policy.model.diffusion.conditional_prob7_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
-    #_target_: diffusion_policy.model.diffusion.conditional_prob8_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
+    _target_: diffusion_policy.model.diffusion.conditional_prob8_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
     #_target_: diffusion_policy.model.diffusion.conditional_prob9_unet1d.BayesianConditionalUnet1D 
-
+    #_target_: diffusion_policy.model.diffusion.conditional_prob9_unet1d.BayesianConditionalUnet1D 
 
 
     input_dim: "${eval: ${task.action_dim} if ${obs_as_local_cond} or ${obs_as_global_cond} else ${task.obs_dim} + ${task.action_dim}}"
@@ -93,8 +93,6 @@ policy:
     rho_post: -3.0
     rho_prior: 0.54
     prior_dist: 'gaussian'
-    init_post: 'random'
-    init_prior: 'zeros'
 
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
@@ -143,7 +141,7 @@ prior_dataloader:
 post_dataloader:
   batch_size: 256
   num_workers: 1
-  shuffle: True
+  shuffle: False
   pin_memory: True
   persistent_workers: False
   
@@ -161,7 +159,6 @@ optimizer:
   eps: 1.0e-8
   weight_decay: 1.0e-6
 
-
 prior_training:
   device: ${training.device}
   # optimization
@@ -174,12 +171,9 @@ prior_training:
   tqdm_interval_sec: 1.0
 
 training:
-  device: "cuda:1"
   seed: 42
   debug: False
-  resume: False
-  retrain: False
-  desired_ckpt_path: "data/outputs/2025.10.12/11.33.45_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0400-test_mean_score=0.780.ckpt"
+
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
@@ -203,8 +197,6 @@ training:
   # Bayesian NN
   train_prior: False
   initialize_from_prior: True
-  #init_net_path: "data/outputs/2026.02.06/16.42.30_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/latest.ckpt"
-  init_net_path: null
   stochastic: False
   bounded: False
   delta: 0.025
@@ -229,7 +221,7 @@ checkpoint:
   topk:
     monitor_key: test_mean_score
     mode: max
-    k: 5
+    k: 3
     format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
@@ -239,24 +231,6 @@ checkpoint_every:
     monitor_key: epoch
     format_str: 'epoch={epoch:04d}.ckpt'
   save_last_ckpt: True
-  save_last_snapshot: False
-
-checkpoint_nll:
-  topk:
-    monitor_key: test_nll_bpd
-    mode: min
-    k: 1
-    format_str: 'epoch={epoch:04d}-nll_bpd={test_nll_bpd:.3f}.ckpt'
-  save_last_ckpt: False
-  save_last_snapshot: False
-
-checkpoint_val:
-  topk:
-    monitor_key: test_noise_pred_loss
-    mode: min
-    k: 1
-    format_str: 'epoch={epoch:04d}-test_noise_pred_loss={test_noise_pred_loss:.3f}.ckpt'
-  save_last_ckpt: False
   save_last_snapshot: False
   
 multi_run:

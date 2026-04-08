@@ -18,10 +18,11 @@ import numpy as np
 import random
 import wandb
 import tqdm
+from pathlib import Path
 
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from diffusion_policy.policy.diffusion_unet_lowdim_policy import DiffusionUnetLowdimPolicy
+from diffusion_policy.policy.diffusion_unet_lowdim_prob_policy import DiffusionUnetLowdimProbPolicy, DiffusionUnetLowdimPolicy
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager, CheckpointManager
@@ -36,12 +37,10 @@ from torch.utils.data.distributed import DistributedSampler
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 # %%
-#! check whether model evaluation is better to be done during training or after that
-
-class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
+class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
-    def __init__(self, cfg: OmegaConf, output_dir=None):
+    def __init__(self, cfg: OmegaConf, prior_model_path= None, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
 
         # set seed
@@ -51,20 +50,29 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         # np.random.seed(seed)
         # random.seed(seed)
 
-        # configure model
-        self.model: DiffusionUnetLowdimPolicy
+        self.model: DiffusionUnetLowdimProbPolicy
         self.model = hydra.utils.instantiate(cfg.policy)
 
-        self.ema_model: DiffusionUnetLowdimPolicy = None
+        self.ema_model: DiffusionUnetLowdimProbPolicy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
+
+        # configure dataset
+        self.dataset: BaseLowdimDataset
+        self.dataset = hydra.utils.instantiate(cfg.task.dataset)
+        assert isinstance(self.dataset, BaseLowdimDataset)
+        normalizer = self.dataset.get_normalizer()
+        self.model.set_normalizer(normalizer)
+        if cfg.training.use_ema:
+            self.ema_model.set_normalizer(normalizer)
 
         # configure training state
         self.optimizer = hydra.utils.instantiate(
             cfg.optimizer, params=self.model.parameters())
-
+        
         self.global_step = 0
         self.epoch = 0
+        self.prior_model_path = prior_model_path
 
     def run(self):
         # load config file
@@ -77,35 +85,58 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         self.local_rank = int(os.environ["LOCAL_RANK"])      
         self.global_rank = int(os.environ["RANK"])       
 
-        # Resume from last checkpoint if available
+        # Resume training
         latest_ckpt_path = self.get_checkpoint_path()
         if latest_ckpt_path.is_file():
             print("Resuming from checkpoint:", latest_ckpt_path)
             self.load_checkpoint(path=latest_ckpt_path)
-        # Otherwise start fresh
         else:
-            print("Starting training from scratch.")
-
-        # configure dataset
-        dataset: BaseLowdimDataset
-        dataset = hydra.utils.instantiate(cfg.task.dataset)
-        assert isinstance(dataset, BaseLowdimDataset)
-        train_sampler = DistributedSampler(dataset)
-        train_dataloader = DataLoader(dataset, sampler=train_sampler, **cfg.dataloader)
-        normalizer = dataset.get_normalizer()
+            if cfg.training.train_prior:
+                if cfg.task.dataset.train_episodes_for_posterior <= 0:
+                    raise ValueError("No demonstrations for training the posterior")
+                prior_dir = Path("data") / "prior_models" / cfg.task.name
+                # check directory exists
+                prior_dir.mkdir(parents=True, exist_ok=True)
+                # Model filename
+                prior_model_path = (
+                    prior_dir
+                    / f"prior_demos={cfg.task.dataset.max_train_episodes-cfg.task.dataset.train_episodes_for_posterior}"
+                    f"-post_demos={cfg.task.dataset.train_episodes_for_posterior}.pth"
+                )
+                if not os.path.isfile(prior_model_path):
+                    print("Training and initializing prior network...")
+                    # get dataset for training the prior
+                    prior_dataset = self.dataset.get_prior_dataset()
+                    init_net = self.model.train_prior(prior_dataset, cfg)
+                    # Save model
+                    torch.save(init_net.state_dict(), prior_model_path)
+                    print(f"Prior model saved to: {prior_model_path}")
+                else:
+                    print("Loading and initializing prior network...")
+                    # load model
+                    init_net: DiffusionUnetLowdimPolicy
+                    prior_policy = hydra.utils.instantiate(cfg.prior_policy)
+                    init_net = prior_policy.model
+                    init_net.load_state_dict(torch.load(prior_model_path, weights_only=True))
+                    init_net.eval()
+                                
+                self.model.prior_post_initialize(init_net, cfg.policy.model.rho_post, cfg.policy.model.rho_prior, initialize_from_prior=cfg.training.initialize_from_prior)
+        
+        ## configure dataset for PAC-Bayes training 
+        post_dataset = self.dataset.get_post_dataset() if cfg.task.dataset.train_episodes_for_posterior>0 else self.dataset
+        train_sampler = DistributedSampler(post_dataset)
+        post_dataloader = DataLoader(post_dataset, sampler = train_sampler**cfg.post_dataloader)
 
         # configure validation dataset
-        val_dataset = dataset.get_validation_dataset()
+        val_dataset = self.dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
         if self.global_rank == 0:
             print ("validation dataset size: ", len(val_dataset))
-        
-        # configure dataset for covariance_spectrum
-        cov_dataloader = DataLoader(dataset, batch_size=len(dataset), num_workers=1, pin_memory = True, persistent_workers = False)
-        
-        self.model.set_normalizer(normalizer)
-        if cfg.training.use_ema:
-            self.ema_model.set_normalizer(normalizer)
+
+        ## configure dataset for covariance_spectrum
+        cov_dataloader = DataLoader(self.dataset, batch_size=len(self.dataset), 
+                                    num_workers=1,   pin_memory = True, 
+                                    persistent_workers = False)
 
         # configure lr scheduler
         lr_scheduler = get_scheduler(
@@ -113,7 +144,9 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
             num_training_steps=(
-                len(train_dataloader) * (cfg.training.num_epochs - self.epoch)),
+                len(post_dataloader) * (cfg.training.num_epochs - self.epoch)),
+            # pytorch assumes stepping LRScheduler every epoch
+            # however huggingface diffusers steps it every batch
             last_epoch=self.global_step-1
         )
 
@@ -191,22 +224,32 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         
         # store the success rate of last 10 epochs to compute their mean at the end of training
         last_ten_success_rate = []
+        log_rho = {}
         with json_logger_cm if self.global_rank == 0 else dummy_context_mgr():
             for local_epoch_idx in range(self.epoch, cfg.training.num_epochs):
                 train_sampler.set_epoch(local_epoch_idx)
                 step_log = dict()
                 # ========= train for this epoch ==========
                 train_losses = list()
-                with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
-                        leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                with tqdm.tqdm(post_dataloader, desc=f"Training epoch {self.epoch}", 
+                    leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     
                     for batch_idx, batch in enumerate(tepoch):
                         # device transfer
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                        
-                        raw_loss = self.model.module.compute_loss(batch, train=True)
+
+                        if cfg.training.kl_penalty>0.0:
+                            raw_loss, emp_risk_train, kl_train = self.model.module.compute_bound(batch, n_bound=len(post_dataloader.dataset), objective=cfg.training.pac_objective,
+                                                        delta=cfg.training.delta, 
+                                                        kl_penalty=cfg.training.kl_penalty, 
+                                                        mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.training.stochastic, bounded=cfg.training.bounded, train=True)
                             
-                        loss = raw_loss 
+                        else:
+                            raw_loss = self.model.module.compute_loss(batch, stochastic=cfg.training.stochastic, train=True)
+                            emp_risk_train = raw_loss
+                            kl_train = torch.tensor([0.0])
+                            
+                        loss = raw_loss / cfg.training.gradient_accumulate_every
                         loss.backward()
                         raw_loss_cpu = raw_loss.item()
 
@@ -224,16 +267,19 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
                             train_losses.append(raw_loss_cpu)
                             step_log = {
-                                'train_loss': raw_loss_cpu,
+                                'train_loss (pac_bayes bound)': raw_loss_cpu,
+                                'emp_risk_train': emp_risk_train.item(),
+                                'kl_train': kl_train.item(),
                                 'global_step': self.global_step,
                                 'epoch': self.epoch,
                                 'lr': lr_scheduler.get_last_lr()[0]
                             }
 
-                            is_last_batch = (batch_idx == (len(train_dataloader)-1))
+                            is_last_batch = (batch_idx == (len(post_dataloader)-1))
                             if not is_last_batch:
+                                # log of last step is combined with validation and rollout
                                 wandb_run.log(step_log, step=self.global_step)
-                                json_logger_cm.log(step_log)
+                                json_logger.log(step_log)
                                 self.global_step += 1
 
                         if (cfg.training.max_train_steps is not None) \
@@ -244,7 +290,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 # replace train_loss with epoch average
                 if self.global_rank == 0:
                     train_loss = np.mean(train_losses)
-                    step_log['train_loss'] = train_loss
+                    step_log['train_loss (pac_bayes bound)'] = train_loss
 
                 # ========= eval for this epoch ==========
                 policy = self.model.module
@@ -269,25 +315,31 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
                                 n_samples = len(batch["obs"])
+                                # device transfer
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                val_loss = policy.compute_loss(batch, train=False)
+                                val_loss = policy.compute_loss(batch, stochastic=cfg.eval.stochastic, train=False)
                                 val_losses.append(val_loss.item() * n_samples)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
-                                    break   
-                        if len(val_losses) > 0:
-                            val_loss = np.sum(val_losses)/len(val_dataset)
-                            step_log['test_noise_pred_loss'] = val_loss
+                                    break
 
+                        if len(val_losses) > 0:
+                            noise_loss = np.sum(val_losses)/len(val_dataset)
+                            step_log['test_noise_pred_loss'] = noise_loss
+                        
                 # Compute upper bound on NLL (only on global_rank 0)
                 if self.global_rank == 0 and (self.epoch % cfg.training.nll_every)==0:
-                    NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100)
+                    NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100, stochastic=cfg.eval.stochastic)
                     step_log['test_nll_bpd'] = NLL_test 
                 
                 # Compute Reconstruction loss (only on global_rank 0)
                 if self.global_rank == 0 and (self.epoch % cfg.training.reconst_loss_every)==0:
                     reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
                     step_log['test_action_reconst_loss'] = reconst_loss.item()
+
+                # # log learned rho values
+                # if self.global_rank == 0 and (self.epoch % cfg.training.rho_log_every) == 0:
+                #     log_rho[self.epoch] = policy.rho_stats()
 
                 # checkpoint (only on global_rank 0)
                 if self.global_rank == 0 and (self.epoch % cfg.training.checkpoint_every) == 0:
@@ -303,9 +355,21 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     if topk_ckpt_path is not None:
                         self.save_checkpoint(path=topk_ckpt_path,ddp=True)
 
-                # ========= eval end for this epoch ==========
+               
+                #========= eval end for this epoch ==========
                 policy.train()
-
+                
+                # checkpoint
+                if self.global_rank == 0 and (self.epoch % cfg.training.checkpoint_every) == 0:
+                    # checkpointing
+                    if cfg.checkpoint_every.save_last_ckpt:
+                        self.save_checkpoint()
+                    if cfg.checkpoint_every.save_last_snapshot:
+                        self.save_snapshot()
+                    topk_ckpt_path = topk_manager_every.get_ckpt_path(step_log)
+                    if topk_ckpt_path is not None:
+                        self.save_checkpoint(path=topk_ckpt_path)
+                        
                 # end of epoch logging (only on global_rank 0)
                 if self.global_rank == 0:
                     if local_epoch_idx == cfg.training.num_epochs-1:
@@ -329,10 +393,9 @@ def dummy_context_mgr():
     config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")), 
     config_name=pathlib.Path(__file__).stem)
 def main(cfg):
-    # Create workspace and start training
-    workspace = TrainDiffusionUnetLowdimWorkspace(cfg)
+    workspace = TrainProbDiffusionUnetLowdimWorkspace(cfg)
     workspace.run()
-    
+
 if __name__ == "__main__":
     main()
 

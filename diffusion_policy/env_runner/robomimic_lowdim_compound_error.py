@@ -21,6 +21,7 @@ from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
 from diffusion_policy.env.robomimic.robomimic_lowdim_wrapper import RobomimicLowdimWrapper
+
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.obs_utils as ObsUtils
@@ -40,38 +41,6 @@ def create_env(env_meta, obs_keys):
     )
     return env
 
-class ObservationNoiseWrapper(gym.Wrapper):
-    def __init__(self, env, relative_noise=0.0):
-        super().__init__(env)
-        self.relative_noise = relative_noise
-        self.rng = None
-
-    def configure(self, *, seed: int, enabled: bool):
-        self.enabled = enabled
-        if enabled:
-            self.rng = np.random.RandomState(seed)
-
-    def reset(self, **kwargs):
-        obs = self.env.reset()
-        return self._add_noise(obs)
-
-    def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        obs = self._add_noise(obs)
-        return obs, reward, done, info
-
-    def _add_noise(self, obs):
-        if not self.enabled or self.relative_noise == 0:
-            return obs
-
-        obs = obs.copy()
-
-        eps = 1e-6
-        scale = self.relative_noise * np.maximum(np.abs(obs), eps)
-        obs = obs + scale * self.rng.randn(*obs.shape)
-
-        return obs
-
 class RobomimicLowdimRunner(BaseLowdimRunner):
     """
     Robomimic envs already enforces number of steps.
@@ -81,9 +50,6 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             output_dir,
             dataset_path,
             obs_keys,
-            n_train=10,
-            n_train_vis=3,
-            train_start_idx=0,
             n_test=22,
             n_test_vis=6,
             test_start_seed=10000,
@@ -92,38 +58,21 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             n_action_steps=8,
             n_latency_steps=0,
             render_hw=(256,256),
-            render_camera_name='agentview',
+            render_camera_name='robot0_robotview',
             fps=10,
             crf=22,
             past_action=False,
             abs_action=False,
             tqdm_interval_sec=5.0,
-            n_envs=None,
-            noise_enabled=False,
-            relative_noise=0.0,
+            n_envs=None
         ):
-        """
-        Assuming:
-        n_obs_steps=2
-        n_latency_steps=3
-        n_action_steps=4
-        o: obs
-        i: inference
-        a: action
-        Batch t:
-        |o|o| | | | | | |
-        | |i|i|i| | | | |
-        | | | | |a|a|a|a|
-        Batch t+1
-        | | | | |o|o| | | | | | |
-        | | | | | |i|i|i| | | | |
-        | | | | | | | | |a|a|a|a|
-        """
 
         super().__init__(output_dir)
-
+        
+        self.current_epoch = 0
+        
         if n_envs is None:
-            n_envs = n_train + n_test
+            n_envs = n_test
 
         # handle latency step
         # to mimic latency, we request n_latency_steps additional steps 
@@ -158,11 +107,6 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                     render_hw=render_hw,
                     render_camera_name=render_camera_name
                 )
-            
-            env = ObservationNoiseWrapper(
-                env,
-                relative_noise=relative_noise
-            )
                 
             env = VideoRecordingWrapper(
                                 env,
@@ -190,49 +134,6 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         env_prefixs = list()
         env_init_fn_dills = list()
 
-        # train
-        with h5py.File(dataset_path, 'r') as f:
-            for i in range(n_train):
-                train_idx = train_start_idx + i
-                enable_render = i < n_train_vis
-                init_state = f[f'data/demo_{train_idx}/states'][0]
-
-                def init_fn(env, init_state=init_state, 
-                    enable_render=enable_render, train_idx=train_idx):
-                    # setup rendering
-                    # video_wrapper
-                    assert isinstance(env.env, VideoRecordingWrapper)
-                    env.env.video_recoder.stop()
-                    env.env.file_path = None
-                    if enable_render:
-                        epoch = getattr(self, "current_epoch", 0)
-                        name = self.make_video_filename(epoch=epoch,idx=train_idx)
-                        # filename = pathlib.Path(output_dir).joinpath(
-                        #     'media', wv.util.generate_id() + ".mp4")
-                        filename = pathlib.Path(output_dir).joinpath(
-                            'media', name + ".mp4")
-                        filename.parent.mkdir(parents=False, exist_ok=True)
-                        filename = str(filename)
-                        env.env.file_path = filename
-
-                    # switch to init_state reset
-                    assert isinstance(env.env.env.env, RobomimicLowdimWrapper)
-                    env.env.env.env.init_state = init_state
-
-                    # configure noise wrapper
-                    noise_wrapper = env.env.env                           # unwrap MultiStep → Video → ObservationNoise
-                    assert isinstance(noise_wrapper, ObservationNoiseWrapper)
-
-                    noise_wrapper.configure(
-                        seed=train_idx,
-                        enabled=noise_enabled
-                    )
-
-                env_seeds.append(train_idx)
-                env_prefixs.append('train/')
-                env_init_fn_dills.append(dill.dumps(init_fn))
-        
-        # test
         for i in range(n_test):
             seed = test_start_seed + i
             enable_render = i < n_test_vis
@@ -245,31 +146,22 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                 env.env.video_recoder.stop()
                 env.env.file_path = None
                 if enable_render:
-                    epoch = getattr(self, "current_epoch", 0)
+                    epoch = self.current_epoch
                     name = self.make_video_filename(
                         epoch=epoch,
                         idx=seed
                     )
                     filename = pathlib.Path(output_dir).joinpath(
                         'media', name + ".mp4")
-                    # filename = pathlib.Path(output_dir).joinpath(
-                    #     'media', wv.util.generate_id() + ".mp4")
                     filename.parent.mkdir(parents=False, exist_ok=True)
                     filename = str(filename)
                     env.env.file_path = filename
 
                 # switch to seed reset
-                assert isinstance(env.env.env.env, RobomimicLowdimWrapper)
-                env.env.env.env.init_state = None
+                assert isinstance(env.env.env, RobomimicLowdimWrapper)
+                env.env.env.init_state = None
                 env.seed(seed)
-                noise_wrapper = env.env.env
-                assert isinstance(noise_wrapper, ObservationNoiseWrapper)
-
-                noise_wrapper.configure(
-                    seed=seed,
-                    enabled=noise_enabled
-                )
-
+                
             env_seeds.append(seed)
             env_prefixs.append('test/')
             env_init_fn_dills.append(dill.dumps(init_fn))
@@ -295,14 +187,126 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         self.rotation_transformer = rotation_transformer
         self.abs_action = abs_action
         self.tqdm_interval_sec = tqdm_interval_sec
-        self.current_epoch = 0
-        self.rng = torch.Generator(device="cuda")
-        self.rng.manual_seed(100)
+        
 
     def make_video_filename(self, *, epoch, idx):
             return f"epoch={epoch:04d}_seed={idx:05d}.mp4"
     
-    def run(self, policy, cfg):
+    def _get_epoch(self, epoch):
+        self.current_epoch = epoch
+    
+    def action_reconst_loss(self, simulation_dict, dataset_dict, cfg):
+        """
+        This function returns the action reconstruction L2 loss by comparing the generated action to
+        the nearest action in the training dataset.
+        It compares the states obtained from simulation with training dataset to find nearest state and its correspoding action in the training dataset.
+
+        simulation_dict: {action:(M, Ta, Da), obs:(M, To, Do)}          M = number of simulations
+        dataset_dict: {action:(N, Ta, Da), obs:(N, To, Do)}             N = number training data
+
+        return:
+            l2_loss: (M,)
+        """
+        device = simulation_dict["action"].device
+        if dataset_dict["action"].device != device:
+            raise RuntimeError(f"training data is not on device:{device} as the simulation data")
+
+        M, To, Do = simulation_dict["obs"].shape
+        _, Ta, Da = simulation_dict["action"].shape
+
+        obs_train = dataset_dict['obs'][:, :To, :]  
+        obs_simulation = simulation_dict["obs"]
+
+        N = obs_train.shape[0]
+
+        # Flatten for distance computation
+        obs_train = obs_train.reshape(N, -1)
+        obs_simulation = obs_simulation.reshape(M, -1)
+
+        # Compute pairwise distances
+        # (M, N)
+        dists = torch.cdist(obs_simulation, obs_train, p=2.0)
+
+        # Get nearest neighbors
+        _, idx = torch.topk(dists, k=1, dim=1, largest=False)
+        idx = idx.squeeze()
+
+        # Get corresponding action
+        nearest_actions = dataset_dict['action'][idx]
+        if cfg.pred_action_steps_only:
+            start = To
+            if cfg.oa_step_convention:
+                start = To - 1
+            end = start + cfg.n_action_steps
+            nearest_actions = dataset_dict['action'][idx, start:end, :]
+
+        # compute loss
+        l2_loss = torch.linalg.norm(
+                                    simulation_dict["action"] - nearest_actions,
+                                    ord=2,
+                                    dim=(1, 2))
+        return l2_loss
+
+    def compute_manifold_adherence(self, simulation_dict, dataset_dict, k, cfg):
+        """
+        This funtion computes off-manifold norm. Firts it compares the current state to find k
+        nearest states in the dataset and its corresponding actions. Then it projects the generated action
+        to the subspace spanned by the k nearest actions to evaluate how far the generated action is from
+        the subspace
+        """
+
+        device = simulation_dict["action"].device
+        if dataset_dict["action"].device != device:
+            raise RuntimeError(f"training data is not on device:{device} as the simulation data")
+
+        M, To, Do = simulation_dict["obs"].shape
+        _, Ta, Da = simulation_dict["action"].shape
+
+        obs_train = dataset_dict['obs'][:, :To, :]  
+        obs_simulation = simulation_dict["obs"]
+
+        N = obs_train.shape[0]
+
+        # Flatten for distance computation
+        obs_train = obs_train.reshape(N, -1)
+        obs_simulation = obs_simulation.reshape(M, -1)
+
+        # Compute pairwise distances
+        # (M, N)
+        dists = torch.cdist(obs_simulation, obs_train, p=2.0)
+
+        # Get nearest neighbors
+        _, knn_idx = torch.topk(dists, k=k, dim=1, largest=False)
+        nearest_actions = list()    
+        for i in range(M):
+            nearest_actions.append(dataset_dict['action'][knn_idx[i]])  # (k, n_action_step, Da)
+        nearest_actions = torch.stack(nearest_actions, dim=0)  # (M, k, n_action_step, Da)  
+
+        if cfg.pred_action_steps_only:
+            start = To
+            if cfg.oa_step_convention:
+                start = To - 1
+            end = start + cfg.n_action_steps
+            nearest_actions = nearest_actions[..., start:end, :]
+
+        pred = simulation_dict["action"].reshape(M, -1)  # (M, T*Da)
+        knn = nearest_actions.reshape(M, k, -1)  # (M, k, T*Da)
+
+        errors = []
+        for i in range(M):
+            a = pred[i]  # (T*Da,)
+            A = knn[i].T  # (T*Da, k)
+            # Solve least squares: min_c ||a - A @ c||_2
+            sol = torch.linalg.lstsq(A, a)  
+            c = sol.solution            # (k, 1)
+            proj = A @ c  # (T*Da, 1)
+            error = torch.norm(a - proj, p=2)
+            errors.append(error)
+        errors = torch.stack(errors)
+        metric = errors.mean()
+        return metric, errors
+
+    def run(self, policy, train_dataset, cfg):
         device = policy.device
         dtype = policy.dtype
         env = self.env
@@ -315,6 +319,9 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         # allocate data
         all_video_paths = [None] * n_inits
         all_rewards = [None] * n_inits
+        loss_reconst_all_envs = [[] for _ in range(n_inits)]
+        manifold_adh = [[] for _ in range(n_inits)]
+        all_pred_actions = []
 
         for chunk_idx in range(n_chunks):
             start = chunk_idx * n_envs
@@ -341,7 +348,8 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             env_name = self.env_meta['env_name']
             pbar = tqdm.tqdm(total=self.max_steps, desc=f"Eval {env_name}Lowdim {chunk_idx+1}/{n_chunks}", 
                 leave=False, mininterval=self.tqdm_interval_sec)
-
+            
+            simulation_dict = {"action":None, "obs":None}
             done = False
             while not done:
                 # create obs dict
@@ -359,8 +367,11 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                     lambda x: torch.from_numpy(x).to(
                         device=device))
 
+                # Store the observation
+                simulation_dict ["obs"]= obs_dict["obs"]
+
                 # run policy
-                with torch.no_grad():      
+                with torch.no_grad():
                     if isinstance(policy, BaseLowdimProbPolicy):   
                         policy.model.sample_weights()
                         action_dict = policy.predict_action(obs_dict, stochastic=cfg.eval.stochastic)
@@ -368,7 +379,18 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                     else:                 
                         action_dict = policy.predict_action(obs_dict)
 
+                # store generated actions
+                simulation_dict ["action"] = action_dict["action_pred"]
+                all_pred_actions.append(simulation_dict ["action"].cpu().numpy())
 
+                # compute action reconstruction loss and manifold adherence
+                loss_reconst = self.action_reconst_loss(simulation_dict, train_dataset, cfg)
+                _, adherence = self.compute_manifold_adherence(simulation_dict, train_dataset, 50, cfg)
+
+                for i in range (this_n_active_envs):
+                    loss_reconst_all_envs[start+i].append(loss_reconst[i].item())
+                    manifold_adh[start+i].append(adherence[i].item())
+                
                 # device_transfer
                 np_action_dict = dict_apply(action_dict,
                     lambda x: x.detach().to('cpu').numpy())
@@ -376,6 +398,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                 # handle latency_steps, we discard the first n_latency_steps actions
                 # to simulate latency
                 action = np_action_dict['action'][:,self.n_latency_steps:]
+
                 if not np.all(np.isfinite(action)):
                     print(action)
                     raise RuntimeError("Nan or Inf action")
@@ -391,6 +414,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
 
                 # update pbar
                 pbar.update(action.shape[1])
+
             pbar.close()
 
             # collect data for this round
@@ -426,8 +450,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             name = prefix+'mean_score'
             value = np.mean(value)
             log_data[name] = value
-
-        return log_data
+        return log_data, np.stack(loss_reconst_all_envs), np.stack (manifold_adh), np.stack(all_pred_actions, axis=1)
 
     def undo_transform_action(self, action):
         raw_shape = action.shape

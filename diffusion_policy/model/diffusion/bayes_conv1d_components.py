@@ -186,7 +186,10 @@ class ProbLinear(nn.Module):
     prior_dist : string
         string that indicates the type of distribution for the
         prior and posterior
-
+    
+    init_post : string
+        string that indicates the way to initialise the posterior:
+    
     init_prior : string
         string that indicates the way to initialise the prior:
         *"weights" = initialise with init_layer
@@ -196,7 +199,7 @@ class ProbLinear(nn.Module):
 
     """
 
-    def __init__(self, in_features, out_features, rho_post = -3.0, rho_prior=-3.0, prior_dist='gaussian'):
+    def __init__(self, in_features, out_features, rho_post = -3.0, rho_prior=-3.0, prior_dist='gaussian', init_post = 'random', init_prior = 'zeros'):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -207,14 +210,25 @@ class ProbLinear(nn.Module):
         sigma_weights = 1/np.sqrt(in_features)
 
         # prior initialization
-        weights_mu_prior = torch.zeros(out_features, in_features)
+        if init_prior == 'zeros':
+            weights_mu_prior = torch.zeros(out_features, in_features)
+        elif init_prior == 'random':
+            weights_mu_prior = trunc_normal_(torch.Tensor(out_features, in_features), 0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
+        else:
+            raise RuntimeError(f'Wrong prior initialization. It should be either "zeros" or "random", but got {init_prior}')
+
         bias_mu_prior = torch.zeros(out_features) 
         weights_rho_prior = torch.ones(out_features, in_features) * rho_prior
         bias_rho_prior = torch.ones(out_features) * rho_prior
-
+        
         # Posterior initialization 
-        weights_mu_init = trunc_normal_(torch.Tensor(
-                out_features, in_features), 0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
+        if init_post == 'zeros':
+            weights_mu_init = torch.zeros(out_features, in_features)
+        elif init_post == 'random':
+            weights_mu_init = trunc_normal_(torch.Tensor(out_features, in_features), 0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
+        else:
+            raise RuntimeError(f'Wrong posterior initialization. It should be either "zeros" or "random", but got {init_post}')
+
         bias_mu_init = torch.zeros(out_features)
         weights_rho_post = torch.ones(out_features, in_features) * rho_post
         bias_rho_post = torch.ones(out_features) * rho_post
@@ -296,7 +310,10 @@ class ProbConv1d(nn.Module):
     prior_dist : string
         string that indicates the type of distribution for the
         prior and posterior
-
+    
+    init_post : string
+        string that indicates the way to initialise the posterior:
+    
     stride : int
         Stride of the convolution
 
@@ -309,7 +326,7 @@ class ProbConv1d(nn.Module):
     """
 
     def __init__(self, in_channels, out_channels, kernel_size, rho_post = -3.0, rho_prior=-3.0,
-                 prior_dist='gaussian', stride=1, padding=0, dilation=1, groups = 1):
+                 prior_dist='gaussian', init_post = 'random', init_prior = 'zeros', stride=1, padding=0, dilation=1, groups = 1):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -327,14 +344,27 @@ class ProbConv1d(nn.Module):
         sigma_weights = 1. / np.sqrt(in_channels * kernel_size)
 
         # Prior Initialization
-        weights_mu_prior = torch.zeros(out_features, in_features, kernel_size)
+        if init_prior == 'zeros':
+            weights_mu_prior = torch.zeros(out_features, in_features, kernel_size)
+        elif init_prior == 'random':
+            weights_mu_prior = trunc_normal_(torch.Tensor(out_features, in_features, kernel_size),
+                                    0, sigma_weights, -2*sigma_weights, 2*sigma_weights)   
+        else:
+            raise RuntimeError(f'Wrong prior initialization. It should be either "zeros" or "random", but got {init_prior}')
+
         bias_mu_prior = torch.zeros(out_features) 
         weights_rho_prior = torch.ones(out_channels, in_channels, kernel_size) * rho_prior
         bias_rho_prior = torch.ones(out_channels) * rho_prior
 
         # Posterior Initialization
-        weights_mu_init = trunc_normal_(torch.Tensor(out_channels, in_channels, kernel_size),
+        if init_post == 'zeros':
+            weights_mu_init = torch.zeros(out_channels, in_channels, kernel_size)
+        elif init_post == 'random':
+            weights_mu_init = trunc_normal_(torch.Tensor(out_channels, in_channels, kernel_size),
                                     0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
+        else:
+            raise RuntimeError(f'Wrong posterior initialization. It should be either "zeros" or "random", but got {init_post}')
+        
         bias_mu_init = torch.zeros(out_channels)
         weights_rho_post = torch.ones(out_channels, in_channels, kernel_size) * rho_post
         bias_rho_post = torch.ones(out_channels) * rho_post
@@ -406,6 +436,9 @@ class ProbConvTranspose1d(nn.Module):
     prior_dist : string
         string that indicates the type of distribution for the prior and posterior
 
+    init_post : string
+        string that indicates the way to initialise the posterior:
+
     stride : int
         Stride of the convolution
 
@@ -424,7 +457,7 @@ class ProbConvTranspose1d(nn.Module):
     """
 
     def __init__(self, in_channels, out_channels, kernel_size, rho_post = -3.0, rho_prior=-3.0,
-                 prior_dist='gaussian', stride=1, padding=0, 
+                 prior_dist='gaussian', init_post = 'random', init_prior = 'zeros', stride=1, padding=0,
                  output_padding=0, dilation=1, groups=1):
         super().__init__()
         self.in_channels = in_channels
@@ -442,15 +475,27 @@ class ProbConvTranspose1d(nn.Module):
         sigma_weights = 1. / np.sqrt(in_channels * kernel_size)
         
         # prior init
-        weights_mu_prior = torch.zeros(in_channels, out_channels, kernel_size)
+        if init_prior == 'zeros':
+            weights_mu_prior = torch.zeros(in_channels, out_channels, kernel_size)
+        elif init_prior == 'random':
+            weights_mu_prior = trunc_normal_(torch.Tensor(
+                in_channels, out_channels, kernel_size), 0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
+        else:
+            raise RuntimeError(f'Wrong prior initialization. It should be either "zeros" or "random", but got {init_prior}')
+
         bias_mu_prior = torch.zeros(out_channels)  # Fixed: out_channels
         weights_rho_prior = torch.ones(in_channels, out_channels, kernel_size) * rho_prior
         bias_rho_prior = torch.ones(out_channels) * rho_prior
         
         # posterior init
-        weights_mu_init = trunc_normal_(torch.Tensor(
-            in_channels, out_channels, kernel_size),  # Note: transposed conv has different weight arrangement
-            0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
+        if init_post == 'zeros':
+            weights_mu_init = torch.zeros(in_channels, out_channels, kernel_size)
+        elif init_post == 'random':
+            weights_mu_init = trunc_normal_(torch.Tensor(
+                in_channels, out_channels, kernel_size), 0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
+        else:
+            raise RuntimeError(f'Wrong posterior initialization. It should be either "zeros" or "random", but got {init_post}')
+
         bias_mu_init = torch.zeros(out_channels)
         weights_rho_post = torch.ones(in_channels, out_channels, kernel_size) * rho_post
         bias_rho_post = torch.ones(out_channels) * rho_post
@@ -502,12 +547,12 @@ class ProbDownsample1d(nn.Module):
     ''' This class is initialized with nn.conv1D layer from a deterministic network
     the init_layer and init_layer_prior must be 'Downsample1d' layer from deterministic network
     '''
-    def __init__(self, dim, rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian'):
+    def __init__(self, dim, rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian', init_post='random', init_prior='zeros'):
         super().__init__()
 
         self.conv = ProbConv1d(
             dim, dim, kernel_size=3, stride=2, padding=1, rho_post=rho_post,
-            rho_prior=rho_prior, prior_dist=prior_dist
+            rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
         )
     def sample_weights(self):
         self.conv.sample_weights()
@@ -524,13 +569,14 @@ class ProbDownsample1d(nn.Module):
 
     
 class ProbUpsample1d(nn.Module):
-    def __init__(self, dim, rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian'):
+    def __init__(self, dim, rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian', init_post='random', init_prior='zeros'):
         super().__init__()
         
         self.conv = ProbConvTranspose1d(
             dim, dim, kernel_size=4, stride=2, padding=1, rho_post=rho_post,
-            rho_prior=rho_prior, prior_dist=prior_dist)
-    
+            rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
+        )
+
     def sample_weights(self):
         self.conv.sample_weights()
         
@@ -549,13 +595,13 @@ class ProbConv1dBlock(nn.Module):
     """
 
     def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8, 
-                 rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian'):
+                 rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian', init_post='random', init_prior='zeros'):
         super().__init__()
 
         self.block = nn.Sequential(
             ProbConv1d(
             inp_channels, out_channels, kernel_size, rho_post = rho_post,
-            rho_prior=rho_prior, prior_dist=prior_dist,
+            rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior,
             padding=kernel_size // 2                        # Maintain same padding
         ),
             # Rearrange('batch channels horizon -> batch channels 1 horizon'),

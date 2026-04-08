@@ -70,10 +70,7 @@ def main(checkpoint, output_dir, device, override):
     env_runner.current_epoch = pickle.loads(payload["pickles"]["epoch"])
     success_rate = list()
     
-    if isinstance(policy, BaseLowdimProbPolicy):
-        runner_log = env_runner.run_prob(policy, cfg.eval.stochastic)
-    else:
-        runner_log = env_runner.run(policy)
+    runner_log = env_runner.run(policy, cfg)
     success_rate.append(runner_log["test/mean_score"])
 
     ddof = 0

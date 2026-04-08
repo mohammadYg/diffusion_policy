@@ -1,21 +1,19 @@
 import torch
 import torch.nn as nn
-import numpy as np
-import math
 
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from typing import Union
-
+  
 import einops
 from diffusion_policy.model.diffusion.positional_embedding import SinusoidalPosEmb
 from diffusion_policy.model.diffusion.bayes_conv1d_components import (
     ProbConv1d, ProbConv1dBlock,
     ProbDownsample1d, ProbUpsample1d, ProbLinear
 ) 
-
 from diffusion_policy.model.diffusion.conv1d_components import (
     Downsample1d, Upsample1d, Conv1dBlock)
+    
 
 class ProbConditionalResidualBlock1D(nn.Module):
     def __init__(
@@ -66,9 +64,20 @@ class ProbConditionalResidualBlock1D(nn.Module):
             Rearrange("batch t -> batch t 1"),
         )
 
-        # make sure dimensions compatible
+        # make sure dimensions compatible. residual layer is deterministic
         self.residual_conv = nn.Conv1d(in_channels, out_channels, 1) \
             if in_channels != out_channels else nn.Identity()
+
+    def sample_weights(self):
+        self.blocks[0].sample_weights()
+        self.blocks[1].sample_weights()
+        self.cond_encoder[1].sample_weights()
+
+
+    def clear_sample(self):
+        self.blocks[0].clear_sample()
+        self.blocks[1].clear_sample()
+        self.cond_encoder[1].clear_sample()
 
     def forward(self, x, cond, stochastic=False):
         """
@@ -108,9 +117,8 @@ class ProbConditionalResidualBlock1D(nn.Module):
         # KL from convolutional blocks
         kl_div += self.blocks[0].block[0].kl_div
         kl_div += self.blocks[1].block[0].kl_div
-        
-        # KL from conditioning linear layer
         kl_div += self.cond_encoder[1].kl_div
+            
         return kl_div
     
 class BayesianConditionalUnet1D(nn.Module):
@@ -131,19 +139,17 @@ class BayesianConditionalUnet1D(nn.Module):
         prior_dist='gaussian',
     ):
         super().__init__()
-        
-        #print("output_dim", output_dim)
 
         all_dims = [input_dim] + list(down_dims)
         start_dim = down_dims[0]
         
-        # Probabilistic timestep encoding 
-        dsed = diffusion_step_embed_dim       
+        # Deterministic timestep encoding 
+        dsed = diffusion_step_embed_dim
         diffusion_step_encoder = nn.Sequential(
             SinusoidalPosEmb(dsed),
-            ProbLinear(dsed, dsed * 4, rho_post=rho_post, rho_prior=rho_prior, prior_dist=prior_dist),
+            nn.Linear(dsed, dsed * 4),
             nn.Mish(),
-            ProbLinear(dsed * 4, dsed, rho_post=rho_post, rho_prior=rho_prior, prior_dist=prior_dist),
+            nn.Linear(dsed * 4, dsed),
         )
         
         cond_dim = dsed
@@ -244,7 +250,7 @@ class BayesianConditionalUnet1D(nn.Module):
                             rho_prior=rho_prior,
                             prior_dist=prior_dist
                         ),
-                        Downsample1d(dim_out) if not is_last else nn.Identity(),
+                        Downsample1d(dim_out) if not is_last else nn.Identity()
                     ]
                 )
             )
@@ -284,13 +290,23 @@ class BayesianConditionalUnet1D(nn.Module):
             )
 
         final_conv = nn.Sequential(
-            ProbConv1dBlock(
-                start_dim, start_dim, kernel_size=kernel_size,
-                n_groups=n_groups, rho_post=rho_post, rho_prior=rho_prior,
-                prior_dist=prior_dist
-            ),
+            Conv1dBlock(start_dim, start_dim, kernel_size=kernel_size),
             nn.Conv1d(start_dim, input_dim, 1),
         )
+
+        # final_conv = nn.Sequential(
+        #     ProbConv1dBlock(
+        #         start_dim, start_dim, kernel_size=kernel_size,
+        #         n_groups=n_groups, rho_post=rho_post, rho_prior=rho_prior,
+        #         prior_dist=prior_dist
+        #     ),
+        #     nn.Conv1d(start_dim, input_dim, 1)
+        #     # ProbConv1d(
+        #     #     start_dim, output_dim, kernel_size=1,
+        #     #     rho_post=rho_post,
+        #     #     rho_prior=rho_prior, prior_dist=prior_dist
+        #     # ),
+        # )
 
         self.diffusion_step_encoder = diffusion_step_encoder
         self.local_cond_encoder = local_cond_encoder
@@ -302,6 +318,58 @@ class BayesianConditionalUnet1D(nn.Module):
         self.rho_prior = rho_prior
         self.rho_post = rho_post
         self.prior_dist = prior_dist
+    
+    def sample_weights(self):
+        # Sample weights for all probabilistic layers in the model
+        for layer in self.diffusion_step_encoder:
+            if hasattr(layer, "sample_weights"):
+                layer.sample_weights()
+        
+        if self.local_cond_encoder is not None:
+            for layer in self.local_cond_encoder:
+                layer.sample_weights()
+
+        for layer in self.mid_modules:
+            layer.sample_weights()
+        
+        for module_list in self.down_modules:
+            for layer in module_list:
+                if hasattr(layer, "sample_weights"):
+                    layer.sample_weights()
+        
+        for module_list in self.up_modules:
+            for layer in module_list:
+                if hasattr(layer, "sample_weights"):
+                    layer.sample_weights()
+    
+        if hasattr(self.final_conv[0], "sample_weights"): self.final_conv[0].sample_weights()
+        if hasattr(self.final_conv[1], "sample_weights"): self.final_conv[1].sample_weights()
+
+    def clear_sampled_weights(self):
+        # Clear sampled weights for all probabilistic layers in the model
+        for layer in self.diffusion_step_encoder:
+            if hasattr(layer, "clear_sample"):
+                layer.clear_sample()
+
+        if self.local_cond_encoder is not None:
+            for layer in self.local_cond_encoder:
+                layer.clear_sample()
+
+        for layer in self.mid_modules:
+            layer.clear_sample()
+        
+        for module_list in self.down_modules:
+            for layer in module_list:
+                if hasattr(layer, "clear_sample"):
+                    layer.clear_sample()
+
+        for module_list in self.up_modules:
+            for layer in module_list:
+                if hasattr(layer, "clear_sample"):
+                    layer.clear_sample()
+        
+        if hasattr(self.final_conv[0], "clear_sample"): self.final_conv[0].clear_sample()
+        if hasattr(self.final_conv[1], "clear_sample"): self.final_conv[1].clear_sample()
 
     def forward(
         self,
@@ -331,11 +399,8 @@ class BayesianConditionalUnet1D(nn.Module):
             timesteps = timesteps[None].to(sample.device)
         timesteps = timesteps.expand(sample.shape[0])
 
-        # Use stochastic sampling for diffusion step encoder
-        global_feature = self.diffusion_step_encoder[0](timesteps)  # SinusoidalPosEmb
-        global_feature = self.diffusion_step_encoder[1](global_feature, stochastic=stochastic)
-        global_feature = self.diffusion_step_encoder[2](global_feature)  # Mish
-        global_feature = self.diffusion_step_encoder[3](global_feature, stochastic=stochastic)
+        # use deterministic encoding for timesteps
+        global_feature = self.diffusion_step_encoder(timesteps)
 
         if global_cond is not None:
             global_feature = torch.cat([global_feature, global_cond], axis=-1)
@@ -370,10 +435,11 @@ class BayesianConditionalUnet1D(nn.Module):
                 x = x + h_local[1]
             x = resnet2(x, global_feature, stochastic=stochastic)
             x = upsample(x)
-
+        
         # Apply final convolution with stochastic sampling
-        x = self.final_conv[0](x, stochastic=stochastic)
-        x = self.final_conv[1](x)
+        x = self.final_conv(x)
+        # x = self.final_conv[0](x, stochastic=stochastic)
+        # x = self.final_conv[1](x)
         x = einops.rearrange(x, "b t h -> b h t")
         return x
     
@@ -381,34 +447,30 @@ class BayesianConditionalUnet1D(nn.Module):
         """Compute total KL divergence from all probabilistic components"""
         kl_div = 0
         
-        # KL from diffusion step encoder
-        for layer in self.diffusion_step_encoder:
-            if hasattr(layer, 'kl_div'):
-                kl_div += layer.kl_div
-        
         # KL from local condition encoder
         if self.local_cond_encoder is not None:
             for layer in self.local_cond_encoder:
                 kl_div += layer.compute_kl()
-        
+
         # KL from mid modules
         for layer in self.mid_modules:
             kl_div += layer.compute_kl()
-        
+
         # KL from down modules
         for module_list in self.down_modules:
             for layer in module_list:
                 if hasattr(layer, 'compute_kl'):
                     kl_div += layer.compute_kl()
-        
+
         # KL from up modules
         for module_list in self.up_modules:
             for layer in module_list:
                 if hasattr(layer, 'compute_kl'):
                     kl_div += layer.compute_kl()
-        
-        # KL from final convolution
-        kl_div += self.final_conv[0].compute_kl()
+
+        # # KL from final convolution
+        # kl_div += self.final_conv[0].compute_kl()
+        # kl_div += self.final_conv[1].kl_div
         
         return kl_div
 

@@ -526,43 +526,43 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
     
     @torch.no_grad()
     def compute_action_reconst_loss(self, dataloader, cfg):
-        loss_rec = 0
-        n_total_samples = 0
-        
-        with tqdm.tqdm(dataloader, desc=f"Reconstruction Loss", 
-                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-
+        total_loss_rec = 0
+        for _ in range (cfg.num_mc_samples): 
+            loss_rec=0
+            with tqdm.tqdm(dataloader, desc=f"Reconstruction Loss", 
+                        leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                 for batch in tepoch:
                     batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
                     
                     # extract observation
                     obs_dict = {'obs': batch['obs']}
                     ref_action = batch["action"]
+                    
+                    # reconstruct action 
+                    result = self.predict_action(obs_dict)
 
-                    B = ref_action.shape[0]
-                    n_total_samples += B
-
-                    if cfg.pred_action_steps_only:
-                        start = cfg.n_obs_steps - 1
-                        end = start + cfg.n_action_steps
+                    if self.pred_action_steps_only:
+                        pred_action = result['action']
+                        start = To
+                        if self.oa_step_convention:
+                            start = To - 1
+                        end = start + self.n_action_steps
                         ref_action = ref_action[:, start:end]
+                    else:
+                        pred_action = result['action_pred']
 
-                    for _ in range (cfg.num_mc_samples):
-                        result = self.predict_action(obs_dict)
-                        if cfg.pred_action_steps_only:
-                            pred_action = result['action']
-                        else:
-                            pred_action = result['action_pred']
+                    batch_loss = torch.linalg.norm(
+                                            pred_action - ref_action,
+                                            ord=2,
+                                            dim=(1, 2)
+                                        )  # (B,)
+                    # compute reconstruction loss
+                    loss_rec += batch_loss.sum()
+                
+            total_loss_rec += loss_rec
 
-                        batch_loss = torch.linalg.norm(
-                                                pred_action - ref_action,
-                                                ord=2,
-                                                dim=(1, 2)
-                                            )  # (B,)
-                        # compute reconstruction loss
-                        loss_rec += batch_loss.sum()
-        
-        return loss_rec/(cfg.num_mc_samples*n_total_samples)
+        return total_loss_rec/(cfg.num_mc_samples*len(dataloader.dataset))
+
 
     
     # def nll_sde(self, dataloader, cfg):

@@ -20,7 +20,7 @@ keypoint_visible_rate: 1.0
 obs_as_local_cond: False
 obs_as_global_cond: True
 pred_action_steps_only: False
-num_mc_samples: 100
+num_mc_samples: 10
 
 policy:
   _target_: diffusion_policy.policy.diffusion_unet_lowdim_policy.DiffusionUnetLowdimPolicy
@@ -81,7 +81,7 @@ dataloader:
   persistent_workers: False
 
 val_dataloader:
-  batch_size: 256
+  batch_size: 1024
   num_workers: 1
   shuffle: False
   pin_memory: True
@@ -98,8 +98,9 @@ training:
   device: "cuda:1"
   seed: 42
   debug: False
-  retrain: False
-  desired_ckpt_path: "data/outputs/2025.10.12/11.33.45_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0400-test_mean_score=0.780.ckpt"
+  resume: False
+  desired_ckpt_path: null
+  
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500

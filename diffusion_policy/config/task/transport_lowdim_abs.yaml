@@ -35,7 +35,7 @@ env_runner:
   abs_action: *abs_action
   n_envs: 50
   noise_enabled: False
-  relative_noise: 0.0'
+  relative_noise: 0.0
 # evaluation at this config requires a 16 core 64GB instance.
 
 dataset:
