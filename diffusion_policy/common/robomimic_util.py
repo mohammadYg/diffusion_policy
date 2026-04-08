@@ -8,7 +8,7 @@ import robomimic.utils.env_utils as EnvUtils
 from scipy.spatial.transform import Rotation
 
 from robomimic.config import config_factory
-
+from mimicgen.envs.robosuite import *
 
 class RobomimicAbsoluteActionConverter:
     def __init__(self, dataset_path, algo_name='bc'):
