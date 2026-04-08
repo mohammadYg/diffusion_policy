@@ -124,14 +124,14 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 cfg.ema,
                 model=self.ema_model)
 
-        # configure env runner
-        if self.global_rank == 0:
-            env_runner: BaseLowdimRunner = hydra.utils.instantiate(
-                cfg.task.env_runner,
-                output_dir=self.output_dir)
-            assert isinstance(env_runner, BaseLowdimRunner)
-        else:
-            env_runner = None
+        # # configure env runner
+        # if self.global_rank == 0:
+        #     env_runner: BaseLowdimRunner = hydra.utils.instantiate(
+        #         cfg.task.env_runner,
+        #         output_dir=self.output_dir)
+        #     assert isinstance(env_runner, BaseLowdimRunner)
+        # else:
+        #     env_runner = None
 
         # configure logging (only on global_rank 0)
         if self.global_rank == 0:
@@ -246,65 +246,77 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     train_loss = np.mean(train_losses)
                     step_log['train_loss'] = train_loss
 
-                # ========= eval for this epoch ==========
-                policy = self.model.module
-                if cfg.training.use_ema:
-                    policy = self.ema_model
-                policy.eval()
+                # # ========= eval for this epoch ==========
+                # policy = self.model.module
+                # if cfg.training.use_ema:
+                #     policy = self.ema_model
+                # policy.eval()
 
-                # run rollout (only on global_rank 0)
-                if self.global_rank == 0 and (self.epoch % cfg.training.rollout_every) == 0:
-                    env_runner.current_epoch = self.epoch
-                    runner_log = env_runner.run(policy)
-                    step_log.update(runner_log)
-                    if self.epoch>cfg.training.num_epochs-500:
-                        last_ten_success_rate.append(step_log["test/mean_score"])
+                # # run rollout (only on global_rank 0)
+                # if self.global_rank == 0 and (self.epoch % cfg.training.rollout_every) == 0:
+                #     env_runner.current_epoch = self.epoch
+                #     runner_log = env_runner.run(policy)
+                #     step_log.update(runner_log)
+                #     if self.epoch>cfg.training.num_epochs-500:
+                #         last_ten_success_rate.append(step_log["test/mean_score"])
 
-                # run validation (only on global_rank 0)
-                if self.global_rank == 0 and (self.epoch % cfg.training.val_every) == 0:
-                    with torch.no_grad():
-                        # compute test noise prediction loss
-                        val_losses = list()
-                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}: Noise Prediction Loss on test set", 
-                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                            for batch_idx, batch in enumerate(tepoch):
-                                n_samples = len(batch["obs"])
-                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                val_loss = policy.compute_loss(batch, train=False)
-                                val_losses.append(val_loss.item() * n_samples)
-                                if (cfg.training.max_val_steps is not None) \
-                                    and batch_idx >= (cfg.training.max_val_steps-1):
-                                    break   
-                        if len(val_losses) > 0:
-                            val_loss = np.sum(val_losses)/len(val_dataset)
-                            step_log['test_noise_pred_loss'] = val_loss
+                # # run validation (only on global_rank 0)
+                # if self.global_rank == 0 and (self.epoch % cfg.training.val_every) == 0:
+                #     with torch.no_grad():
+                #         # compute test noise prediction loss
+                #         val_losses = list()
+                #         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}: Noise Prediction Loss on test set", 
+                #                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                #             for batch_idx, batch in enumerate(tepoch):
+                #                 n_samples = len(batch["obs"])
+                #                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                #                 val_loss = policy.compute_loss(batch, train=False)
+                #                 val_losses.append(val_loss.item() * n_samples)
+                #                 if (cfg.training.max_val_steps is not None) \
+                #                     and batch_idx >= (cfg.training.max_val_steps-1):
+                #                     break   
+                #         if len(val_losses) > 0:
+                #             val_loss = np.sum(val_losses)/len(val_dataset)
+                #             step_log['test_noise_pred_loss'] = val_loss
 
-                # Compute upper bound on NLL (only on global_rank 0)
-                if self.global_rank == 0 and (self.epoch % cfg.training.nll_every)==0:
-                    NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100)
-                    step_log['test_nll_bpd'] = NLL_test 
+                # # Compute upper bound on NLL (only on global_rank 0)
+                # if self.global_rank == 0 and (self.epoch % cfg.training.nll_every)==0:
+                #     NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100)
+                #     step_log['test_nll_bpd'] = NLL_test 
                 
-                # Compute Reconstruction loss (only on global_rank 0)
-                if self.global_rank == 0 and (self.epoch % cfg.training.reconst_loss_every)==0:
-                    reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
-                    step_log['test_action_reconst_loss'] = reconst_loss.item()
+                # # Compute Reconstruction loss (only on global_rank 0)
+                # if self.global_rank == 0 and (self.epoch % cfg.training.reconst_loss_every)==0:
+                #     reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
+                #     step_log['test_action_reconst_loss'] = reconst_loss.item()
 
-                # checkpoint (only on global_rank 0)
+                # # saving checkpoint based on best success rate (only on global_rank 0)
+                # if self.global_rank == 0 and (self.epoch % cfg.training.checkpoint_every) == 0:
+                #     if cfg.checkpoint.save_last_ckpt:
+                #         self.save_checkpoint(ddp=True)
+                #     if cfg.checkpoint.save_last_snapshot:
+                #         self.save_snapshot()
+                #     metric_dict = dict()
+                #     for key, value in step_log.items():
+                #         new_key = key.replace('/', '_')
+                #         metric_dict[new_key] = value
+                #     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+                #     if topk_ckpt_path is not None:
+                #         self.save_checkpoint(path=topk_ckpt_path,ddp=True)
+
+                # # ========= eval end for this epoch ==========
+                # policy.train()
+
+                # saving last 10 checkpoints
                 if self.global_rank == 0 and (self.epoch % cfg.training.checkpoint_every) == 0:
-                    if cfg.checkpoint.save_last_ckpt:
-                        self.save_checkpoint(ddp=True)
-                    if cfg.checkpoint.save_last_snapshot:
+                    # checkpointing
+                    if cfg.checkpoint_every.save_last_ckpt:
+                        self.save_checkpoint()
+                    if cfg.checkpoint_every.save_last_snapshot:
                         self.save_snapshot()
-                    metric_dict = dict()
-                    for key, value in step_log.items():
-                        new_key = key.replace('/', '_')
-                        metric_dict[new_key] = value
-                    topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
-                    if topk_ckpt_path is not None:
-                        self.save_checkpoint(path=topk_ckpt_path,ddp=True)
-
-                # ========= eval end for this epoch ==========
-                policy.train()
+                    if self.epoch>cfg.training.num_epochs-500:
+                        topk_ckpt_path = topk_manager_every.get_ckpt_path(step_log)
+                        if topk_ckpt_path is not None:
+                            self.save_checkpoint(path=topk_ckpt_path)
 
                 # end of epoch logging (only on global_rank 0)
                 if self.global_rank == 0:
