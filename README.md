@@ -80,7 +80,14 @@ but you can use conda as well:
 ```console
 $ conda env create -f conda_environment.yaml
 ```
-
+Install also MimicGen by cloning the [repository](https://github.com/NVlabs/mimicgen) and then installing from source:
+```console
+$ conda activate DP
+$ cd <PATH_TO_YOUR_INSTALL_DIRECTORY>
+$ git clone https://github.com/NVlabs/mimicgen.git
+$ cd mimicgen
+$ pip install -e .
+```
 The `conda_environment_macos.yaml` file is only for development on MacOS and does not have full support for benchmarks.
 
 ### 🦾 Real Robot
