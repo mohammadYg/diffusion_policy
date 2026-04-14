@@ -310,13 +310,13 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 if self.global_rank == 0 and (self.epoch % cfg.training.checkpoint_every) == 0:
                     # checkpointing
                     if cfg.checkpoint_every.save_last_ckpt:
-                        self.save_checkpoint()
+                        self.save_checkpoint(ddp=True)
                     if cfg.checkpoint_every.save_last_snapshot:
                         self.save_snapshot()
                     if self.epoch>cfg.training.num_epochs-500:
                         topk_ckpt_path = topk_manager_every.get_ckpt_path(step_log)
                         if topk_ckpt_path is not None:
-                            self.save_checkpoint(path=topk_ckpt_path)
+                            self.save_checkpoint(path=topk_ckpt_path, ddp=True)
 
                 # end of epoch logging (only on global_rank 0)
                 if self.global_rank == 0:
