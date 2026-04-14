@@ -125,7 +125,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
         ## configure dataset for PAC-Bayes training 
         post_dataset = self.dataset.get_post_dataset() if cfg.task.dataset.train_episodes_for_posterior>0 else self.dataset
         train_sampler = DistributedSampler(post_dataset)
-        post_dataloader = DataLoader(post_dataset, sampler = train_sampler**cfg.post_dataloader)
+        post_dataloader = DataLoader(post_dataset, sampler = train_sampler, **cfg.post_dataloader)
 
         # configure validation dataset
         val_dataset = self.dataset.get_validation_dataset()
@@ -279,7 +279,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             if not is_last_batch:
                                 # log of last step is combined with validation and rollout
                                 wandb_run.log(step_log, step=self.global_step)
-                                json_logger.log(step_log)
+                                json_logger_cm.log(step_log)
                                 self.global_step += 1
 
                         if (cfg.training.max_train_steps is not None) \
@@ -301,7 +301,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 # run rollout (only on global_rank 0)
                 if self.global_rank == 0 and (self.epoch % cfg.training.rollout_every) == 0:
                     env_runner.current_epoch = self.epoch
-                    runner_log = env_runner.run(policy)
+                    runner_log = env_runner.run(policy, cfg)
                     step_log.update(runner_log)
                     if self.epoch>cfg.training.num_epochs-500:
                         last_ten_success_rate.append(step_log["test/mean_score"])

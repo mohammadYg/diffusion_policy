@@ -3,7 +3,7 @@ defaults:
   - task: pusht_lowdim
 
 name: train_prob_diffusion_unet_lowdim
-_target_: diffusion_policy.workspace.train_bayes_diffusion_unet_lowdim_workspace.TrainProbDiffusionUnetLowdimWorkspace
+_target_: diffusion_policy.workspace.ddp_train_bayes_diffusion_unet_lowdim_workspace.TrainProbDiffusionUnetLowdimWorkspace
 
 obs_dim: ${task.obs_dim}
 action_dim: ${task.action_dim}
