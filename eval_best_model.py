@@ -151,8 +151,6 @@ def main(ckpts_dir, output_dir, device, override):
         override_cfg = OmegaConf.from_dotlist(list(override))
         cfg = OmegaConf.merge(cfg, override_cfg)
         
-    env_runner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir))
-
     # prepare datasets (instantiate per-checkpoint in case cfg changed)
     dataset = hydra.utils.instantiate(cfg.task.dataset)
     assert isinstance(dataset, BaseLowdimDataset)
@@ -162,6 +160,13 @@ def main(ckpts_dir, output_dir, device, override):
     cov_dataloader = DataLoader(dataset, batch_size=len(dataset), 
                                 num_workers=1,   pin_memory = True, 
                                 persistent_workers = False)
+    
+    ## extract demos that are not used in training 
+    test_indices = np.where(~dataset.train_mask)[0]
+    
+    # initialize envs
+    env_runner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir), test_mask = test_indices)
+
 
     test_pred_noise_loss = 0.0
     NLL_test = 0.0

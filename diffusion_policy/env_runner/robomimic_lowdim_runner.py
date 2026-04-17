@@ -81,6 +81,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
     def __init__(self, 
             output_dir,
             dataset_path,
+            test_mask,
             obs_keys,
             n_train=10,
             n_train_vis=3,
@@ -123,8 +124,11 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
 
         super().__init__(output_dir)
 
+        # if n_envs is None:
+        #     n_envs = n_train + n_test
+
         if n_envs is None:
-            n_envs = n_train + n_test
+            n_envs = len(test_mask)
 
         # handle latency step
         # to mimic latency, we request n_latency_steps additional steps 
@@ -191,15 +195,15 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         env_prefixs = list()
         env_init_fn_dills = list()
 
-        # train
+        # test
         with h5py.File(dataset_path, 'r') as f:
-            for i in range(n_train):
-                train_idx = train_start_idx + i
-                enable_render = i < n_train_vis
-                init_state = f[f'data/demo_{train_idx}/states'][0]
+            for i in range(len(test_mask)):
+                test_idx = test_mask[i]
+                enable_render = i < n_test_vis
+                init_state = f[f'data/demo_{test_idx}/states'][0]
 
                 def init_fn(env, init_state=init_state, 
-                    enable_render=enable_render, train_idx=train_idx):
+                    enable_render=enable_render, test_idx=test_idx):
                     # setup rendering
                     # video_wrapper
                     assert isinstance(env.env, VideoRecordingWrapper)
@@ -207,7 +211,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                     env.env.file_path = None
                     if enable_render:
                         epoch = getattr(self, "current_epoch", 0)
-                        name = self.make_video_filename(epoch=epoch,idx=train_idx)
+                        name = self.make_video_filename(epoch=epoch,idx=test_idx)
                         # filename = pathlib.Path(output_dir).joinpath(
                         #     'media', wv.util.generate_id() + ".mp4")
                         filename = pathlib.Path(output_dir).joinpath(
@@ -225,55 +229,97 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                     assert isinstance(noise_wrapper, ObservationNoiseWrapper)
 
                     noise_wrapper.configure(
-                        seed=train_idx,
+                        seed=test_idx,
                         enabled=noise_enabled
                     )
 
-                env_seeds.append(train_idx)
-                env_prefixs.append('train/')
+                env_seeds.append(test_idx)
+                env_prefixs.append('test/')
                 env_init_fn_dills.append(dill.dumps(init_fn))
+
+        # # train
+        # with h5py.File(dataset_path, 'r') as f:
+        #     for i in range(n_train):
+        #         train_idx = train_start_idx + i
+        #         enable_render = i < n_train_vis
+        #         init_state = f[f'data/demo_{train_idx}/states'][0]
+
+        #         def init_fn(env, init_state=init_state, 
+        #             enable_render=enable_render, train_idx=train_idx):
+        #             # setup rendering
+        #             # video_wrapper
+        #             assert isinstance(env.env, VideoRecordingWrapper)
+        #             env.env.video_recoder.stop()
+        #             env.env.file_path = None
+        #             if enable_render:
+        #                 epoch = getattr(self, "current_epoch", 0)
+        #                 name = self.make_video_filename(epoch=epoch,idx=train_idx)
+        #                 # filename = pathlib.Path(output_dir).joinpath(
+        #                 #     'media', wv.util.generate_id() + ".mp4")
+        #                 filename = pathlib.Path(output_dir).joinpath(
+        #                     'media', name + ".mp4")
+        #                 filename.parent.mkdir(parents=False, exist_ok=True)
+        #                 filename = str(filename)
+        #                 env.env.file_path = filename
+
+        #             # switch to init_state reset
+        #             assert isinstance(env.env.env.env, RobomimicLowdimWrapper)
+        #             env.env.env.env.init_state = init_state
+
+        #             # configure noise wrapper
+        #             noise_wrapper = env.env.env                           # unwrap MultiStep → Video → ObservationNoise
+        #             assert isinstance(noise_wrapper, ObservationNoiseWrapper)
+
+        #             noise_wrapper.configure(
+        #                 seed=train_idx,
+        #                 enabled=noise_enabled
+        #             )
+
+        #         env_seeds.append(train_idx)
+        #         env_prefixs.append('train/')
+        #         env_init_fn_dills.append(dill.dumps(init_fn))
         
-        # test
-        for i in range(n_test):
-            seed = test_start_seed + i
-            enable_render = i < n_test_vis
+        # # test
+        # for i in range(n_test):
+        #     seed = test_start_seed + i
+        #     enable_render = i < n_test_vis
 
-            def init_fn(env, seed=seed, 
-                enable_render=enable_render):
-                # setup rendering
-                # video_wrapper
-                assert isinstance(env.env, VideoRecordingWrapper)
-                env.env.video_recoder.stop()
-                env.env.file_path = None
-                if enable_render:
-                    epoch = getattr(self, "current_epoch", 0)
-                    name = self.make_video_filename(
-                        epoch=epoch,
-                        idx=seed
-                    )
-                    filename = pathlib.Path(output_dir).joinpath(
-                        'media', name + ".mp4")
-                    # filename = pathlib.Path(output_dir).joinpath(
-                    #     'media', wv.util.generate_id() + ".mp4")
-                    filename.parent.mkdir(parents=False, exist_ok=True)
-                    filename = str(filename)
-                    env.env.file_path = filename
+        #     def init_fn(env, seed=seed, 
+        #         enable_render=enable_render):
+        #         # setup rendering
+        #         # video_wrapper
+        #         assert isinstance(env.env, VideoRecordingWrapper)
+        #         env.env.video_recoder.stop()
+        #         env.env.file_path = None
+        #         if enable_render:
+        #             epoch = getattr(self, "current_epoch", 0)
+        #             name = self.make_video_filename(
+        #                 epoch=epoch,
+        #                 idx=seed
+        #             )
+        #             filename = pathlib.Path(output_dir).joinpath(
+        #                 'media', name + ".mp4")
+        #             # filename = pathlib.Path(output_dir).joinpath(
+        #             #     'media', wv.util.generate_id() + ".mp4")
+        #             filename.parent.mkdir(parents=False, exist_ok=True)
+        #             filename = str(filename)
+        #             env.env.file_path = filename
 
-                # switch to seed reset
-                assert isinstance(env.env.env.env, RobomimicLowdimWrapper)
-                env.env.env.env.init_state = None
-                env.seed(seed)
-                noise_wrapper = env.env.env
-                assert isinstance(noise_wrapper, ObservationNoiseWrapper)
+        #         # switch to seed reset
+        #         assert isinstance(env.env.env.env, RobomimicLowdimWrapper)
+        #         env.env.env.env.init_state = None
+        #         env.seed(seed)
+        #         noise_wrapper = env.env.env
+        #         assert isinstance(noise_wrapper, ObservationNoiseWrapper)
 
-                noise_wrapper.configure(
-                    seed=seed,
-                    enabled=noise_enabled
-                )
+        #         noise_wrapper.configure(
+        #             seed=seed,
+        #             enabled=noise_enabled
+        #         )
 
-            env_seeds.append(seed)
-            env_prefixs.append('test/')
-            env_init_fn_dills.append(dill.dumps(init_fn))
+        #     env_seeds.append(seed)
+        #     env_prefixs.append('test/')
+        #     env_init_fn_dills.append(dill.dumps(init_fn))
         
         env = AsyncVectorEnv(env_fns)
         # env = SyncVectorEnv(env_fns)
@@ -363,9 +409,9 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                 # run policy
                 with torch.no_grad():      
                     if isinstance(policy, BaseLowdimProbPolicy):   
-                        policy.model.sample_weights()
+                        #policy.model.sample_weights()
                         action_dict = policy.predict_action(obs_dict, stochastic=cfg.eval.stochastic)
-                        policy.model.clear_sampled_weights()
+                        #policy.model.clear_sampled_weights()
                     else:                 
                         action_dict = policy.predict_action(obs_dict)
 
