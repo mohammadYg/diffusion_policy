@@ -104,6 +104,16 @@ def save_json_log(out_path: Path, json_log: Dict):
     with out_path.open("w") as f:
         json.dump(json_log, f, indent=2, sort_keys=True)
 
+def remove_all_checkpoints(ckpt_files: List[Path]) -> None:
+    """Delete all checkpoint files after evaluation is complete."""
+    for ckpt_path in ckpt_files:
+        try:
+            if ckpt_path.exists():
+                ckpt_path.unlink()
+                logger.info("Deleted checkpoint: %s", ckpt_path.name)
+        except Exception as e:
+            logger.warning("Failed to delete %s: %s", ckpt_path.name, str(e))
+
 # ----------------------------- Main -----------------------------
 @click.command()
 @click.option("-c", "--ckpts_dir", required=True, type=click.Path(exists=True))
@@ -120,15 +130,6 @@ def main(ckpts_dir, output_dir, device, override):
         output_dir = Path(output_dir)
 
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # configure TopK manager for saving best checkpoint
-    topk_manager = TopKCheckpointManager(
-        save_dir=str(output_dir),
-        monitor_key="test_mean_score",
-        mode="max",
-        k=1,
-        format_str='epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
-    )
 
     now = datetime.now().strftime("%Y.%m.%d_%H.%M.%S")
     out_path = output_dir / f"eval_log_{now}.json"
@@ -156,6 +157,7 @@ def main(ckpts_dir, output_dir, device, override):
     assert isinstance(dataset, BaseLowdimDataset)
     val_dataset = dataset.get_validation_dataset()
     val_dataloader = DataLoader(val_dataset, batch_size=1024, shuffle=False, pin_memory=False, persistent_workers=False)
+    
     ## configure dataset for covariance_spectrum
     cov_dataloader = DataLoader(dataset, batch_size=len(dataset), 
                                 num_workers=1,   pin_memory = True, 
@@ -166,7 +168,6 @@ def main(ckpts_dir, output_dir, device, override):
     
     # initialize envs
     env_runner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir), test_mask = test_indices)
-
 
     test_pred_noise_loss = 0.0
     NLL_test = 0.0
@@ -207,9 +208,6 @@ def main(ckpts_dir, output_dir, device, override):
 
         # save best model via topk manager
         success_info = {"test_mean_score": float(success_rate), "epoch": int(epoch)}
-        best_path = topk_manager.get_ckpt_path(success_info)
-        if best_path is not None:
-            workspace.save_checkpoint(path=best_path)
 
         # update running sum for last 10 epochs (preserve original logic)
         if epoch > cfg.training.num_epochs - 550:
@@ -266,6 +264,8 @@ def main(ckpts_dir, output_dir, device, override):
     save_json_log(out_path, json_log)
     logger.info("Evaluation complete. Log written to %s", str(out_path))
 
+    # remove all checkpoints after evaluation is fully done
+    remove_all_checkpoints(ckpt_files)
 
 if __name__ == '__main__':
     main()

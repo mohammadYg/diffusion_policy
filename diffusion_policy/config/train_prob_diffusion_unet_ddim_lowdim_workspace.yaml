@@ -69,13 +69,13 @@ policy:
 
   model:
     #_target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
-    #_target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D           # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
+    #_target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
     #_target_: diffusion_policy.model.diffusion.conditional_prob3_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Probabilistic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob4_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Deterministic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob5_unet1d.BayesianConditionalUnet1D          # Determinstic FiLM conditioning  + Probabilistic timestep encoding 
-    _target_: diffusion_policy.model.diffusion.conditional_prob6_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
+    #_target_: diffusion_policy.model.diffusion.conditional_prob6_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
     #_target_: diffusion_policy.model.diffusion.conditional_prob7_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
-    #_target_: diffusion_policy.model.diffusion.conditional_prob8_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
+    _target_: diffusion_policy.model.diffusion.conditional_prob8_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
     #_target_: diffusion_policy.model.diffusion.conditional_prob9_unet1d.BayesianConditionalUnet1D 
 
 
@@ -174,7 +174,7 @@ prior_training:
   tqdm_interval_sec: 1.0
 
 training:
-  device: "cuda:1"
+  device: "cuda:0"
   seed: 42
   debug: False
   resume: False
@@ -205,14 +205,14 @@ training:
   initialize_from_prior: True
   #init_net_path: "data/outputs/2026.02.06/16.42.30_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/latest.ckpt"
   init_net_path: null
-  stochastic: False
+  stochastic: True
   bounded: False
   delta: 0.025
   kl_penalty: 1.0
   pac_objective: "fquad"  # "fquad" or "calssic", "bbb"
 
 eval:
-  stochastic: False
+  stochastic: True
   delta: 0.05
   mc_sampling: 1000
   

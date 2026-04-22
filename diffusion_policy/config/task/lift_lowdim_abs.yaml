@@ -10,15 +10,18 @@ dataset_type: &dataset_type ph
 dataset_path: &dataset_path data/robomimic/datasets/${task.task_name}/${task.dataset_type}/low_dim_abs.hdf5
 abs_action: &abs_action True
 
+# PAC-Bayes config
+# init_rho_post: -4.0
+
 env_runner:
   _target_: diffusion_policy.env_runner.robomimic_lowdim_runner.RobomimicLowdimRunner
   dataset_path: *dataset_path
   obs_keys: *obs_keys
-  n_train: 6
-  n_train_vis: 2
+  n_train: 0
+  n_train_vis: 0
   train_start_idx: 0
   n_test: 50
-  n_test_vis: 3
+  n_test_vis: 0
   test_start_seed: 100000
   # use python's eval function as resolver, single-quoted string as argument
   max_steps: ${eval:'500 if "${task.dataset_type}" == "mh" else 400'}
@@ -45,7 +48,7 @@ dataset:
   abs_action: *abs_action
   use_legacy_normalizer: False
   rotation_rep: rotation_6d
-  seed: 42
+  seed: ${training.seed}
   val_ratio: 0.02
   max_train_episodes: null
   train_episodes_for_posterior: 0        # This is selected from training data.

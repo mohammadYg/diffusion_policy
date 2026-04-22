@@ -62,21 +62,6 @@ def main(checkpoint, output_dir, device, override):
     device = torch.device(device)
     policy.to(device)
     policy.eval()
-    
-    # run eval
-    env_runner = hydra.utils.instantiate(
-            cfg.task.env_runner,
-            output_dir=output_dir)
-    env_runner.current_epoch = pickle.loads(payload["pickles"]["epoch"])
-    success_rate = list()
-    
-    runner_log = env_runner.run(policy, cfg)
-    success_rate.append(runner_log["test/mean_score"])
-
-    ddof = 0
-
-    avg_success_rate = np.mean(success_rate)
-    var_success_rate = np.var(success_rate, ddof=ddof)
 
     # configure dataset
     dataset: BaseLowdimDataset
@@ -92,6 +77,24 @@ def main(checkpoint, output_dir, device, override):
     plt.show()
     plt.savefig(os.path.join(output_dir, 'dataset_visualization.png'))
     assert isinstance(dataset, BaseLowdimDataset)
+
+    ## extract demos that are not used in training 
+    test_indices = np.where(~dataset.train_mask)[0]
+    
+    # run eval
+    env_runner = hydra.utils.instantiate(
+            cfg.task.env_runner,
+            output_dir=output_dir, test_mask=test_indices)
+    env_runner.current_epoch = pickle.loads(payload["pickles"]["epoch"])
+    success_rate = list()
+    
+    runner_log = env_runner.run(policy, cfg)
+    success_rate.append(runner_log["test/mean_score"])
+
+    ddof = 0
+
+    avg_success_rate = np.mean(success_rate)
+    var_success_rate = np.var(success_rate, ddof=ddof)
 
     # configure validation dataset
     val_dataset = dataset.get_validation_dataset()
