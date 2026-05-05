@@ -8,7 +8,7 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 from diffusion_policy.model.common.normalizer import LinearNormalizer
-from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
+from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.model.diffusion.conditional_prob1_unet1d import BayesianConditionalUnet1D
 from diffusion_policy.model.diffusion.conditional_prob2_unet1d import BayesianConditionalUnet1D
 from diffusion_policy.model.diffusion.conditional_prob3_unet1d import BayesianConditionalUnet1D
@@ -34,7 +34,7 @@ import tqdm
 import numpy as np
 import hydra
 
-class DiffusionUnetLowdimProbPolicy(BaseLowdimProbPolicy):
+class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
     def __init__(self, 
             model: BayesianConditionalUnet1D,
             noise_scheduler: DDPMScheduler,

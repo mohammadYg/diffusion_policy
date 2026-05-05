@@ -65,18 +65,18 @@ prior_policy:
   use_clipped_model_output: True
 
 policy:
-  _target_: diffusion_policy.policy.diffusion_unet_lowdim_prob_policy.DiffusionUnetLowdimProbPolicy
+  _target_: diffusion_policy.policy.pac_diffusion_unet_lowdim_policy.PacDiffusionUnetLowdimPolicy
 
   model:
-    #_target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
+    _target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
     #_target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
     #_target_: diffusion_policy.model.diffusion.conditional_prob3_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Probabilistic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob4_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Deterministic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob5_unet1d.BayesianConditionalUnet1D          # Determinstic FiLM conditioning  + Probabilistic timestep encoding 
     #_target_: diffusion_policy.model.diffusion.conditional_prob6_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
-    #_target_: diffusion_policy.model.diffusion.conditional_prob7_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
-    _target_: diffusion_policy.model.diffusion.conditional_prob8_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
-    #_target_: diffusion_policy.model.diffusion.conditional_prob9_unet1d.BayesianConditionalUnet1D 
+    #_target_: diffusion_policy.model.diffusion.conditional_prob7_unet1d.BayesianConditionalUnet1D          # Last module deterministic
+    #_target_: diffusion_policy.model.diffusion.conditional_prob8_unet1d.BayesianConditionalUnet1D          # last layer of last module is determininstic 
+    #_target_: diffusion_policy.model.diffusion.conditional_prob9_unet1d.BayesianConditionalUnet1D          # Last module bayesian
 
 
 
@@ -167,7 +167,7 @@ prior_training:
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 1000
+  num_epochs: 2501
   gradient_accumulate_every: 1
   use_ema: True
   # misc
@@ -183,7 +183,7 @@ training:
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 4500
+  num_epochs: 4501
   gradient_accumulate_every: 1
   use_ema: True
   # training loop control
@@ -234,9 +234,10 @@ checkpoint:
   save_last_ckpt: True
   save_last_snapshot: False
 
-checkpoint_every:
+checkpoint_last_N:
   topk:
     monitor_key: epoch
+    k: 10
     format_str: 'epoch={epoch:04d}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False

@@ -19,7 +19,7 @@ import wandb
 import json
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
-from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
+from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusers.training_utils import enable_full_determinism
 from torch.utils.data import DataLoader
@@ -78,13 +78,13 @@ def main(checkpoint, output_dir, device, override):
     plt.savefig(os.path.join(output_dir, 'dataset_visualization.png'))
     assert isinstance(dataset, BaseLowdimDataset)
 
-    ## extract demos that are not used in training 
-    test_indices = np.where(~dataset.train_mask)[0]
+    # ## extract demos that are not used in training 
+    # test_indices = np.where(~dataset.train_mask)[0]
     
     # run eval
     env_runner = hydra.utils.instantiate(
             cfg.task.env_runner,
-            output_dir=output_dir, test_mask=test_indices)
+            output_dir=output_dir)
     env_runner.current_epoch = pickle.loads(payload["pickles"]["epoch"])
     success_rate = list()
     

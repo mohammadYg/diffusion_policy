@@ -22,10 +22,10 @@ from pathlib import Path
 
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from diffusion_policy.policy.diffusion_unet_lowdim_prob_policy import DiffusionUnetLowdimProbPolicy, DiffusionUnetLowdimPolicy
+from diffusion_policy.policy.pac_diffusion_unet_lowdim_policy import PacDiffusionUnetLowdimPolicy, DiffusionUnetLowdimPolicy
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
-from diffusion_policy.common.checkpoint_util import TopKCheckpointManager, CheckpointManager
+from diffusion_policy.common.checkpoint_util import TopKCheckpointManager, LastNCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from diffusers.training_utils import EMAModel, enable_full_determinism
@@ -46,10 +46,10 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
         # np.random.seed(seed)
         # random.seed(seed)
 
-        self.model: DiffusionUnetLowdimProbPolicy
+        self.model: PacDiffusionUnetLowdimPolicy
         self.model = hydra.utils.instantiate(cfg.policy)
 
-        self.ema_model: DiffusionUnetLowdimProbPolicy = None
+        self.ema_model: PacDiffusionUnetLowdimPolicy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
 
@@ -182,9 +182,9 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
             **cfg.checkpoint.topk
         )
 
-        # configure checkpoint
-        topk_manager_every = CheckpointManager(
-            save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_every.topk
+        # configure checkpoint to save last N checkpoints
+        lastN_manager = LastNCheckpointManager(
+            save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_last_N.topk
         )
 
         # device transfer
@@ -363,17 +363,16 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 # #========= eval end for this epoch ==========
                 # policy.train()
                 
-                # checkpoint
+                # save last checkpoint and snapshot, and also topk checkpoint based on score
                 if ((self.epoch % cfg.training.checkpoint_every) == 0):
                     # checkpointing
-                    if cfg.checkpoint_every.save_last_ckpt:
+                    if cfg.checkpoint_last_N.save_last_ckpt:
                         self.save_checkpoint()
-                    if cfg.checkpoint_every.save_last_snapshot:
+                    if cfg.checkpoint_last_N.save_last_snapshot:
                         self.save_snapshot()
-                    if self.epoch>cfg.training.num_epochs-500:
-                        topk_ckpt_path = topk_manager_every.get_ckpt_path(step_log)
-                        if topk_ckpt_path is not None:
-                            self.save_checkpoint(path=topk_ckpt_path)
+                    lastN_ckpt_path = lastN_manager.get_ckpt_path(step_log)
+                    if lastN_ckpt_path is not None:
+                        self.save_checkpoint(path=lastN_ckpt_path)
                         
                 # end of epoch
                 # log of last step is combined with validation and rollout

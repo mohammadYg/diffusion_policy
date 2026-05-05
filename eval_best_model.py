@@ -23,7 +23,7 @@ import time
 
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
-from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
+from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
 from diffusion_policy.common.pytorch_util import dict_apply
 
@@ -163,11 +163,11 @@ def main(ckpts_dir, output_dir, device, override):
                                 num_workers=1,   pin_memory = True, 
                                 persistent_workers = False)
     
-    ## extract demos that are not used in training 
-    test_indices = np.where(~dataset.train_mask)[0]
+    # ## extract demos that are not used in training 
+    # test_indices = np.where(~dataset.train_mask)[0]
     
     # initialize envs
-    env_runner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir), test_mask = test_indices)
+    env_runner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir))
 
     test_pred_noise_loss = 0.0
     NLL_test = 0.0
@@ -210,8 +210,7 @@ def main(ckpts_dir, output_dir, device, override):
         success_info = {"test_mean_score": float(success_rate), "epoch": int(epoch)}
 
         # update running sum for last 10 epochs (preserve original logic)
-        if epoch > cfg.training.num_epochs - 550:
-            sum_success_rate_last_10_epochs += success_rate
+        sum_success_rate_last_10_epochs += success_rate
 
         # compute covariance_spectrum of the whole training data
         policy.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
@@ -265,7 +264,7 @@ def main(ckpts_dir, output_dir, device, override):
     logger.info("Evaluation complete. Log written to %s", str(out_path))
 
     # remove all checkpoints after evaluation is fully done
-    remove_all_checkpoints(ckpt_files)
+    #remove_all_checkpoints(ckpt_files)
 
 if __name__ == '__main__':
     main()

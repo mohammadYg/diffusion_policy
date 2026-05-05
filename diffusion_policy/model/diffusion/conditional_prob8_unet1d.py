@@ -314,11 +314,6 @@ class BayesianConditionalUnet1D(nn.Module):
                 )
             )
 
-        # final_conv = nn.Sequential(
-        #     Conv1dBlock(start_dim, start_dim, kernel_size=kernel_size),
-        #     nn.Conv1d(start_dim, input_dim, 1),
-        # )
-
         final_conv = nn.Sequential(
             ProbConv1dBlock(
                 start_dim, start_dim, kernel_size=kernel_size,
@@ -327,11 +322,6 @@ class BayesianConditionalUnet1D(nn.Module):
                 init_post=init_post, init_prior=init_prior
             ),
             nn.Conv1d(start_dim, input_dim, 1)
-            # ProbConv1d(
-            #     start_dim, input_dim, kernel_size=1,
-            #     rho_post=rho_post,
-            #     rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
-            # ),
         )
 
         self.diffusion_step_encoder = diffusion_step_encoder
@@ -366,7 +356,6 @@ class BayesianConditionalUnet1D(nn.Module):
                     layer.sample_weights()
     
         if hasattr(self.final_conv[0], "sample_weights"): self.final_conv[0].sample_weights()
-        #if hasattr(self.final_conv[1], "sample_weights"): self.final_conv[1].sample_weights()
 
     def clear_sampled_weights(self):
         # Clear sampled weights for all probabilistic layers in the model
@@ -389,7 +378,6 @@ class BayesianConditionalUnet1D(nn.Module):
                     layer.clear_sample()
         
         if hasattr(self.final_conv[0], "clear_sample"): self.final_conv[0].clear_sample()
-        #if hasattr(self.final_conv[1], "clear_sample"): self.final_conv[1].clear_sample()
 
     def forward(
         self,
@@ -498,7 +486,6 @@ class BayesianConditionalUnet1D(nn.Module):
 
         ## KL from final convolution
         kl_div += self.final_conv[0].compute_kl()
-        # kl_div += self.final_conv[1].kl_div
         
         return kl_div
 

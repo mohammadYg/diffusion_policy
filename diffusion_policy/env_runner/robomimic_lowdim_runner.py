@@ -17,7 +17,7 @@ from diffusion_policy.gym_util.video_recording_wrapper import VideoRecordingWrap
 from diffusion_policy.model.common.rotation_transformer import RotationTransformer
 
 from diffusion_policy.policy.base_lowdim_policy import BaseLowdimPolicy
-from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
+from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
 from diffusion_policy.env.robomimic.robomimic_lowdim_wrapper import RobomimicLowdimWrapper
@@ -81,7 +81,6 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
     def __init__(self, 
             output_dir,
             dataset_path,
-            test_mask,
             obs_keys,
             n_train=10,
             n_train_vis=3,
@@ -124,11 +123,8 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
 
         super().__init__(output_dir)
 
-        # if n_envs is None:
-        #     n_envs = n_train + n_test
-
         if n_envs is None:
-            n_envs = len(test_mask)
+            n_envs = n_train + n_test
 
         # handle latency step
         # to mimic latency, we request n_latency_steps additional steps 
@@ -194,48 +190,6 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         env_seeds = list()
         env_prefixs = list()
         env_init_fn_dills = list()
-
-        # # test
-        # with h5py.File(dataset_path, 'r') as f:
-        #     for i in range(len(test_mask)):
-        #         test_idx = test_mask[i]
-        #         enable_render = i < n_test_vis
-        #         init_state = f[f'data/demo_{test_idx}/states'][0]
-
-        #         def init_fn(env, init_state=init_state, 
-        #             enable_render=enable_render, test_idx=test_idx):
-        #             # setup rendering
-        #             # video_wrapper
-        #             assert isinstance(env.env, VideoRecordingWrapper)
-        #             env.env.video_recoder.stop()
-        #             env.env.file_path = None
-        #             if enable_render:
-        #                 epoch = getattr(self, "current_epoch", 0)
-        #                 name = self.make_video_filename(epoch=epoch,idx=test_idx)
-        #                 # filename = pathlib.Path(output_dir).joinpath(
-        #                 #     'media', wv.util.generate_id() + ".mp4")
-        #                 filename = pathlib.Path(output_dir).joinpath(
-        #                     'media', name + ".mp4")
-        #                 filename.parent.mkdir(parents=False, exist_ok=True)
-        #                 filename = str(filename)
-        #                 env.env.file_path = filename
-
-        #             # switch to init_state reset
-        #             assert isinstance(env.env.env.env, RobomimicLowdimWrapper)
-        #             env.env.env.env.init_state = init_state
-
-        #             # configure noise wrapper
-        #             noise_wrapper = env.env.env                           # unwrap MultiStep → Video → ObservationNoise
-        #             assert isinstance(noise_wrapper, ObservationNoiseWrapper)
-
-        #             noise_wrapper.configure(
-        #                 seed=test_idx,
-        #                 enabled=noise_enabled
-        #             )
-
-        #         env_seeds.append(test_idx)
-        #         env_prefixs.append('test/')
-        #         env_init_fn_dills.append(dill.dumps(init_fn))
 
         # train
         with h5py.File(dataset_path, 'r') as f:
@@ -408,7 +362,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
 
                 # run policy
                 with torch.no_grad():      
-                    if isinstance(policy, BaseLowdimProbPolicy):   
+                    if isinstance(policy, BaseLowdimPacPolicy):   
                         policy.model.sample_weights()
                         action_dict = policy.predict_action(obs_dict, stochastic=cfg.eval.stochastic)
                         policy.model.clear_sampled_weights()

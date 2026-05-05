@@ -4,7 +4,7 @@ import torch.nn as nn
 from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 
-class BaseLowdimProbPolicy(ModuleAttrMixin):  
+class BaseLowdimPacPolicy(ModuleAttrMixin):  
     # ========= inference  ============
     # also as self.device and self.dtype for inference device transfer
     def predict_action(self, obs_dict: Dict[str, torch.Tensor], stochastic=False, clamping=True) -> Dict[str, torch.Tensor]:
