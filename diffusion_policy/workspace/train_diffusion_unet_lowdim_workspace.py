@@ -100,6 +100,16 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
+        
+        # configure number of epochs based on the number of updates and dataloader size
+        num_epochs = int(cfg.training.num_updates) // len(train_dataloader)
+        checkpoint_every = int (cfg.training.checkpoint_every) // len(train_dataloader)
+        rollout_every = int (cfg.training.rollout_every) // len(train_dataloader)
+        val_every = int (cfg.training.val_every) // len(train_dataloader)
+        nll_every = int (cfg.training.nll_every) // len(train_dataloader)
+        reconst_loss_every = int (cfg.training.reconst_loss_every) // len(train_dataloader)
+
+        print (f"num_epochs: {num_epochs}, checkpoint_every: {checkpoint_every}, rollout_every: {rollout_every}, val_every: {val_every}, nll_every: {nll_every}, reconst_loss_every: {reconst_loss_every}")
 
         # configure lr scheduler
         lr_scheduler = get_scheduler(
@@ -107,7 +117,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
             num_training_steps=(
-                len(train_dataloader) * (cfg.training.num_epochs - self.epoch)) \
+                len(train_dataloader) * (num_epochs - self.epoch)) \
                     // cfg.training.gradient_accumulate_every,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
@@ -162,13 +172,12 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         train_sampling_batch = None
 
         if cfg.training.debug:
-            cfg.training.num_epochs = 2
+            num_epochs = 2
             cfg.training.max_train_steps = 3
             cfg.training.max_val_steps = 3
-            cfg.training.rollout_every = 1
-            cfg.training.checkpoint_every = 1
-            cfg.training.val_every = 1
-            cfg.training.sample_every = 1
+            rollout_every = 1
+            checkpoint_every = 1
+            val_every = 1
         
         # # compute covariance_spectrum of the training data
         # self.model.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
@@ -179,7 +188,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         last_ten_success_rate = []
         with JsonLogger(log_path) as json_logger:
-            for local_epoch_idx in range(self.epoch, cfg.training.num_epochs):
+            for local_epoch_idx in range(self.epoch, num_epochs):
                 step_log = dict()
                 # ========= train for this epoch ==========
                 train_losses = list()
@@ -241,16 +250,16 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 # policy.eval()
 
                 # # # run rollout
-                # # if (self.epoch % cfg.training.rollout_every) == 0 and (self.epoch>0):
+                # # if (self.epoch % rollout_every) == 0 and (self.epoch>0):
                 # #     env_runner.current_epoch = self.epoch
                 # #     runner_log = env_runner.run(policy, cfg)
                 # #     # log all
                 # #     step_log.update(runner_log)
-                # #     if self.epoch>cfg.training.num_epochs-500:
+                # #     if self.epoch>num_epochs-500:
                 # #         last_ten_success_rate.append(step_log["test/mean_score"])
 
                 # # run validation
-                # if (self.epoch % cfg.training.val_every) == 0:
+                # if (self.epoch % val_every) == 0:
                 #     with torch.no_grad():
                 #         # compute test noise prediction loss
                 #         val_noise_pred_losses = list()
@@ -275,18 +284,18 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
 
                 # # Compute upper bound on NLL
-                # if (self.epoch % cfg.training.nll_every)==0:
+                # if (self.epoch % nll_every)==0:
                 #     NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100)
                 #     step_log['test_nll_bpd'] = NLL_test 
 
                 
                 # # # Compute Reconstruction loss
-                # if (self.epoch % cfg.training.reconst_loss_every)==0:
+                # if (self.epoch % reconst_loss_every)==0:
                 #     reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
                 #     step_log['test_action_reconst_loss'] = reconst_loss.item()
 
                 # # # checkpoint
-                # # if (self.epoch % cfg.training.checkpoint_every) == 0 and (self.epoch>0):
+                # # if (self.epoch % checkpoint_every) == 0 and (self.epoch>0):
                 # #     # checkpointing
                 # #     if cfg.checkpoint.save_last_ckpt:
                 # #         #self.save_checkpoint(exclude_keys=['model', 'optimizer'])
@@ -313,7 +322,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 # policy.train()
 
                 # save last checkpoint and snapshot, and also topk checkpoint based on score
-                if ((self.epoch % cfg.training.checkpoint_every) == 0):
+                if ((self.epoch % checkpoint_every) == 0):
                     # checkpointing
                     if cfg.checkpoint_last_N.save_last_ckpt:
                         self.save_checkpoint()
@@ -325,7 +334,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
                 # end of epoch
                 # log of last step is combined with validation and rollout
-                if local_epoch_idx == cfg.training.num_epochs-1:
+                if local_epoch_idx == num_epochs-1:
                     step_log["test/last_10_mean_score"] = np.mean(last_ten_success_rate)
                 wandb_run.log(step_log, step=self.global_step)
                 json_logger.log(step_log)

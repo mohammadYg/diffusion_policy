@@ -104,17 +104,17 @@ training:
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 500
+  num_updates: 5e5
   gradient_accumulate_every: 1
   use_ema: True
   # training loop control
   # in epochs
-  rollout_every: 50
-  checkpoint_every: 50
-  val_every: 1
-  sample_every: 5
-  nll_every: 50
-  reconst_loss_every: 50
+  rollout_every: 1e4
+  checkpoint_every: 1e4
+  val_every: 1e3
+  sample_every: 1e3
+  nll_every: 1e3
+  reconst_loss_every: 1e3
   # steps per epoch
   max_train_steps: null
   max_val_steps: null

@@ -129,18 +129,17 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
         checkpoint_every = int (cfg.training.checkpoint_every) // len(train_dataloader)
         rollout_every = int (cfg.training.rollout_every) // len(train_dataloader)
         val_every = int (cfg.training.val_every) // len(train_dataloader)
-        sample_every = int (cfg.training.sample_every) // len(train_dataloader)
         nll_every = int (cfg.training.nll_every) // len(train_dataloader)
         reconst_loss_every = int (cfg.training.reconst_loss_every) // len(train_dataloader)
         
-        print (f"num_epochs: {num_epochs}, checkpoint_every: {checkpoint_every}, rollout_every: {rollout_every}, val_every: {val_every}, sample_every: {sample_every}, nll_every: {nll_every}, reconst_loss_every: {reconst_loss_every}")
+        print (f"num_epochs: {num_epochs}, checkpoint_every: {checkpoint_every}, rollout_every: {rollout_every}, val_every: {val_every}, nll_every: {nll_every}, reconst_loss_every: {reconst_loss_every}")
         # configure lr scheduler
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
             num_training_steps=(
-                len(train_dataloader) * num_epochs) \
+                len(train_dataloader) * (num_epochs - self.epoch)) \
                     // cfg.training.gradient_accumulate_every,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
@@ -198,10 +197,9 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
             num_epochs = 2
             cfg.training.max_train_steps = 3
             cfg.training.max_val_steps = 3
-            cfg.training.rollout_every = 1
-            cfg.training.checkpoint_every = 1
-            cfg.training.val_every = 1
-            cfg.training.sample_every = 1
+            rollout_every = 10
+            checkpoint_every = 10
+            val_every = 10
         
         # compute covariance_spectrum of the training data
         self.model.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
