@@ -50,9 +50,7 @@ policy:
     prior_dist: 'gaussian'
     init_post: 'random'
     init_prior: 'zeros'
-    init_model_path: "data/outputs/2026.05.07/14.13.30_train_pac_diffusion_unet_lowdim_square_lowdim/checkpoints/epoch=0400.ckpt"
-    data_dependent_prior: False
-
+    
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
     num_train_timesteps: 100
@@ -142,6 +140,8 @@ training:
   delta: 0.025
   kl_penalty: 1.0e-4
   pac_objective: "fquad"  # "fquad" or "calssic", "bbb"
+  init_model_path: "data/outputs/2026.05.07/14.13.30_train_pac_diffusion_unet_lowdim_square_lowdim/checkpoints/epoch=0400.ckpt"
+  data_dependent_prior: False
 
 eval:
   stochastic: True

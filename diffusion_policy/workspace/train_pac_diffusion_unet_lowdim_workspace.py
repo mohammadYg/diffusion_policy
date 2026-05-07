@@ -54,20 +54,20 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
 
-        # # initialize the prior 
-        # if cfg.policy.model_data_dependent_prior:
-        #     checkpoint = cfg.policy.model.init_model_path
-        #     init_payload = torch.load(open(checkpoint, 'rb'), pickle_module=dill)
-        #     init_workspace: BaseWorkspace
-        #     init_workspace.load_payload(init_payload, exclude_keys=['optimizer'], include_keys=None)
+        # initialize the prior 
+        if cfg.training.data_dependent_prior:
+            checkpoint = cfg.training.init_model_path
+            init_payload = torch.load(open(checkpoint, 'rb'), pickle_module=dill)
+            init_workspace: BaseWorkspace
+            init_workspace.load_payload(init_payload, exclude_keys=['optimizer'], include_keys=None)
 
-        #     init_model = init_workspace.model.model
-        #     if cfg.training.use_ema:
-        #         init_ema_model = init_workspace.ema_model.model
+            init_model = init_workspace.model.model
+            if cfg.training.use_ema:
+                init_ema_model = init_workspace.ema_model.model
 
-        #     self.model.prior_initialization(init_model, cfg.policy.model.rho_post)
-        #     if cfg.training.use_ema:
-        #         self.ema_model.prior_initialization(init_ema_model, cfg.policy.model.rho_post)
+            self.model.prior_initialization(init_model, cfg.policy.model.rho_post)
+            if cfg.training.use_ema:
+                self.ema_model.prior_initialization(init_ema_model, cfg.policy.model.rho_post)
 
         # configure training state
         self.optimizer = hydra.utils.instantiate(
@@ -103,11 +103,13 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseLowdimDataset)
         
-        prior_dataset = dataset.get_prior_dataset()
-        post_dataset = dataset.get_post_dataset()
+        # prior_dataset = dataset.get_prior_dataset()
+        # post_dataset = dataset.get_post_dataset()
+        
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         #train_dataloader = DataLoader(prior_dataset, **cfg.dataloader)
         #train_dataloader = DataLoader(post_dataset, **cfg.dataloader)
+        
         normalizer = dataset.get_normalizer()
     
         # configure validation dataset
