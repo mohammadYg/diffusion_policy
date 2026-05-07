@@ -23,7 +23,9 @@ class ProbConditionalResidualBlock1D(nn.Module):
         cond_predict_scale=False,
         rho_post=-3.0,
         rho_prior=-3.0,
-        prior_dist='gaussian'
+        prior_dist='gaussian',
+        init_post='random',
+        init_prior='zeros'
     ):
         super().__init__()
         
@@ -32,12 +34,12 @@ class ProbConditionalResidualBlock1D(nn.Module):
                 ProbConv1dBlock(
                     in_channels, out_channels, kernel_size, 
                     n_groups=n_groups, rho_post=rho_post, rho_prior=rho_prior,
-                    prior_dist=prior_dist
+                    prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
                 ),
                 ProbConv1dBlock(
                     out_channels, out_channels, kernel_size,
                     n_groups=n_groups, rho_post=rho_post, rho_prior=rho_prior,
-                    prior_dist=prior_dist
+                    prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
                 ),
             ]
         )
@@ -59,10 +61,20 @@ class ProbConditionalResidualBlock1D(nn.Module):
         if in_channels != out_channels:
             self.residual_conv = ProbConv1d(
                 in_channels, out_channels, kernel_size=1, rho_post=rho_post,
-                rho_prior=rho_prior, prior_dist=prior_dist, padding=0
+                rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior, padding=0
             )
         else:
             self.residual_conv = nn.Identity()
+
+    def sample_weights(self):
+        self.blocks[0].sample_weights()
+        self.blocks[1].sample_weights()
+        self.residual_conv.sample_weights() if not isinstance(self.residual_conv, nn.Identity) else None
+
+    def clear_sample(self):
+        self.blocks[0].clear_sample()
+        self.blocks[1].clear_sample()
+        self.residual_conv.clear_sample() if not isinstance(self.residual_conv, nn.Identity) else None
 
     def forward(self, x, cond, stochastic=False):
         """
@@ -117,7 +129,6 @@ class BayesianConditionalUnet1D(nn.Module):
         self,
         input_dim,
         output_dim=None,
-        local_cond_dim=None,
         global_cond_dim=None,
         diffusion_step_embed_dim=256,
         down_dims=[256, 512, 1024],
@@ -129,6 +140,8 @@ class BayesianConditionalUnet1D(nn.Module):
         rho_post=-3.0,
         rho_prior=-3.0,
         prior_dist='gaussian',
+        init_post='random',
+        init_prior='zeros'
     ):
         super().__init__()
         
@@ -154,41 +167,6 @@ class BayesianConditionalUnet1D(nn.Module):
 
         in_out = list(zip(all_dims[:-1], all_dims[1:]))
 
-        # Probabilistic local conditioning
-        local_cond_encoder = None
-        if local_cond_dim is not None:
-            _, dim_out = in_out[0]
-            dim_in = local_cond_dim
-
-            local_cond_encoder = nn.ModuleList(
-                [
-                    # down encoder
-                    ProbConditionalResidualBlock1D(
-                        dim_in,
-                        dim_out,
-                        cond_dim=cond_dim,
-                        kernel_size=kernel_size,
-                        n_groups=n_groups,
-                        cond_predict_scale=cond_predict_scale,
-                        rho_post=rho_post,
-                        rho_prior=rho_prior,
-                        prior_dist=prior_dist
-                    ),
-                    # up encoder
-                    ProbConditionalResidualBlock1D(
-                        dim_in,
-                        dim_out,
-                        cond_dim=cond_dim,
-                        kernel_size=kernel_size,
-                        n_groups=n_groups,
-                        cond_predict_scale=cond_predict_scale,
-                        rho_post=rho_post,
-                        rho_prior=rho_prior,
-                        prior_dist=prior_dist
-                    ),
-                ]
-            )
-
         mid_dim = all_dims[-1]
         self.mid_modules = nn.ModuleList(
             [
@@ -201,7 +179,9 @@ class BayesianConditionalUnet1D(nn.Module):
                     cond_predict_scale=cond_predict_scale,
                     rho_post=rho_post,
                     rho_prior=rho_prior,
-                    prior_dist=prior_dist
+                    prior_dist=prior_dist,
+                    init_post=init_post,
+                    init_prior=init_prior
                 ),
                 ProbConditionalResidualBlock1D(
                     mid_dim,
@@ -212,7 +192,9 @@ class BayesianConditionalUnet1D(nn.Module):
                     cond_predict_scale=cond_predict_scale,
                     rho_post=rho_post,
                     rho_prior=rho_prior,
-                    prior_dist=prior_dist
+                    prior_dist=prior_dist,
+                    init_post=init_post,
+                    init_prior=init_prior
                 ),
             ]
         )
@@ -233,7 +215,9 @@ class BayesianConditionalUnet1D(nn.Module):
                             cond_predict_scale=cond_predict_scale,
                             rho_post=rho_post,
                             rho_prior=rho_prior,
-                            prior_dist=prior_dist
+                            prior_dist=prior_dist,
+                            init_post=init_post,
+                            init_prior=init_prior
                         ),
                         ProbConditionalResidualBlock1D(
                             dim_out,
@@ -244,13 +228,17 @@ class BayesianConditionalUnet1D(nn.Module):
                             cond_predict_scale=cond_predict_scale,
                             rho_post=rho_post,
                             rho_prior=rho_prior,
-                            prior_dist=prior_dist
+                            prior_dist=prior_dist,
+                            init_post=init_post,
+                            init_prior=init_prior
                         ),
                         ProbDownsample1d(
                             dim_out, 
                             rho_post=rho_post,
                             rho_prior=rho_prior,
-                            prior_dist=prior_dist
+                            prior_dist=prior_dist,
+                            init_post=init_post,
+                            init_prior=init_prior
                         ) if not is_last else nn.Identity(),
                     ]
                 )
@@ -272,7 +260,9 @@ class BayesianConditionalUnet1D(nn.Module):
                             cond_predict_scale=cond_predict_scale,
                             rho_post=rho_post,
                             rho_prior=rho_prior,
-                            prior_dist=prior_dist
+                            prior_dist=prior_dist,
+                            init_post=init_post,
+                            init_prior=init_prior
                         ),
                         ProbConditionalResidualBlock1D(
                             dim_in,
@@ -283,13 +273,17 @@ class BayesianConditionalUnet1D(nn.Module):
                             cond_predict_scale=cond_predict_scale,
                             rho_post=rho_post,
                             rho_prior=rho_prior,
-                            prior_dist=prior_dist
+                            prior_dist=prior_dist,
+                            init_post=init_post,
+                            init_prior=init_prior
                         ),
                         ProbUpsample1d(
                             dim_in,
                             rho_post=rho_post,
                             rho_prior=rho_prior,
-                            prior_dist=prior_dist
+                            prior_dist=prior_dist,
+                            init_post=init_post,
+                            init_prior=init_prior
                         ) if not is_last else nn.Identity(),
                     ]
                 )
@@ -300,17 +294,16 @@ class BayesianConditionalUnet1D(nn.Module):
             ProbConv1dBlock(
                 start_dim, start_dim, kernel_size=kernel_size,
                 n_groups=n_groups, rho_post=rho_post, rho_prior=rho_prior,
-                prior_dist=prior_dist
+                prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
             ),
             ProbConv1d(
                 start_dim, output_dim, kernel_size=1,
                 rho_post=rho_post,
-                rho_prior=rho_prior, prior_dist=prior_dist
+                rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
             ),
         )
 
         self.diffusion_step_encoder = diffusion_step_encoder
-        self.local_cond_encoder = local_cond_encoder
         self.up_modules = up_modules
         self.down_modules = down_modules
         self.final_conv = final_conv
@@ -320,11 +313,49 @@ class BayesianConditionalUnet1D(nn.Module):
         self.rho_post = rho_post
         self.prior_dist = prior_dist
 
+    def sample_weights(self):
+        
+        for layer in self.mid_modules:
+            if hasattr(layer, "sample_weights"):
+                layer.sample_weights()
+        
+        for module_list in self.down_modules:
+            for layer in module_list:
+                if hasattr(layer, "sample_weights"):
+                    layer.sample_weights()
+        
+        for module_list in self.up_modules:
+            for layer in module_list:
+                if hasattr(layer, "sample_weights"):
+                    layer.sample_weights()
+    
+        if hasattr(self.final_conv[0], "sample_weights"): self.final_conv[0].sample_weights()
+        if hasattr(self.final_conv[1], "sample_weights"): self.final_conv[1].sample_weights()
+
+    def clear_sampled_weights(self):
+
+        for layer in self.mid_modules:
+            if hasattr(layer, "clear_sample"):
+                layer.clear_sample()
+        
+        for module_list in self.down_modules:
+            for layer in module_list:
+                if hasattr(layer, "clear_sample"):
+                    layer.clear_sample()
+
+        for module_list in self.up_modules:
+            for layer in module_list:
+                if hasattr(layer, "clear_sample"):
+                    layer.clear_sample()
+        
+        if hasattr(self.final_conv[0], "clear_sample"): self.final_conv[0].clear_sample()
+        if hasattr(self.final_conv[1], "clear_sample"): self.final_conv[1].clear_sample()
+
+
     def forward(
         self,
         sample: torch.Tensor,
         timestep: Union[torch.Tensor, float, int] = None,
-        local_cond=None,
         global_cond=None,
         stochastic=False,  # Added stochastic parameter
         **kwargs,
@@ -332,7 +363,6 @@ class BayesianConditionalUnet1D(nn.Module):
         """
         x: (B,T,input_dim)
         timestep: (B,) or int, diffusion step
-        local_cond: (B,T,local_cond_dim)
         global_cond: (B,global_cond_dim)
         output: (B,T,output_dim)
         """
@@ -353,23 +383,11 @@ class BayesianConditionalUnet1D(nn.Module):
 
         if global_cond is not None:
             global_feature = torch.cat([global_feature, global_cond], axis=-1)
-        
-        # encode local features
-        h_local = list()
-        if local_cond is not None:
-            local_cond = einops.rearrange(local_cond, "b h t -> b t h")
-            resnet, resnet2 = self.local_cond_encoder
-            x = resnet(local_cond, global_feature, stochastic=stochastic)
-            h_local.append(x)
-            x = resnet2(local_cond, global_feature, stochastic=stochastic)
-            h_local.append(x)
 
         x = sample
         h = []
         for idx, (resnet, resnet2, downsample) in enumerate(self.down_modules):
             x = resnet(x, global_feature, stochastic=stochastic)
-            if idx == 0 and len(h_local) > 0:
-                x = x + h_local[0]
             x = resnet2(x, global_feature, stochastic=stochastic)
             h.append(x)
             if not isinstance(downsample, nn.Identity):
@@ -383,8 +401,6 @@ class BayesianConditionalUnet1D(nn.Module):
         for idx, (resnet, resnet2, upsample) in enumerate(self.up_modules):
             x = torch.cat((x, h.pop()), dim=1)
             x = resnet(x, global_feature, stochastic=stochastic)
-            if idx == (len(self.up_modules) - 1) and len(h_local) > 0:
-                x = x + h_local[1]
             x = resnet2(x, global_feature, stochastic=stochastic)
             if not isinstance(upsample, nn.Identity):
                 x = upsample(x, stochastic=stochastic)
@@ -404,11 +420,6 @@ class BayesianConditionalUnet1D(nn.Module):
         """Compute total KL divergence from all probabilistic components"""
         kl_div = 0
         
-        # KL from local condition encoder
-        if self.local_cond_encoder is not None:
-            for layer in self.local_cond_encoder:
-                kl_div += layer.compute_kl()
-
         # KL from mid modules
         for layer in self.mid_modules:
             kl_div += layer.compute_kl()

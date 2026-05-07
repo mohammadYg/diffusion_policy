@@ -116,7 +116,6 @@ class BayesianConditionalUnet1D(nn.Module):
     def __init__(
         self,
         input_dim,
-        local_cond_dim=None,
         global_cond_dim=None,
         diffusion_step_embed_dim=256,
         down_dims=[256, 512, 1024],
@@ -150,45 +149,6 @@ class BayesianConditionalUnet1D(nn.Module):
             cond_dim += global_cond_dim
 
         in_out = list(zip(all_dims[:-1], all_dims[1:]))
-
-        # Probabilistic local conditioning
-        local_cond_encoder = None
-        if local_cond_dim is not None:
-            _, dim_out = in_out[0]
-            dim_in = local_cond_dim
-
-            local_cond_encoder = nn.ModuleList(
-                [
-                    # down encoder
-                    ProbConditionalResidualBlock1D(
-                        dim_in,
-                        dim_out,
-                        cond_dim=cond_dim,
-                        kernel_size=kernel_size,
-                        n_groups=n_groups,
-                        cond_predict_scale=cond_predict_scale,
-                        rho_post=rho_post,
-                        rho_prior=rho_prior,
-                        prior_dist=prior_dist,
-                        init_post=init_post,
-                        init_prior=init_prior
-                    ),
-                    # up encoder
-                    ProbConditionalResidualBlock1D(
-                        dim_in,
-                        dim_out,
-                        cond_dim=cond_dim,
-                        kernel_size=kernel_size,
-                        n_groups=n_groups,
-                        cond_predict_scale=cond_predict_scale,
-                        rho_post=rho_post,
-                        rho_prior=rho_prior,
-                        prior_dist=prior_dist,
-                        init_post=init_post,
-                        init_prior=init_prior
-                    ),
-                ]
-            )
 
         mid_dim = all_dims[-1]
         self.mid_modules = nn.ModuleList(
@@ -325,7 +285,6 @@ class BayesianConditionalUnet1D(nn.Module):
         )
 
         self.diffusion_step_encoder = diffusion_step_encoder
-        self.local_cond_encoder = local_cond_encoder
         self.up_modules = up_modules
         self.down_modules = down_modules
         self.final_conv = final_conv
@@ -337,10 +296,6 @@ class BayesianConditionalUnet1D(nn.Module):
     
     def sample_weights(self):
         # Sample weights for all probabilistic layers in the model
-        
-        if self.local_cond_encoder is not None:
-            for layer in self.local_cond_encoder:
-                layer.sample_weights()
 
         for layer in self.mid_modules:
             layer.sample_weights()
@@ -359,11 +314,6 @@ class BayesianConditionalUnet1D(nn.Module):
 
     def clear_sampled_weights(self):
         # Clear sampled weights for all probabilistic layers in the model
-
-        if self.local_cond_encoder is not None:
-            for layer in self.local_cond_encoder:
-                layer.clear_sample()
-
         for layer in self.mid_modules:
             layer.clear_sample()
         
@@ -383,7 +333,6 @@ class BayesianConditionalUnet1D(nn.Module):
         self,
         sample: torch.Tensor,
         timestep: Union[torch.Tensor, float, int] = None,
-        local_cond=None,
         global_cond=None,
         stochastic=False,  # Added stochastic parameter
         **kwargs,
@@ -391,7 +340,6 @@ class BayesianConditionalUnet1D(nn.Module):
         """
         x: (B,T,input_dim)
         timestep: (B,) or int, diffusion step
-        local_cond: (B,T,local_cond_dim)
         global_cond: (B,global_cond_dim)
         output: (B,T,output_dim)
         """
@@ -413,22 +361,10 @@ class BayesianConditionalUnet1D(nn.Module):
         if global_cond is not None:
             global_feature = torch.cat([global_feature, global_cond], axis=-1)
         
-        # encode local features
-        h_local = list()
-        if local_cond is not None:
-            local_cond = einops.rearrange(local_cond, "b h t -> b t h")
-            resnet, resnet2 = self.local_cond_encoder
-            x = resnet(local_cond, global_feature, stochastic=stochastic)
-            h_local.append(x)
-            x = resnet2(local_cond, global_feature, stochastic=stochastic)
-            h_local.append(x)
-
         x = sample
         h = []
         for idx, (resnet, resnet2, downsample) in enumerate(self.down_modules):
             x = resnet(x, global_feature, stochastic=stochastic)
-            if idx == 0 and len(h_local) > 0:
-                x = x + h_local[0]
             x = resnet2(x, global_feature, stochastic=stochastic)
             h.append(x)
             x = downsample(x)
@@ -443,8 +379,6 @@ class BayesianConditionalUnet1D(nn.Module):
         for idx, (resnet, resnet2, upsample) in enumerate(self.up_modules):
             x = torch.cat((x, h.pop()), dim=1)
             x = resnet(x, global_feature, stochastic=stochastic)
-            if idx == (len(self.up_modules) - 1) and len(h_local) > 0:
-                x = x + h_local[1]
             x = resnet2(x, global_feature, stochastic=stochastic)
             x = upsample(x)
             # if not isinstance(upsample, nn.Identity):
@@ -462,12 +396,7 @@ class BayesianConditionalUnet1D(nn.Module):
     def compute_kl(self):
         """Compute total KL divergence from all probabilistic components"""
         kl_div = 0
-        
-        # KL from local condition encoder
-        if self.local_cond_encoder is not None:
-            for layer in self.local_cond_encoder:
-                kl_div += layer.compute_kl()
-
+    
         # KL from mid modules
         for layer in self.mid_modules:
             kl_div += layer.compute_kl()

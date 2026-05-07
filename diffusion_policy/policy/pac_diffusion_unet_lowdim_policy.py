@@ -10,14 +10,6 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.model.diffusion.conditional_prob1_unet1d import BayesianConditionalUnet1D
-from diffusion_policy.model.diffusion.conditional_prob2_unet1d import BayesianConditionalUnet1D
-from diffusion_policy.model.diffusion.conditional_prob3_unet1d import BayesianConditionalUnet1D
-from diffusion_policy.model.diffusion.conditional_prob4_unet1d import BayesianConditionalUnet1D
-from diffusion_policy.model.diffusion.conditional_prob5_unet1d import BayesianConditionalUnet1D
-from diffusion_policy.model.diffusion.conditional_prob6_unet1d import BayesianConditionalUnet1D
-from diffusion_policy.model.diffusion.conditional_prob7_unet1d import BayesianConditionalUnet1D
-from diffusion_policy.model.diffusion.conditional_prob8_unet1d import BayesianConditionalUnet1D
-from diffusion_policy.model.diffusion.conditional_prob9_unet1d import BayesianConditionalUnet1D
 
 from diffusion_policy.policy.diffusion_unet_lowdim_policy import DiffusionUnetLowdimPolicy
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
@@ -292,7 +284,7 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
         
         # DM emprical risk
         loss_emp = self.compute_loss(batch, stochastic=stochastic, train=train)
-        scale = 2.0
+        scale = 300.0
         if bounded:
             loss_emp_scaled = loss_emp/scale
         else:
@@ -607,9 +599,6 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
 
         model: DiffusionUnetLowdimPolicy
         model = hydra.utils.instantiate(cfg.prior_policy)
-        # ema_model: DiffusionUnetLowdimPolicy = None
-        # if cfg.prior_training.use_ema:
-        #     ema_model = copy.deepcopy(model)
 
         # configure training state
         optimizer = hydra.utils.instantiate(
@@ -619,37 +608,28 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
         train_dataloader = DataLoader(prior_dataset, **cfg.prior_dataloader)
         normalizer = prior_dataset.get_normalizer()
         model.set_normalizer(normalizer)
-        # if cfg.prior_training.use_ema:
-        #     ema_model.set_normalizer(normalizer)
+
+        # configure number of epochs based on the number of updates and dataloader size
+        num_epochs = int(cfg.prior_training.num_updates) // len(train_dataloader)
 
         # configure lr scheduler
         lr_scheduler = get_scheduler(
             cfg.prior_training.lr_scheduler,
             optimizer=optimizer,
             num_warmup_steps=cfg.prior_training.lr_warmup_steps,
-            num_training_steps=(
-                len(train_dataloader) * cfg.prior_training.num_epochs) \
+            num_training_steps= (len(train_dataloader) * num_epochs) \
                     // cfg.prior_training.gradient_accumulate_every,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
             last_epoch=global_step-1
         )
-
-        # # configure ema
-        # ema: EMAModel = None
-        # if cfg.prior_training.use_ema:
-        #     ema = hydra.utils.instantiate(
-        #         cfg.ema,
-        #         model=ema_model)
         
         # device transfer
         device = torch.device(cfg.prior_training.device)
         model.to(device)
-        # if ema_model is not None:
-        #     ema_model.to(device)
         optimizer_to(optimizer, device)
 
-        for local_epoch_idx in range(cfg.prior_training.num_epochs):
+        for local_epoch_idx in range(num_epochs):
             with tqdm.tqdm(train_dataloader, desc=f"Prior Training epoch {local_epoch_idx}",
                 leave=False, mininterval=cfg.prior_training.tqdm_interval_sec) as tepoch:
                     
@@ -666,10 +646,6 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
                             optimizer.step()
                             optimizer.zero_grad()
                             lr_scheduler.step()
-                        
-                        # # update ema
-                        # if cfg.prior_training.use_ema:
-                        #     ema.step(model)
 
                         # logging
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
@@ -709,6 +685,53 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
 
                 elif name.endswith(".bias.rho") or name.endswith(".weight.rho"):
                     param.fill_(rho_post)
+
+                else:
+                    if name in prior_model.state_dict():
+                        param.copy_(prior_model.state_dict()[name])
+                    else:
+                        # Allow unmatched params (e.g. new Bayesian-only params)
+                        pass
+    
+
+    def prior_initialization(
+    self,
+    prior_model,
+    rho_post,
+    ):  
+        prior_model.eval()
+        with torch.no_grad():
+            for name, param in self.model.state_dict().items():
+                if name.endswith(".weight_prior.mu"):
+                    w0_name = name.replace(".weight_prior.mu", ".weight.mu")
+                    param.copy_(prior_model.state_dict()[w0_name])
+
+                elif name.endswith(".bias_prior.mu"):
+                    b0_name = name.replace(".bias_prior.mu", ".bias.mu")
+                    param.copy_(prior_model.state_dict()[b0_name])
+
+                elif name.endswith(".weight.mu"):
+                    param.copy_(prior_model.state_dict()[name])
+                
+                elif name.endswith(".bias.mu"):
+                    param.copy_(prior_model.state_dict()[name])
+                
+                elif name.endswith(".weight_prior.rho"):
+                    w0_name = name.replace(".weight_prior.rho", ".weight.rho")
+                    param.copy_(prior_model.state_dict()[w0_name])
+                
+                elif name.endswith(".bias_prior.rho"):
+                    b0_name = name.replace(".bias_prior.rho", ".bias.rho")
+                    param.copy_(prior_model.state_dict()[b0_name])
+
+                elif name.endswith(".weight.rho"):
+                    param.copy_(prior_model.state_dict()[name])
+                
+                elif name.endswith(".bias.rho"):
+                    param.copy_(prior_model.state_dict()[name])
+
+                # elif name.endswith(".bias.rho") or name.endswith(".weight.rho"):
+                #     param.fill_(rho_post)
 
                 else:
                     if name in prior_model.state_dict():
