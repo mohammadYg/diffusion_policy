@@ -25,7 +25,7 @@ policy:
   _target_: diffusion_policy.policy.pac_diffusion_unet_lowdim_policy.PacDiffusionUnetLowdimPolicy
 
   model:
-    #_target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
+    _target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
     #_target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
     #_target_: diffusion_policy.model.diffusion.conditional_prob3_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Probabilistic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob4_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Deterministic timestep encoding
@@ -33,7 +33,7 @@ policy:
     #_target_: diffusion_policy.model.diffusion.conditional_prob6_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
     #_target_: diffusion_policy.model.diffusion.conditional_prob7_unet1d.BayesianConditionalUnet1D          # Last module deterministic
     #_target_: diffusion_policy.model.diffusion.conditional_prob8_unet1d.BayesianConditionalUnet1D          # last layer of last module is determininstic 
-    _target_: diffusion_policy.model.diffusion.conditional_prob9_unet1d.BayesianConditionalUnet1D          # Last module bayesian
+    #_target_: diffusion_policy.model.diffusion.conditional_prob9_unet1d.BayesianConditionalUnet1D          # Last module bayesian
     #_target_: diffusion_policy.model.diffusion.conditional_prob10_unet1d.BayesianConditionalUnet1D         # Only Last module bayesian
 
     input_dim: "${eval: ${task.action_dim} if ${obs_as_global_cond} else ${task.obs_dim} + ${task.action_dim}}"
@@ -113,8 +113,7 @@ training:
   seed: 42
   debug: False
   resume: False
-  retrain: False
-  desired_ckpt_path: "data/outputs/2025.10.12/11.33.45_train_diffusion_unet_lowdim_pusht_lowdim/checkpoints/epoch=0400-test_mean_score=0.780.ckpt"
+  desired_ckpt_path: null
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
