@@ -14,7 +14,7 @@ from diffusion_policy.gym_util.multistep_wrapper import MultiStepWrapper
 from diffusion_policy.gym_util.video_recording_wrapper import VideoRecordingWrapper, VideoRecorder
 
 from diffusion_policy.policy.base_lowdim_policy import BaseLowdimPolicy
-from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
+from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
 
@@ -217,7 +217,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
 
                 # run policy
                 with torch.no_grad():      
-                    if isinstance(policy, BaseLowdimProbPolicy):   
+                    if isinstance(policy, BaseLowdimPacPolicy):   
                         policy.model.sample_weights()
                         action_dict = policy.predict_action(obs_dict, stochastic=cfg.eval.stochastic)
                         policy.model.clear_sampled_weights()
