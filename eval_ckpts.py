@@ -122,7 +122,6 @@ def run_env_runner(env_runner, policy, cfg) -> Tuple[dict, float]:
     score = runner_log["test/mean_score"]
     return runner_log, score.item()
 
-
 def save_json_log(out_path: Path, data: Dict) -> None:
     """Write JSON data to file."""
     with out_path.open("w") as f:

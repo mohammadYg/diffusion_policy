@@ -75,7 +75,8 @@ class ConditionalUnet1D(nn.Module):
         down_dims=[256,512,1024],
         kernel_size=3,
         n_groups=8,
-        cond_predict_scale=False
+        cond_predict_scale=False,
+        clamp_output=False
         ):
         super().__init__()
         all_dims = [input_dim] + list(down_dims)
@@ -165,6 +166,7 @@ class ConditionalUnet1D(nn.Module):
         self.up_modules = up_modules
         self.down_modules = down_modules
         self.final_conv = final_conv
+        self.clamp_output = clamp_output
 
         logger.info(
             "number of parameters: %e", sum(p.numel() for p in self.parameters())
@@ -236,7 +238,8 @@ class ConditionalUnet1D(nn.Module):
             x = upsample(x)
 
         x = self.final_conv(x)
-
         x = einops.rearrange(x, 'b t h -> b h t')
+        if self.clamp_output:
+            x = torch.tanh(x)
         return x
 

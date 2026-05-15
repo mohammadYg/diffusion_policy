@@ -135,7 +135,7 @@ class BayesianConditionalUnet1D(nn.Module):
         kernel_size=3,
         n_groups=8,
         cond_predict_scale=False,
-        use_dropout=False,
+        clamp_output=False,
         # Bayesian parameters
         rho_post=-3.0,
         rho_prior=-3.0,
@@ -288,8 +288,6 @@ class BayesianConditionalUnet1D(nn.Module):
                     ]
                 )
             )
-
-        self.dropout = nn.Dropout(0.25) if use_dropout else nn.Identity()
         final_conv = nn.Sequential(
             ProbConv1dBlock(
                 start_dim, start_dim, kernel_size=kernel_size,
@@ -307,6 +305,7 @@ class BayesianConditionalUnet1D(nn.Module):
         self.up_modules = up_modules
         self.down_modules = down_modules
         self.final_conv = final_conv
+        self.clamp_output = clamp_output
 
         # Store Bayesian parameters for reference
         self.rho_prior = rho_prior
@@ -414,6 +413,9 @@ class BayesianConditionalUnet1D(nn.Module):
         x = self.final_conv[0](x, stochastic=stochastic)
         x = self.final_conv[1](x, stochastic=stochastic)
         x = einops.rearrange(x, "b t h -> b h t")
+        # Clamp output to [-1, 1]
+        if self.clamp_output:
+            x = torch.tanh(x)
         return x
     
     def compute_kl(self):

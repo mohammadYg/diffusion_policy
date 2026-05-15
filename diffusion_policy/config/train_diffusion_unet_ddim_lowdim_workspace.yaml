@@ -35,6 +35,7 @@ policy:
     kernel_size: 5
     n_groups: 8
     cond_predict_scale: True
+    clamp_output: True if ${policy.noise_scheduler.prediction_type} == 'sample' else False
   
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler

@@ -25,8 +25,8 @@ policy:
   _target_: diffusion_policy.policy.pac_diffusion_unet_lowdim_policy.PacDiffusionUnetLowdimPolicy
 
   model:
-    _target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
-    #_target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
+    #_target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
+    _target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
     #_target_: diffusion_policy.model.diffusion.conditional_prob3_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Probabilistic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob4_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Deterministic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob5_unet1d.BayesianConditionalUnet1D          # Determinstic FiLM conditioning  + Probabilistic timestep encoding 
@@ -43,7 +43,7 @@ policy:
     kernel_size: 5
     n_groups: 8
     cond_predict_scale: True
-    use_dropout: False
+    clamp_output: True if ${policy.noise_scheduler.prediction_type} == 'sample' else False
     # Bayesian parameters
     rho_post: -3.0
     rho_prior: 0.54
@@ -139,7 +139,7 @@ training:
   delta: 0.025
   kl_penalty: 1.0e-4
   pac_objective: "fquad"  # "fquad" or "calssic", "bbb"
-  init_model_path: "data/outputs/2026.05.07/14.13.30_train_pac_diffusion_unet_lowdim_square_lowdim/checkpoints/epoch=0400.ckpt"
+  init_model_path: "data/outputs/2026.05.08/22.12.26_train_pac_diffusion_unet_lowdim_square_lowdim/checkpoints/epoch=8750.ckpt"
   data_dependent_prior: False
 
 eval:
