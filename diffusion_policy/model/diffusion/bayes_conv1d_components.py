@@ -225,7 +225,7 @@ class ProbLinear(nn.Module):
         if init_post == 'zeros':
             weights_mu_init = torch.zeros(out_features, in_features)
         elif init_post == 'random':
-            weights_mu_init = trunc_normal_(torch.Tensor(out_features, in_features), 0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
+            weights_mu_init = weights_mu_prior.clone()
         else:
             raise RuntimeError(f'Wrong posterior initialization. It should be either "zeros" or "random", but got {init_post}')
 
@@ -360,8 +360,7 @@ class ProbConv1d(nn.Module):
         if init_post == 'zeros':
             weights_mu_init = torch.zeros(out_channels, in_channels, kernel_size)
         elif init_post == 'random':
-            weights_mu_init = trunc_normal_(torch.Tensor(out_channels, in_channels, kernel_size),
-                                    0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
+            weights_mu_init = weights_mu_prior.clone()
         else:
             raise RuntimeError(f'Wrong posterior initialization. It should be either "zeros" or "random", but got {init_post}')
         
@@ -491,8 +490,7 @@ class ProbConvTranspose1d(nn.Module):
         if init_post == 'zeros':
             weights_mu_init = torch.zeros(in_channels, out_channels, kernel_size)
         elif init_post == 'random':
-            weights_mu_init = trunc_normal_(torch.Tensor(
-                in_channels, out_channels, kernel_size), 0, sigma_weights, -2*sigma_weights, 2*sigma_weights)
+            weights_mu_init = weights_mu_prior.clone()
         else:
             raise RuntimeError(f'Wrong posterior initialization. It should be either "zeros" or "random", but got {init_post}')
 
