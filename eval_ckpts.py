@@ -107,9 +107,12 @@ def evaluate_nll(policy, dataloader: DataLoader, epoch: int, cfg, device: torch.
         return 0.0
     policy.eval()
     npoints = getattr(cfg.eval, "npoints", 100)
-    stochastic = getattr(cfg.eval, "stochastic", False)
     with torch.inference_mode():
-        nll = policy.nll_bound(dataloader, epoch, npoints=npoints, stochastic=stochastic)
+        if BaseLowdimProbPolicy is not None and isinstance(policy, BaseLowdimProbPolicy):
+            stochastic = getattr(cfg.eval, "stochastic", False)
+            nll = policy.nll_bound(dataloader, epoch, npoints=npoints, stochastic=stochastic)
+        else:
+            nll = policy.nll_bound(dataloader, epoch, npoints=npoints)
     return nll.item()
 
 
@@ -222,11 +225,15 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
         # Run environment evaluation
         _, success_rate = run_env_runner(env_runner, policy, cfg)
 
-        # Compute loss metrics on validation set
-        noise_loss = evaluate_DM_loss(policy, val_dataloader, cfg, device_obj)
-        # Compute covariance spectrum (in‑place side effect on policy)
-        policy.dataset_info(full_dataloader, covariance_spectrum=None, diagonal=False)
-        nll_val = evaluate_nll(policy, val_dataloader, epoch, cfg, device_obj)
+        # Compute Validation metrics (if dataloader is not empty)
+        if len(val_dataloader) == 0:
+            noise_loss=0.0
+            nll_val=0.0
+            logger.warning("Validation dataloader is empty, skipping loss and nll evaluation.")
+        else:
+            noise_loss = evaluate_DM_loss(policy, val_dataloader, cfg, device_obj)
+            policy.dataset_info(full_dataloader, covariance_spectrum=None, diagonal=False)
+            nll_val = evaluate_nll(policy, val_dataloader, epoch, cfg, device_obj)
 
         # Store results
         key = f"model_at_epoch_{epoch:04d}"
