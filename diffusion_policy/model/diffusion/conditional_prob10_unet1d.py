@@ -136,7 +136,6 @@ class BayesianConditionalUnet1D(nn.Module):
         kernel_size=3,
         n_groups=8,
         cond_predict_scale=False,
-        clamp_output=False,
         # Bayesian parameters
         rho_post=-3.0,
         rho_prior=-3.0,
@@ -299,7 +298,6 @@ class BayesianConditionalUnet1D(nn.Module):
         self.up_modules = up_modules
         self.down_modules = down_modules
         self.final_conv = final_conv
-        self.clamp_output = clamp_output
 
         # Store Bayesian parameters for reference
         self.rho_prior = rho_prior
@@ -397,8 +395,6 @@ class BayesianConditionalUnet1D(nn.Module):
         # Apply final convolution with stochastic sampling
         x = self.final_conv(x)
         x = einops.rearrange(x, "b t h -> b h t")
-        if self.clamp_output:
-            x = torch.tanh(x)
         return x
     
     def compute_kl(self):
