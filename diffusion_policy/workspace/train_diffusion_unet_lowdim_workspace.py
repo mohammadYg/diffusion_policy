@@ -89,13 +89,13 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         normalizer = dataset.get_normalizer()
 
-        # # configure validation dataset
-        # val_dataset = dataset.get_validation_dataset()
-        # val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
-        # print ("validation dataset size: ", len(val_dataset))
+        # configure validation dataset
+        val_dataset = dataset.get_validation_dataset()
+        val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
+        print ("validation dataset size: ", len(val_dataset))
         
-        # # configure dataset for covariance_spectrum
-        # cov_dataloader = DataLoader(dataset, batch_size=len(dataset), num_workers=1, pin_memory = True, persistent_workers = False)
+        # configure dataset for covariance_spectrum
+        cov_dataloader = DataLoader(dataset, batch_size=len(dataset), num_workers=1, pin_memory = True, persistent_workers = False)
         
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
@@ -179,10 +179,10 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             checkpoint_every = 1
             val_every = 1
         
-        # # compute covariance_spectrum of the training data
-        # self.model.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
-        # if cfg.training.use_ema:
-        #     self.ema_model.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
+        # compute covariance_spectrum of the training data
+        self.model.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
+        if cfg.training.use_ema:
+            self.ema_model.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
