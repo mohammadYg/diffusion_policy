@@ -58,7 +58,9 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
         if cfg.training.data_dependent_prior:
             checkpoint = cfg.training.init_model_path
             init_payload = torch.load(open(checkpoint, 'rb'), pickle_module=dill)
-            init_workspace: BaseWorkspace
+            init_cfg = init_payload['cfg']
+            cls = hydra.utils.get_class(init_cfg._target_)
+            init_workspace = cls(init_cfg, output_dir=output_dir)
             init_workspace.load_payload(init_payload, exclude_keys=['optimizer'], include_keys=None)
 
             init_model = init_workspace.model.model
@@ -68,7 +70,8 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
             self.model.prior_initialization(init_model, cfg.policy.model.rho_post)
             if cfg.training.use_ema:
                 self.ema_model.prior_initialization(init_ema_model, cfg.policy.model.rho_post)
-
+            del init_workspace
+            
         # configure training state
         self.optimizer = hydra.utils.instantiate(
             cfg.optimizer, params=self.model.parameters())
@@ -103,8 +106,8 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseLowdimDataset)
         
-        # prior_dataset = dataset.get_prior_dataset()
-        # post_dataset = dataset.get_post_dataset()
+        #prior_dataset = dataset.get_prior_dataset()
+        #post_dataset = dataset.get_post_dataset()
         
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         #train_dataloader = DataLoader(prior_dataset, **cfg.dataloader)
@@ -277,11 +280,11 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 train_loss = np.mean(train_losses)
                 step_log['train_loss (pac_bayes bound)'] = train_loss
 
-                # # ========= eval for this epoch ==========
-                # policy = self.model
-                # if cfg.training.use_ema:
-                #     policy = self.ema_model
-                # policy.eval()
+                # ========= eval for this epoch ==========
+                policy = self.model
+                if cfg.training.use_ema:
+                    policy = self.ema_model
+                policy.eval()
 
                 # # run rollout
                 # if (self.epoch % rollout_every) == 0:
@@ -291,39 +294,39 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 #     step_log.update(runner_log)
                 #     avg_success_rate.append(step_log["test/mean_score"])
 
-                # # run validation
-                # if (self.epoch % val_every) == 0:
-                #     with torch.no_grad():
-                #         # compute test noise prediction loss
-                #         val_losses = list()
-                #         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}: Noise Prediction Loss on test set", 
-                #                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                #             for batch_idx, batch in enumerate(tepoch):
-                #                 n_samples = len(batch["obs"])
-                #                 # device transfer
-                #                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                #                 val_loss = policy.compute_loss(batch, stochastic=cfg.eval.stochastic, train=False)
-                #                 val_losses.append(val_loss.item() * n_samples)
-                #                 if (cfg.training.max_val_steps is not None) \
-                #                     and batch_idx >= (cfg.training.max_val_steps-1):
-                #                     break
+                # run validation
+                if (self.epoch % val_every) == 0 and (len(val_dataloader) > 0):
+                    with torch.no_grad():
+                        # compute test noise prediction loss
+                        val_losses = list()
+                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}: Noise Prediction Loss on test set", 
+                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                            for batch_idx, batch in enumerate(tepoch):
+                                n_samples = len(batch["obs"])
+                                # device transfer
+                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                                val_loss = policy.compute_loss(batch, stochastic=cfg.eval.stochastic, train=False)
+                                val_losses.append(val_loss.item() * n_samples)
+                                if (cfg.training.max_val_steps is not None) \
+                                    and batch_idx >= (cfg.training.max_val_steps-1):
+                                    break
 
-                #         if len(val_losses) > 0:
-                #             noise_loss = np.sum(val_losses)/len(val_dataset)
-                #             step_log['test_noise_pred_loss'] = noise_loss
+                        if len(val_losses) > 0:
+                            noise_loss = np.sum(val_losses)/len(val_dataset)
+                            step_log['test_noise_pred_loss'] = noise_loss
                         
-                # # Compute upper bound on NLL
-                # if (self.epoch % cfg.training.nll_every)==0:
-                #     NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100, stochastic=cfg.eval.stochastic)
-                #     step_log['test_nll_bpd'] = NLL_test 
+                # Compute upper bound on NLL
+                if (self.epoch % nll_every)==0 and (len(val_dataloader) > 0):
+                    NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100, stochastic=cfg.eval.stochastic)
+                    step_log['test_nll_bpd'] = NLL_test 
                 
-                # ## Compute Reconstruction loss
-                # if (self.epoch % cfg.training.reconst_loss_every)==0:
-                #     reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
-                #     step_log['test_action_reconst_loss'] = reconst_loss.item()
+                ## Compute Reconstruction loss
+                if (self.epoch % reconst_loss_every)==0 and (len(val_dataloader) > 0):
+                    reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
+                    step_log['test_action_reconst_loss'] = reconst_loss.item()
 
-                # #========= eval end for this epoch ==========
-                # policy.train()
+                #========= eval end for this epoch ==========
+                policy.train()
 
                 # # save k top checkpoints based on score
                 # if (self.epoch % cfg.training.checkpoint_every) == 0:

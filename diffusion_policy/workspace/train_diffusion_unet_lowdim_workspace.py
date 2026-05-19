@@ -243,83 +243,83 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 train_loss = np.mean(train_losses)
                 step_log['train_loss'] = train_loss
 
-                # # ========= eval for this epoch ==========
-                # policy = self.model
-                # if cfg.training.use_ema:
-                #     policy = self.ema_model
-                # policy.eval()
+                # ========= eval for this epoch ==========
+                policy = self.model
+                if cfg.training.use_ema:
+                    policy = self.ema_model
+                policy.eval()
 
-                # # # run rollout
-                # # if (self.epoch % rollout_every) == 0 and (self.epoch>0):
-                # #     env_runner.current_epoch = self.epoch
-                # #     runner_log = env_runner.run(policy, cfg)
-                # #     # log all
-                # #     step_log.update(runner_log)
-                # #     if self.epoch>num_epochs-500:
-                # #         last_ten_success_rate.append(step_log["test/mean_score"])
+                # # run rollout
+                # if (self.epoch % rollout_every) == 0 and (self.epoch>0):
+                #     env_runner.current_epoch = self.epoch
+                #     runner_log = env_runner.run(policy, cfg)
+                #     # log all
+                #     step_log.update(runner_log)
+                #     if self.epoch>num_epochs-500:
+                #         last_ten_success_rate.append(step_log["test/mean_score"])
 
-                # # run validation
-                # if (self.epoch % val_every) == 0:
-                #     with torch.no_grad():
-                #         # compute test noise prediction loss
-                #         val_noise_pred_losses = list()
-                #         n_total_samples = 0
-                #         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}: Noise Prediction Loss on test set", 
-                #                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                #             for batch_idx, batch in enumerate(tepoch):
-                #                 n_samples = len(batch["obs"])
-                #                 n_total_samples += n_samples
+                # run validation
+                if (self.epoch % val_every) == 0 and (len(val_dataloader) > 0):
+                    with torch.no_grad():
+                        # compute test noise prediction loss
+                        val_noise_pred_losses = list()
+                        n_total_samples = 0
+                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}: Noise Prediction Loss on test set", 
+                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                            for batch_idx, batch in enumerate(tepoch):
+                                n_samples = len(batch["obs"])
+                                n_total_samples += n_samples
                                 
-                #                 # device transfer
-                #                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                #                 val_noise_pred_loss = policy.compute_loss(batch, train=False)
-                #                 val_noise_pred_losses.append(val_noise_pred_loss.item() * n_samples)
-                #                 if (cfg.training.max_val_steps is not None) \
-                #                     and batch_idx >= (cfg.training.max_val_steps-1):
-                #                     break   
+                                # device transfer
+                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                                val_noise_pred_loss = policy.compute_loss(batch, train=False)
+                                val_noise_pred_losses.append(val_noise_pred_loss.item() * n_samples)
+                                if (cfg.training.max_val_steps is not None) \
+                                    and batch_idx >= (cfg.training.max_val_steps-1):
+                                    break   
 
-                #         if len(val_noise_pred_losses) > 0:
-                #             noise_pred_loss = np.sum(val_noise_pred_losses)/n_total_samples
-                #             step_log['test_noise_pred_loss'] = noise_pred_loss
+                        if len(val_noise_pred_losses) > 0:
+                            noise_pred_loss = np.sum(val_noise_pred_losses)/n_total_samples
+                            step_log['test_noise_pred_loss'] = noise_pred_loss
 
 
-                # # Compute upper bound on NLL
-                # if (self.epoch % nll_every)==0:
-                #     NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100)
-                #     step_log['test_nll_bpd'] = NLL_test 
+                # Compute upper bound on NLL
+                if (self.epoch % nll_every)==0 and (len(val_dataloader) > 0):
+                    NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100)
+                    step_log['test_nll_bpd'] = NLL_test 
 
                 
-                # # # Compute Reconstruction loss
-                # if (self.epoch % reconst_loss_every)==0:
-                #     reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
-                #     step_log['test_action_reconst_loss'] = reconst_loss.item()
+                # # Compute Reconstruction loss
+                if (self.epoch % reconst_loss_every)==0 and (len(val_dataloader) > 0):
+                    reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
+                    step_log['test_action_reconst_loss'] = reconst_loss.item()
 
-                # # # checkpoint
-                # # if (self.epoch % checkpoint_every) == 0 and (self.epoch>0):
-                # #     # checkpointing
-                # #     if cfg.checkpoint.save_last_ckpt:
-                # #         #self.save_checkpoint(exclude_keys=['model', 'optimizer'])
-                # #         self.save_checkpoint()
-                # #     if cfg.checkpoint.save_last_snapshot:
-                # #         self.save_snapshot()
+                # # checkpoint
+                # if (self.epoch % checkpoint_every) == 0 and (self.epoch>0):
+                #     # checkpointing
+                #     if cfg.checkpoint.save_last_ckpt:
+                #         #self.save_checkpoint(exclude_keys=['model', 'optimizer'])
+                #         self.save_checkpoint()
+                #     if cfg.checkpoint.save_last_snapshot:
+                #         self.save_snapshot()
 
-                # #     # sanitize metric names
-                # #     metric_dict = dict()
-                # #     for key, value in step_log.items():
-                # #         new_key = key.replace('/', '_')
-                # #         metric_dict[new_key] = value
+                #     # sanitize metric names
+                #     metric_dict = dict()
+                #     for key, value in step_log.items():
+                #         new_key = key.replace('/', '_')
+                #         metric_dict[new_key] = value
                     
-                # #     # We can't copy the last checkpoint here
-                # #     # since save_checkpoint uses threads.
-                # #     # therefore at this point the file might have been empty!
-                # #     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
-                # #     if topk_ckpt_path is not None:
-                # #         #self.save_checkpoint(path=topk_ckpt_path,exclude_keys=['model', 'optimizer'])
-                # #         self.save_checkpoint(path=topk_ckpt_path)
+                #     # We can't copy the last checkpoint here
+                #     # since save_checkpoint uses threads.
+                #     # therefore at this point the file might have been empty!
+                #     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+                #     if topk_ckpt_path is not None:
+                #         #self.save_checkpoint(path=topk_ckpt_path,exclude_keys=['model', 'optimizer'])
+                #         self.save_checkpoint(path=topk_ckpt_path)
 
 
-                # # ========= eval end for this epoch ==========
-                # policy.train()
+                # ========= eval end for this epoch ==========
+                policy.train()
 
                 # save last checkpoint and snapshot, and also topk checkpoint based on score
                 if ((self.epoch % checkpoint_every) == 0):
