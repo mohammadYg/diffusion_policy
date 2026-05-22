@@ -134,6 +134,14 @@ def free_cuda_memory():
         torch.cuda.empty_cache()
 
 
+def delete_checkpoint(ckpt_path: Path) -> None:
+    """Delete a checkpoint file safely."""
+    try:
+        ckpt_path.unlink(missing_ok=True)
+        logger.info("Deleted checkpoint: %s", ckpt_path.name)
+    except Exception as e:
+        logger.warning("Failed to delete checkpoint %s: %s", ckpt_path.name, e)
+
 # -----------------------------------------------------------------------------
 # Main CLI
 # -----------------------------------------------------------------------------
@@ -144,7 +152,7 @@ def free_cuda_memory():
               help="Where to write evaluation outputs")
 @click.option("-d", "--device", default="cuda:0", help="Torch device string")
 @click.option("--override", multiple=True, help="Hydra-style overrides e.g. task.env_runner.n_test=300")
-def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tuple[str, ...]):
+def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tuple[str, ...], delete_ckpts: bool = False):
     """Evaluate all checkpoints in ckpts_dir (epoch >= 50) and log results."""
     # Setup paths
     parent_dir = ckpts_dir.parent
@@ -268,6 +276,9 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
     save_json_log(out_path, json_log)
     logger.info("Evaluation complete. Log written to %s", out_path)
 
-
+    # Delete checkpoint after evaluation
+    if delete_ckpts:
+        delete_checkpoint(ckpt_path)
+        
 if __name__ == "__main__":
     main()
