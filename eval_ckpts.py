@@ -135,7 +135,12 @@ def free_cuda_memory():
 
 
 def delete_checkpoint(ckpt_path: Path) -> None:
-    """Delete a checkpoint file safely."""
+    """Delete a checkpoint file safely, except latest.ckpt."""
+    
+    if ckpt_path.name == "latest.ckpt":
+        logger.info("Skipping deletion of %s", ckpt_path.name)
+        return
+
     try:
         ckpt_path.unlink(missing_ok=True)
         logger.info("Deleted checkpoint: %s", ckpt_path.name)
