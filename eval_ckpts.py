@@ -282,9 +282,12 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
     save_json_log(out_path, json_log)
     logger.info("Evaluation complete. Log written to %s", out_path)
 
-    # Delete checkpoint after evaluation
+    # Delete checkpoints after ALL evaluations are complete
     if delete_ckpts:
-        delete_checkpoint(ckpt_path)
+        logger.info("All evaluations completed. Deleting checkpoints...")
+
+        for ckpt_path in all_ckpt_files:
+            delete_checkpoint(ckpt_path)
 
 if __name__ == "__main__":
     main()
