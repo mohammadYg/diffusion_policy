@@ -152,6 +152,7 @@ def delete_checkpoint(ckpt_path: Path) -> None:
               help="Where to write evaluation outputs")
 @click.option("-d", "--device", default="cuda:0", help="Torch device string")
 @click.option("--override", multiple=True, help="Hydra-style overrides e.g. task.env_runner.n_test=300")
+@click.option("--delete_ckpts", is_flag=True, help="Whether to delete checkpoints after evaluation")
 def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tuple[str, ...], delete_ckpts: bool = False):
     """Evaluate all checkpoints in ckpts_dir (epoch >= 50) and log results."""
     # Setup paths
@@ -279,6 +280,6 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
     # Delete checkpoint after evaluation
     if delete_ckpts:
         delete_checkpoint(ckpt_path)
-        
+
 if __name__ == "__main__":
     main()
