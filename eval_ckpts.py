@@ -20,7 +20,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from diffusion_policy.common.checkpoint_util import TopKCheckpointManager  # noqa: F401 (kept for reference)
+from diffusion_policy.common.checkpoint_util import TopKCheckpointManager  
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
@@ -83,7 +83,6 @@ def compute_loss(policy, batch: Dict, device: torch.device, cfg) -> float:
         loss = policy.compute_loss(batch, train=False)
     return loss.item()
 
-
 def evaluate_DM_loss(policy, dataloader: DataLoader, cfg, device: torch.device) -> float:
     """Evaluate average Diffusion Model loss over a dataset."""
     policy.eval()
@@ -100,7 +99,6 @@ def evaluate_DM_loss(policy, dataloader: DataLoader, cfg, device: torch.device) 
 
     return total_loss / total_samples if total_samples > 0 else 0.0
 
-
 def evaluate_nll(policy, dataloader: DataLoader, epoch: int, cfg, device: torch.device) -> float:
     """Compute the negative log‑likelihood lower bound if the policy supports it."""
     if not hasattr(policy, "nll_bound"):
@@ -115,7 +113,6 @@ def evaluate_nll(policy, dataloader: DataLoader, epoch: int, cfg, device: torch.
             nll = policy.nll_bound(dataloader, epoch, npoints=npoints)
     return nll.item()
 
-
 def run_env_runner(env_runner, policy, cfg) -> Tuple[dict, float]:
     """Run the environment runner and return the log dict and mean score."""
     runner_log = env_runner.run(policy, cfg)
@@ -127,12 +124,10 @@ def save_json_log(out_path: Path, data: Dict) -> None:
     with out_path.open("w") as f:
         json.dump(data, f, indent=2, sort_keys=True)
 
-
 def free_cuda_memory():
     """Clear CUDA cache if available."""
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-
 
 def delete_checkpoint(ckpt_path: Path) -> None:
     """Delete a checkpoint file safely, except latest.ckpt."""
@@ -190,6 +185,15 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
         pin_memory=torch.cuda.is_available(),
         persistent_workers=False,
     )
+    
+    # Train dataloader
+    train_dataloader = DataLoader(
+        dataset,
+        batch_size=1024,
+        num_workers=1,
+        pin_memory=True,
+        persistent_workers=False,
+    )
 
     # Dataloader for full dataset (used for covariance spectrum)
     full_dataloader = DataLoader(
@@ -213,6 +217,12 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
     }
     sum_success_rates = 0.0
     num_evaluated = 0
+
+    noise_loss_val=[]
+    noise_loss_train=[]
+
+    nll_val=[]
+    nll_train=[]
 
     # Iterate over checkpoints
     for ckpt_path in all_ckpt_files:
@@ -240,24 +250,35 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
         # Compute Validation metrics (if dataloader is not empty)
         if len(val_dataloader) == 0:
-            noise_loss=0.0
-            nll_val=0.0
+            noise_loss_val.append(0.0)
+            noise_loss_train.append
+            nll_val.append(0.0)
+            nll_train.append(0.0)
             logger.warning("Validation dataloader is empty, skipping loss and nll evaluation.")
         else:
-            noise_loss = evaluate_DM_loss(policy, val_dataloader, cfg, device_obj)
+            loss = evaluate_DM_loss(policy, val_dataloader, cfg, device_obj)
+            noise_loss_val.append(loss)
+            
+            loss = evaluate_DM_loss(policy, train_dataloader, cfg, device_obj)
+            noise_loss_train.append(loss)
+
             policy.dataset_info(full_dataloader, covariance_spectrum=None, diagonal=False)
-            nll_val = evaluate_nll(policy, val_dataloader, epoch, cfg, device_obj)
+            nll = evaluate_nll(policy, val_dataloader, epoch, cfg, device_obj)
+            nll_val.append(nll)
+
+            nll = evaluate_nll(policy, train_dataloader, epoch, cfg, device_obj)
+            nll_train.append(nll)
 
         # Store results
         key = f"model_at_epoch_{epoch:04d}"
         json_log[key] = {
             "success_rate": success_rate,
-            "test": {"validation_loss": noise_loss, "nll": nll_val},
+            #"test": {"validation_loss": noise_loss, "nll": nll_val},
         }
         epoch_results["epochs"].append(epoch)
         epoch_results["success_rates"].append(success_rate)
-        epoch_results["validation_losses"].append(noise_loss)
-        epoch_results["nll_values"].append(nll_val)
+        # epoch_results["validation_losses"].append(noise_loss)
+        # epoch_results["nll_values"].append(nll_val)
 
         sum_success_rates += success_rate
         num_evaluated += 1
@@ -271,10 +292,12 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
     # Final summary
     if num_evaluated > 0:
-        json_log["validation_losses"] = epoch_results["validation_losses"]
+        json_log["noise_pred_loss_val"] = np.mean(noise_loss_val)
+        json_log["noise_pred_loss_train"] = np.mean(noise_loss_train)
+        json_log["nll_val"] = np.mean(nll_val)
+        json_log["nll_train"] = np.mean(nll_train)
         json_log["mean_scores"] = epoch_results["success_rates"]
         json_log["num_epochs"] = epoch_results["epochs"]
-        json_log["nlls"] = epoch_results["nll_values"]
         json_log[f"mean_success_rate_last_{num_evaluated}_checkpoints"] = sum_success_rates / num_evaluated
     else:
         logger.warning("No valid checkpoints found.")
