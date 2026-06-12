@@ -20,7 +20,7 @@ keypoint_visible_rate: 1.0
 obs_as_local_cond: False
 obs_as_global_cond: True
 pred_action_steps_only: False
-num_mc_samples: 10
+num_mc_samples: 1
 
 policy:
   _target_: diffusion_policy.policy.diffusion_unet_lowdim_policy.DiffusionUnetLowdimPolicy
@@ -109,12 +109,12 @@ training:
   use_ema: True
   # training loop control
   # in epochs
-  rollout_every: 1e4
+  rollout_every: 2.5e4
   checkpoint_every: 1e4
-  val_every: 1e3
+  val_every: 2.5e4
   sample_every: 1e3
-  nll_every: 1e3
-  reconst_loss_every: 1e3
+  nll_every: 2.5e4
+  reconst_loss_every: 2.5e4
   # steps per epoch
   max_train_steps: null
   max_val_steps: null

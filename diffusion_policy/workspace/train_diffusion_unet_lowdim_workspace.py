@@ -131,12 +131,12 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 cfg.ema,
                 model=self.ema_model)
 
-        # # configure env runner
-        # env_runner: BaseLowdimRunner
-        # env_runner = hydra.utils.instantiate(
-        #     cfg.task.env_runner,
-        #     output_dir=self.output_dir)
-        # assert isinstance(env_runner, BaseLowdimRunner)
+        # configure env runner
+        env_runner: BaseLowdimRunner
+        env_runner = hydra.utils.instantiate(
+            cfg.task.env_runner,
+            output_dir=self.output_dir)
+        assert isinstance(env_runner, BaseLowdimRunner)
 
         # configure logging
         wandb_run = wandb.init(
@@ -249,14 +249,14 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     policy = self.ema_model
                 policy.eval()
 
-                # # run rollout
-                # if (self.epoch % rollout_every) == 0 and (self.epoch>0):
-                #     env_runner.current_epoch = self.epoch
-                #     runner_log = env_runner.run(policy, cfg)
-                #     # log all
-                #     step_log.update(runner_log)
-                #     if self.epoch>num_epochs-500:
-                #         last_ten_success_rate.append(step_log["test/mean_score"])
+                # run rollout
+                if (self.epoch % rollout_every) == 0 and (self.epoch>0):
+                    env_runner.current_epoch = self.epoch
+                    runner_log = env_runner.run(policy, cfg)
+                    # log all
+                    step_log.update(runner_log)
+                    if self.epoch>num_epochs-500:
+                        last_ten_success_rate.append(step_log["test/mean_score"])
 
                 # run validation
                 if (self.epoch % val_every) == 0 and (len(val_dataloader) > 0):
@@ -276,23 +276,46 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 val_noise_pred_losses.append(val_noise_pred_loss.item() * n_samples)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
-                                    break   
-
+                                    break 
+                        
                         if len(val_noise_pred_losses) > 0:
                             noise_pred_loss = np.sum(val_noise_pred_losses)/n_total_samples
                             step_log['test_noise_pred_loss'] = noise_pred_loss
+
+                        # compute train noise prediction loss
+                        train_noise_pred_losses = list()
+                        n_total_samples = 0
+                        with tqdm.tqdm(train_dataloader, desc=f"Validation epoch {self.epoch}: Noise Prediction Loss on Train set", 
+                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                            for batch_idx, batch in enumerate(tepoch):
+                                n_samples = len(batch["obs"])
+                                n_total_samples += n_samples
+                                
+                                # device transfer
+                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                                train_noise_pred_loss = policy.compute_loss(batch, train=False)
+                                train_noise_pred_losses.append(train_noise_pred_loss.item() * n_samples)
+
+                        if len(train_noise_pred_losses) > 0:
+                            noise_pred_loss = np.sum(train_noise_pred_losses)/n_total_samples
+                            step_log['train_noise_pred_loss'] = noise_pred_loss
 
 
                 # Compute upper bound on NLL
                 if (self.epoch % nll_every)==0 and (len(val_dataloader) > 0):
                     NLL_test = policy.nll_bound(val_dataloader, self.epoch, npoints=100)
                     step_log['test_nll_bpd'] = NLL_test 
+                    NLL_train = policy.nll_bound(train_dataloader, self.epoch, npoints=100)
+                    step_log['train_nll_bpd'] = NLL_train 
 
                 
                 # # Compute Reconstruction loss
                 if (self.epoch % reconst_loss_every)==0 and (len(val_dataloader) > 0):
                     reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
                     step_log['test_action_reconst_loss'] = reconst_loss.item()
+
+                    reconst_loss = policy.compute_action_reconst_loss(train_dataloader, cfg)
+                    step_log['train_action_reconst_loss'] = reconst_loss.item()
 
                 # # checkpoint
                 # if (self.epoch % checkpoint_every) == 0 and (self.epoch>0):
@@ -328,9 +351,9 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         self.save_checkpoint()
                     if cfg.checkpoint_last_N.save_last_snapshot:
                         self.save_snapshot()
-                    lastN_ckpt_path = lastN_manager.get_ckpt_path(step_log)
-                    if lastN_ckpt_path is not None:
-                        self.save_checkpoint(path=lastN_ckpt_path)
+                    # lastN_ckpt_path = lastN_manager.get_ckpt_path(step_log)
+                    # if lastN_ckpt_path is not None:
+                    #     self.save_checkpoint(path=lastN_ckpt_path)
 
                 # end of epoch
                 # log of last step is combined with validation and rollout
