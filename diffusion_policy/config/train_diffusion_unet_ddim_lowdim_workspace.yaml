@@ -105,7 +105,6 @@ training:
   lr_scheduler: cosine
   lr_warmup_steps: 500
   num_updates: 5e5
-  gradient_accumulate_every: 1
   use_ema: True
   # training loop control
   # in epochs
@@ -130,39 +129,21 @@ logging:
   id: null
   group: null
 
-checkpoint:
+checkpoint_max_score:
   topk:
     monitor_key: test_mean_score
     mode: max
     k: 5
-    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+    format_str: 'step={global_step:06d}-test_mean_score={test_mean_score:.3f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
 
 checkpoint_last_N:
   topk:
-    monitor_key: epoch
+    monitor_key: global_step
     k: 10
-    format_str: 'epoch={epoch:04d}.ckpt'
+    format_str: 'step={global_step:06d}.ckpt'
   save_last_ckpt: True
-  save_last_snapshot: False
-
-checkpoint_nll:
-  topk:
-    monitor_key: test_nll_bpd
-    mode: min
-    k: 1
-    format_str: 'epoch={epoch:04d}-nll_bpd={test_nll_bpd:.3f}.ckpt'
-  save_last_ckpt: False
-  save_last_snapshot: False
-
-checkpoint_val:
-  topk:
-    monitor_key: test_noise_pred_loss
-    mode: min
-    k: 1
-    format_str: 'epoch={epoch:04d}-test_noise_pred_loss={test_noise_pred_loss:.3f}.ckpt'
-  save_last_ckpt: False
   save_last_snapshot: False
   
 multi_run:

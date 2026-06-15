@@ -26,7 +26,7 @@ policy:
 
   model:
     #_target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
-    #_target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
+    _target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
     #_target_: diffusion_policy.model.diffusion.conditional_prob3_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Probabilistic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob4_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Deterministic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob5_unet1d.BayesianConditionalUnet1D          # Determinstic FiLM conditioning  + Probabilistic timestep encoding 
@@ -34,7 +34,7 @@ policy:
     #_target_: diffusion_policy.model.diffusion.conditional_prob7_unet1d.BayesianConditionalUnet1D          # Last module deterministic
     #_target_: diffusion_policy.model.diffusion.conditional_prob8_unet1d.BayesianConditionalUnet1D          # last layer of last module is determininstic 
     #_target_: diffusion_policy.model.diffusion.conditional_prob9_unet1d.BayesianConditionalUnet1D          # Last module bayesian
-    _target_: diffusion_policy.model.diffusion.conditional_prob10_unet1d.BayesianConditionalUnet1D         # Only Last module bayesian
+    #_target_: diffusion_policy.model.diffusion.conditional_prob10_unet1d.BayesianConditionalUnet1D         # Only Last module bayesian
 
     input_dim: "${eval: ${task.action_dim} if ${obs_as_global_cond} else ${task.obs_dim} + ${task.action_dim}}"
     global_cond_dim: "${eval: ${task.obs_dim}*${n_obs_steps} if ${obs_as_global_cond} else None}"
@@ -48,7 +48,7 @@ policy:
     rho_prior: 0.54
     prior_dist: 'gaussian'
     init_post: 'random'
-    init_prior: 'zeros'
+    init_prior: 'random'
     
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
@@ -116,17 +116,16 @@ training:
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_updates: 1e5
-  gradient_accumulate_every: 1
+  num_updates: 1e6
   use_ema: True
   # training loop control
   # in epochs
-  rollout_every: 1e4
-  checkpoint_every: 1e4
-  val_every: 1e3
-  sample_every: 1e3
-  nll_every: 1e3
-  reconst_loss_every: 1e3
+  rollout_every: 2.5e4
+  checkpoint_every: 2.5e4
+  val_every: 2.5e4
+  sample_every: 2.5e4
+  nll_every: 2.5e4
+  reconst_loss_every: 2.5e4
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
@@ -160,15 +159,15 @@ checkpoint_max_score:
     monitor_key: test_mean_score
     mode: max
     k: 5
-    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+    format_str: 'step={global_step:06d}-test_mean_score={test_mean_score:.3f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
 
 checkpoint_last_N:
   topk:
-    monitor_key: epoch
+    monitor_key: global_step
     k: 10
-    format_str: 'epoch={epoch:04d}.ckpt'
+    format_str: 'step={global_step:06d}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
 

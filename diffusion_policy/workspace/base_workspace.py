@@ -52,7 +52,6 @@ class BaseWorkspace:
             'cfg': self.cfg,
             'state_dicts': dict(),
             'pickles': dict(),
-            'last_epoch': self.epoch + 1,
             'last_global_step': self.global_step + 1
         }
 
@@ -107,7 +106,7 @@ class BaseWorkspace:
                 self.__dict__[key] = dill.loads(payload['pickles'][key])
         
         # load checkpoint
-        self.epoch = payload['last_epoch']
+
         self.global_step = payload['last_global_step']
         
         # load randomness
