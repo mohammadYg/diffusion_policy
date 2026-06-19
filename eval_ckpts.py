@@ -44,13 +44,13 @@ def list_ckpt_files(ckpts_dir: Path) -> List[Path]:
     return sorted(p for p in ckpts_dir.iterdir() if p.suffix == ".ckpt")
 
 
-def parse_epoch_from_filename(filename: str) -> Optional[int]:
-    """Parse epoch number from checkpoint filename like 'epoch=0010-...ckpt'.
-    Returns None if no epoch pattern is found or the file is 'latest.ckpt'.
+def parse_step_from_filename(filename: str) -> Optional[int]:
+    """Parse step number from checkpoint filename like 'step=0010-...ckpt'.
+    Returns None if no step pattern is found or the file is 'latest.ckpt'.
     """
     if filename == "latest.ckpt":
         return None
-    # pattern: 'epoch=1234'
+    # pattern: 'step=1234'
     try:
         parts = filename.split("step=")
         if len(parts) < 2:
@@ -99,7 +99,7 @@ def evaluate_DM_loss(policy, dataloader: DataLoader, cfg, device: torch.device) 
 
     return total_loss / total_samples if total_samples > 0 else 0.0
 
-def evaluate_nll(policy, dataloader: DataLoader, epoch: int, cfg, device: torch.device) -> float:
+def evaluate_nll(policy, dataloader: DataLoader, step: int, cfg, device: torch.device) -> float:
     """Compute the negative log‑likelihood lower bound if the policy supports it."""
     if not hasattr(policy, "nll_bound"):
         return 0.0
@@ -108,9 +108,9 @@ def evaluate_nll(policy, dataloader: DataLoader, epoch: int, cfg, device: torch.
     with torch.inference_mode():
         if BaseLowdimProbPolicy is not None and isinstance(policy, BaseLowdimProbPolicy):
             stochastic = getattr(cfg.eval, "stochastic", False)
-            nll = policy.nll_bound(dataloader, epoch, npoints=npoints, stochastic=stochastic)
+            nll = policy.nll_bound(dataloader, step, npoints=npoints, stochastic=stochastic)
         else:
-            nll = policy.nll_bound(dataloader, epoch, npoints=npoints)
+            nll = policy.nll_bound(dataloader, step, npoints=npoints)
     return nll.item()
 
 def run_env_runner(env_runner, policy, cfg) -> Tuple[dict, float]:
@@ -154,7 +154,7 @@ def delete_checkpoint(ckpt_path: Path) -> None:
 @click.option("--override", multiple=True, help="Hydra-style overrides e.g. task.env_runner.n_test=300")
 @click.option("--delete_ckpts", is_flag=True, help="Whether to delete checkpoints after evaluation")
 def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tuple[str, ...], delete_ckpts: bool = False):
-    """Evaluate all checkpoints in ckpts_dir (epoch >= 50) and log results."""
+    """Evaluate all checkpoints in ckpts_dir (step >= 50) and log results."""
     # Setup paths
     parent_dir = ckpts_dir.parent
     if output_dir is None:
@@ -209,8 +209,8 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
     # Prepare containers for results
     json_log = {}
-    epoch_results = {
-        "epochs": [],
+    step_results = {
+        "steps": [],
         "success_rates": [],
         "validation_losses": [],
         "nll_values": [],
@@ -226,11 +226,11 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
     # Iterate over checkpoints
     for ckpt_path in all_ckpt_files:
-        epoch = parse_epoch_from_filename(ckpt_path.name)
-        if epoch is None:
+        step = parse_step_from_filename(ckpt_path.name)
+        if step is None:
             continue
 
-        logger.info("Evaluating checkpoint %s (epoch %d)", ckpt_path.name, epoch)
+        logger.info("Evaluating checkpoint %s (step %d)", ckpt_path.name, step)
 
         # Load checkpoint payload
         payload = load_checkpoint_payload(ckpt_path)
@@ -263,22 +263,22 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
             noise_loss_train.append(loss)
 
             policy.dataset_info(full_dataloader, covariance_spectrum=None, diagonal=False)
-            nll = evaluate_nll(policy, val_dataloader, epoch, cfg, device_obj)
+            nll = evaluate_nll(policy, val_dataloader, step, cfg, device_obj)
             nll_val.append(nll)
 
-            nll = evaluate_nll(policy, train_dataloader, epoch, cfg, device_obj)
+            nll = evaluate_nll(policy, train_dataloader, step, cfg, device_obj)
             nll_train.append(nll)
 
         # Store results
-        key = f"model_at_epoch_{epoch:04d}"
+        key = f"model_at_step_{step:06d}"
         json_log[key] = {
             "success_rate": success_rate,
             #"test": {"validation_loss": noise_loss, "nll": nll_val},
         }
-        epoch_results["epochs"].append(epoch)
-        epoch_results["success_rates"].append(success_rate)
-        # epoch_results["validation_losses"].append(noise_loss)
-        # epoch_results["nll_values"].append(nll_val)
+        step_results["steps"].append(step)
+        step_results["success_rates"].append(success_rate)
+        # step_results["validation_losses"].append(noise_loss)
+        # step_results["nll_values"].append(nll_val)
 
         sum_success_rates += success_rate
         num_evaluated += 1
@@ -296,8 +296,8 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
         json_log["noise_pred_loss_train"] = np.mean(noise_loss_train)
         json_log["nll_val"] = np.mean(nll_val)
         json_log["nll_train"] = np.mean(nll_train)
-        json_log["mean_scores"] = epoch_results["success_rates"]
-        json_log["num_epochs"] = epoch_results["epochs"]
+        json_log["mean_scores"] = step_results["success_rates"]
+        json_log["num_steps"] = step_results["steps"]
         json_log[f"mean_success_rate_last_{num_evaluated}_checkpoints"] = sum_success_rates / num_evaluated
     else:
         logger.warning("No valid checkpoints found.")
