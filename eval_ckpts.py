@@ -52,7 +52,7 @@ def parse_epoch_from_filename(filename: str) -> Optional[int]:
         return None
     # pattern: 'epoch=1234'
     try:
-        parts = filename.split("epoch=")
+        parts = filename.split("step=")
         if len(parts) < 2:
             return None
         after = parts[1]
@@ -104,7 +104,7 @@ def evaluate_nll(policy, dataloader: DataLoader, epoch: int, cfg, device: torch.
     if not hasattr(policy, "nll_bound"):
         return 0.0
     policy.eval()
-    npoints = getattr(cfg.eval, "npoints", 100)
+    npoints = 100
     with torch.inference_mode():
         if BaseLowdimProbPolicy is not None and isinstance(policy, BaseLowdimProbPolicy):
             stochastic = getattr(cfg.eval, "stochastic", False)
@@ -132,9 +132,9 @@ def free_cuda_memory():
 def delete_checkpoint(ckpt_path: Path) -> None:
     """Delete a checkpoint file safely, except latest.ckpt."""
     
-    if ckpt_path.name == "latest.ckpt":
-        logger.info("Skipping deletion of %s", ckpt_path.name)
-        return
+    # if ckpt_path.name == "latest.ckpt":
+    #     logger.info("Skipping deletion of %s", ckpt_path.name)
+    #     return
 
     try:
         ckpt_path.unlink(missing_ok=True)
