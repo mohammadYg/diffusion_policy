@@ -107,26 +107,26 @@ class ProbConditionalResidualBlock1D(nn.Module):
         self.cond_predict_scale = cond_predict_scale
         self.out_channels = out_channels
         
-        # Probabilistic conditioning pathway
-        self.cond_encoder = nn.Sequential(
-            nn.Mish(),
-            ProbLinear(
-                cond_dim, cond_channels, 
-                rho_post=rho_post,
-                rho_prior=rho_prior, 
-                prior_dist=prior_dist,
-                init_post = init_post,
-                init_prior=init_prior
-            ),
-            Rearrange("batch t -> batch t 1"),
-        )
-
-        # # Deterministic conditioning pathway
+        # # Probabilistic conditioning pathway
         # self.cond_encoder = nn.Sequential(
         #     nn.Mish(),
-        #     nn.Linear(cond_dim, cond_channels),
+        #     ProbLinear(
+        #         cond_dim, cond_channels, 
+        #         rho_post=rho_post,
+        #         rho_prior=rho_prior, 
+        #         prior_dist=prior_dist,
+        #         init_post = init_post,
+        #         init_prior=init_prior
+        #     ),
         #     Rearrange("batch t -> batch t 1"),
         # )
+
+        # Deterministic conditioning pathway
+        self.cond_encoder = nn.Sequential(
+            nn.Mish(),
+            nn.Linear(cond_dim, cond_channels),
+            Rearrange("batch t -> batch t 1"),
+        )
 
         # make sure dimensions compatible. residual layer is deterministic
         self.residual_conv = nn.Conv1d(in_channels, out_channels, 1) \
@@ -143,13 +143,13 @@ class ProbConditionalResidualBlock1D(nn.Module):
     def sample_weights(self):
         self.blocks[0].sample_weights()
         self.blocks[1].sample_weights()
-        self.cond_encoder[1].sample_weights()
+        #self.cond_encoder[1].sample_weights()
         #self.residual_conv.sample_weights() if not isinstance(self.residual_conv, nn.Identity) else None
 
     def clear_sample(self):
         self.blocks[0].clear_sample()
         self.blocks[1].clear_sample()
-        self.cond_encoder[1].clear_sample()
+        #self.cond_encoder[1].clear_sample()
         #self.residual_conv.clear_sample() if not isinstance(self.residual_conv, nn.Identity) else None
 
     def forward(self, x, cond, stochastic=False):
@@ -163,13 +163,13 @@ class ProbConditionalResidualBlock1D(nn.Module):
         # First convolutional block
         out = self.blocks[0](x, stochastic=stochastic)
         
-        # FiLM conditioning with probabilistic linear layer
-        embed = self.cond_encoder[0](cond)  # Mish activation
-        embed = self.cond_encoder[1](embed, stochastic=stochastic)  # ProbLinear
-        embed = self.cond_encoder[2](embed)  # Rearrange
+        # # FiLM conditioning with probabilistic linear layer
+        # embed = self.cond_encoder[0](cond)  # Mish activation
+        # embed = self.cond_encoder[1](embed, stochastic=stochastic)  # ProbLinear
+        # embed = self.cond_encoder[2](embed)  # Rearrange
         
-        # # FiLM conditioning with deterministic linear layer
-        # embed = self.cond_encoder(cond)
+        # FiLM conditioning with deterministic linear layer
+        embed = self.cond_encoder(cond)
         
         if self.cond_predict_scale:
             embed = embed.reshape(embed.shape[0], 2, self.out_channels, 1)
@@ -202,8 +202,8 @@ class ProbConditionalResidualBlock1D(nn.Module):
         kl_div += self.blocks[0].block[0].kl_div
         kl_div += self.blocks[1].block[0].kl_div
         
-        # KL from conditioning linear layer
-        kl_div += self.cond_encoder[1].kl_div
+        # # KL from conditioning linear layer
+        # kl_div += self.cond_encoder[1].kl_div
         
         # # KL from residual convolution (if present)
         # if not isinstance(self.residual_conv, nn.Identity):
@@ -273,19 +273,19 @@ class BayesianConditionalUnet1D(nn.Module):
                     cond_predict_scale=cond_predict_scale)
             ])
 
-        # mid_dim = all_dims[-1]
-        # self.mid_modules = nn.ModuleList([
-        #     ConditionalResidualBlock1D(
-        #         mid_dim, mid_dim, cond_dim=cond_dim,
-        #         kernel_size=kernel_size, n_groups=n_groups,
-        #         cond_predict_scale=cond_predict_scale
-        #     ),
-        #     ConditionalResidualBlock1D(
-        #         mid_dim, mid_dim, cond_dim=cond_dim,
-        #         kernel_size=kernel_size, n_groups=n_groups,
-        #         cond_predict_scale=cond_predict_scale
-        #     ),
-        # ])
+        mid_dim = all_dims[-1]
+        self.mid_modules = nn.ModuleList([
+            ConditionalResidualBlock1D(
+                mid_dim, mid_dim, cond_dim=cond_dim,
+                kernel_size=kernel_size, n_groups=n_groups,
+                cond_predict_scale=cond_predict_scale
+            ),
+            ConditionalResidualBlock1D(
+                mid_dim, mid_dim, cond_dim=cond_dim,
+                kernel_size=kernel_size, n_groups=n_groups,
+                cond_predict_scale=cond_predict_scale
+            ),
+        ])
 
         mid_dim = all_dims[-1]
         self.mid_modules = nn.ModuleList(
@@ -322,7 +322,7 @@ class BayesianConditionalUnet1D(nn.Module):
         down_modules = nn.ModuleList([])
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (len(in_out) - 1)
-            if ind==0:
+            if ind==0 or ind==1 or ind==2:
                 down_modules.append(
                 nn.ModuleList(
                     [
@@ -350,13 +350,13 @@ class BayesianConditionalUnet1D(nn.Module):
                             prior_dist=prior_dist,
                             init_post=init_post
                         ),
-                        #Downsample1d(dim_out) if not is_last else nn.Identity()
-                        ProbDownsample1d(
-                            dim_out, 
-                            rho_post=rho_post,
-                            rho_prior=rho_prior,
-                            prior_dist=prior_dist
-                        ) if not is_last else nn.Identity()
+                        Downsample1d(dim_out) if not is_last else nn.Identity()
+                        # ProbDownsample1d(
+                        #     dim_out, 
+                        #     rho_post=rho_post,
+                        #     rho_prior=rho_prior,
+                        #     prior_dist=prior_dist
+                        # ) if not is_last else nn.Identity()
                     ]
                 )
             )
@@ -376,7 +376,7 @@ class BayesianConditionalUnet1D(nn.Module):
         up_modules = nn.ModuleList([])
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
             is_last = ind >= (len(in_out) - 1)
-            if ind==5 or ind==6:
+            if ind==0 or ind==1 or ind==2:
                 up_modules.append(
                 nn.ModuleList(
                     [
@@ -443,12 +443,12 @@ class BayesianConditionalUnet1D(nn.Module):
                 prior_dist=prior_dist,
                 init_post=init_post, init_prior=init_prior
             ),
-            #nn.Conv1d(start_dim, input_dim, 1)
-            ProbConv1d(
-                start_dim, input_dim, kernel_size=1,
-                rho_post=rho_post,
-                rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
-            ),
+            nn.Conv1d(start_dim, input_dim, 1)
+            # ProbConv1d(
+            #     start_dim, input_dim, kernel_size=1,
+            #     rho_post=rho_post,
+            #     rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
+            # ),
         )
 
         self.diffusion_step_encoder = diffusion_step_encoder
@@ -565,17 +565,17 @@ class BayesianConditionalUnet1D(nn.Module):
         x = sample
         h = []
         for idx, (resnet, resnet2, downsample) in enumerate(self.down_modules):
-            if idx==0:
+            if idx==0 or idx==1 or idx==2:
                 x = resnet(x, global_feature, stochastic=stochastic)
                 if idx == 0 and len(h_local) > 0:
                     x = x + h_local[0]
                 x = resnet2(x, global_feature, stochastic=stochastic)
                 h.append(x)
-                #x = downsample(x)
-                if not isinstance(downsample, nn.Identity):
-                    x = downsample(x, stochastic=stochastic)
-                else:
-                    x = downsample(x)
+                x = downsample(x)
+                # if not isinstance(downsample, nn.Identity):
+                #     x = downsample(x, stochastic=stochastic)
+                # else:
+                #     x = downsample(x)
             else:
                 x = resnet(x, global_feature)
                 if idx == 0 and len(h_local) > 0:
@@ -590,7 +590,7 @@ class BayesianConditionalUnet1D(nn.Module):
 
         for idx, (resnet, resnet2, upsample) in enumerate(self.up_modules):
             x = torch.cat((x, h.pop()), dim=1)
-            if idx==5 or idx==6:
+            if idx==0 or idx==1 or idx==2:
                 x = resnet(x, global_feature, stochastic=stochastic)
                 if idx == (len(self.up_modules) - 1) and len(h_local) > 0:
                     x = x + h_local[1]
@@ -612,9 +612,9 @@ class BayesianConditionalUnet1D(nn.Module):
                 x = upsample(x)
         
         # Apply final convolution with stochastic sampling
-        #x = self.final_conv(x)
+        # x = self.final_conv(x)
         x = self.final_conv[0](x, stochastic=stochastic)
-        x = self.final_conv[1](x, stochastic=stochastic)
+        x = self.final_conv[1](x)
         x = einops.rearrange(x, "b t h -> b h t")
         return x
     
@@ -645,9 +645,9 @@ class BayesianConditionalUnet1D(nn.Module):
                 if hasattr(layer, 'compute_kl'):
                     kl_div += layer.compute_kl()
 
-        # KL from final convolution
+        # # KL from final convolution
         kl_div += self.final_conv[0].compute_kl()
-        kl_div += self.final_conv[1].kl_div
+        # kl_div += self.final_conv[1].kl_div
         
         return kl_div
 

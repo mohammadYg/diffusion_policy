@@ -48,11 +48,10 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
         self.model: PacDiffusionUnetLowdimPolicy
         self.model = hydra.utils.instantiate(cfg.policy)
-
         self.ema_model: PacDiffusionUnetLowdimPolicy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
-
+        
         # configure dataset
         self.dataset: BaseLowdimDataset
         self.dataset = hydra.utils.instantiate(cfg.task.dataset)
@@ -61,8 +60,8 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
-
-        # configure training state
+        
+        # initialize optimizer
         self.optimizer = hydra.utils.instantiate(
             cfg.optimizer, params=self.model.parameters())
         
@@ -134,9 +133,9 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                     init_net.eval()
                                 
                 self.model.prior_post_initialize(init_net, cfg.policy.model.rho_post, cfg.policy.model.rho_prior, initialize_from_prior=True)
-                if self.ema_model is not None:
-                    self.ema_model.load_state_dict(self.model.state_dict())
-        
+                if cfg.training.use_ema:
+                    self.ema_model.prior_post_initialize(init_net, cfg.policy.model.rho_post, cfg.policy.model.rho_prior, initialize_from_prior=True)
+
         # configure lr scheduler
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,

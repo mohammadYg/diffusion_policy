@@ -2,8 +2,8 @@ defaults:
   - _self_
   - task: pusht_lowdim
 
-name: train_prob_diffusion_unet_lowdim
-_target_: diffusion_policy.workspace.ddp_train_bayes_diffusion_unet_lowdim_workspace.TrainProbDiffusionUnetLowdimWorkspace
+name: train_pac_diffusion_unet_lowdim
+_target_: diffusion_policy.workspace.train_pac2_diffusion_unet_lowdim_workspace.TrainPacDiffusionUnetLowdimWorkspace
 
 obs_dim: ${task.obs_dim}
 action_dim: ${task.action_dim}
@@ -17,55 +17,12 @@ n_action_steps: 8
 n_latency_steps: 0
 past_action_visible: False
 keypoint_visible_rate: 1.0
-obs_as_local_cond: False
 obs_as_global_cond: True
 pred_action_steps_only: False
 num_mc_samples: 10
 
-prior_policy:
-  _target_: diffusion_policy.policy.diffusion_unet_lowdim_policy.DiffusionUnetLowdimPolicy
-
-  model:
-    _target_: diffusion_policy.model.diffusion.conditional_unet1d.ConditionalUnet1D
-    input_dim: "${eval: ${task.action_dim} if ${obs_as_local_cond} or ${obs_as_global_cond} else ${task.obs_dim} + ${task.action_dim}}"
-    local_cond_dim: "${eval: ${task.obs_dim} if ${obs_as_local_cond} else None}"
-    global_cond_dim: "${eval: ${task.obs_dim}*${n_obs_steps} if ${obs_as_global_cond} else None}"
-    diffusion_step_embed_dim: 256
-    down_dims: [256, 512, 1024]
-    kernel_size: 5
-    n_groups: 8
-    cond_predict_scale: True
-  
-  noise_scheduler:
-    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
-    num_train_timesteps: 100
-    beta_start: 0.0001
-    beta_end: 0.02
-    # beta_schedule is important
-    # this is the best we found
-    beta_schedule: squaredcos_cap_v2
-    clip_sample: True
-    set_alpha_to_one: True
-    steps_offset: 0
-    prediction_type: epsilon # or sample
-
-  horizon: ${horizon}
-  obs_dim: ${obs_dim}
-  action_dim: ${action_dim}
-  n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
-  n_obs_steps: ${n_obs_steps}
-  num_inference_steps: 10
-  obs_as_local_cond: ${obs_as_local_cond}
-  obs_as_global_cond: ${obs_as_global_cond}
-  pred_action_steps_only: ${pred_action_steps_only}
-  oa_step_convention: True
-
-  # scheduler.step params
-  # predict_epsilon: True
-  use_clipped_model_output: True
-
 policy:
-  _target_: diffusion_policy.policy.diffusion_unet_lowdim_prob_policy.DiffusionUnetLowdimProbPolicy
+  _target_: diffusion_policy.policy.pac_diffusion_unet_lowdim_policy.PacDiffusionUnetLowdimPolicy
 
   model:
     _target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
@@ -74,13 +31,12 @@ policy:
     #_target_: diffusion_policy.model.diffusion.conditional_prob4_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Deterministic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob5_unet1d.BayesianConditionalUnet1D          # Determinstic FiLM conditioning  + Probabilistic timestep encoding 
     #_target_: diffusion_policy.model.diffusion.conditional_prob6_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
-    #_target_: diffusion_policy.model.diffusion.conditional_prob7_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
-    #_target_: diffusion_policy.model.diffusion.conditional_prob8_unet1d.BayesianConditionalUnet1D          # Probabilistic layer only the last layer of the network
-    #_target_: diffusion_policy.model.diffusion.conditional_prob9_unet1d.BayesianConditionalUnet1D 
+    #_target_: diffusion_policy.model.diffusion.conditional_prob7_unet1d.BayesianConditionalUnet1D          # Last module deterministic
+    #_target_: diffusion_policy.model.diffusion.conditional_prob8_unet1d.BayesianConditionalUnet1D          # last layer of last module is determininstic 
+    #_target_: diffusion_policy.model.diffusion.conditional_prob9_unet1d.BayesianConditionalUnet1D          # Last module bayesian
+    #_target_: diffusion_policy.model.diffusion.conditional_prob10_unet1d.BayesianConditionalUnet1D         # Only Last module bayesian
 
-
-    input_dim: "${eval: ${task.action_dim} if ${obs_as_local_cond} or ${obs_as_global_cond} else ${task.obs_dim} + ${task.action_dim}}"
-    local_cond_dim: "${eval: ${task.obs_dim} if ${obs_as_local_cond} else None}"
+    input_dim: "${eval: ${task.action_dim} if ${obs_as_global_cond} else ${task.obs_dim} + ${task.action_dim}}"
     global_cond_dim: "${eval: ${task.obs_dim}*${n_obs_steps} if ${obs_as_global_cond} else None}"
     diffusion_step_embed_dim: 256
     down_dims: [256, 512, 1024]
@@ -93,8 +49,8 @@ policy:
     rho_prior: 0.54
     prior_dist: 'gaussian'
     init_post: 'random'
-    init_prior: 'random'
-
+    init_prior: 'zeros'
+    
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
     num_train_timesteps: 100
@@ -114,7 +70,6 @@ policy:
   n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
   n_obs_steps: ${n_obs_steps}
   num_inference_steps: 10
-  obs_as_local_cond: ${obs_as_local_cond}
   obs_as_global_cond: ${obs_as_global_cond}
   pred_action_steps_only: ${pred_action_steps_only}
   oa_step_convention: True
@@ -132,17 +87,10 @@ ema:
   min_value: 0.0
   max_value: 0.9999
 
-prior_dataloader:
+dataloader:
   batch_size: 256
   num_workers: 1
   shuffle: True
-  pin_memory: True
-  persistent_workers: False
-
-post_dataloader:
-  batch_size: 256
-  num_workers: 1
-  shuffle: False
   pin_memory: True
   persistent_workers: False
   
@@ -160,52 +108,42 @@ optimizer:
   eps: 1.0e-8
   weight_decay: 1.0e-6
 
-prior_training:
-  device: ${training.device}
-  # optimization
-  lr_scheduler: cosine
-  lr_warmup_steps: 500
-  num_epochs: 1000
-  gradient_accumulate_every: 1
-  use_ema: True
-  # misc
-  tqdm_interval_sec: 1.0
-
 training:
+  device: "cuda:0"
   seed: 42
   debug: False
-  device: "cuda:0"
+  resume: False
+  desired_ckpt_path: null
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 4500
+  num_updates: 1e5
   gradient_accumulate_every: 1
   use_ema: True
   # training loop control
   # in epochs
-  rollout_every: 50
-  checkpoint_every: 50
-  val_every: 1
-  sample_every: 50
-  nll_every: 50
-  rho_log_every: 5000
-  reconst_loss_every: 50
+  rollout_every: 1e4
+  checkpoint_every: 1e4
+  val_every: 1e3
+  sample_every: 1e3
+  nll_every: 1e3
+  reconst_loss_every: 1e3
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
   # misc
   tqdm_interval_sec: 1.0
   # Bayesian NN
-  train_prior: False
-  initialize_from_prior: True
-  stochastic: False
+  stochastic: True
   bounded: False
   delta: 0.025
-  kl_penalty: 1.0
+  kl_penalty: 1.0e-4
   pac_objective: "fquad"  # "fquad" or "calssic", "bbb"
+  init_model_path: "data/outputs/2026.05.08/09.37.29_train_pac_diffusion_unet_lowdim_square_lowdim/checkpoints/epoch=6764.ckpt"
+  data_dependent_prior: False
 
 eval:
-  stochastic: False
+  stochastic: True
   delta: 0.05
   mc_sampling: 1000
   
@@ -218,22 +156,23 @@ logging:
   id: null
   group: null
 
-checkpoint:
+checkpoint_max_score:
   topk:
     monitor_key: test_mean_score
     mode: max
-    k: 3
+    k: 5
     format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
 
-checkpoint_every:
+checkpoint_last_N:
   topk:
     monitor_key: epoch
+    k: 10
     format_str: 'epoch={epoch:04d}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
-  
+
 multi_run:
   run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
   wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}

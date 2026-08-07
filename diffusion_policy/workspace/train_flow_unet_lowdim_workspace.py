@@ -166,8 +166,6 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
             num_updates = int(cfg.training.num_updates)
             rollout_every = int(cfg.training.rollout_every)
             val_every = int(cfg.training.val_every)
-            nll_every = int(cfg.training.nll_every)
-            reconst_loss_every = int(cfg.training.reconst_loss_every)
             checkpoint_every = int(cfg.training.checkpoint_every)
 
             # training: run until we hit num_updates
@@ -182,7 +180,7 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
                         # compute objective
-                        raw_loss = self.model.compute_loss(batch, train=True)
+                        raw_loss = self.model.compute_loss(batch)
                             
                         loss = raw_loss
                         loss.backward()
@@ -214,6 +212,38 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
                         if (current_step % rollout_every) == 0 or self.global_step==0:
                             runner_log = env_runner.run(policy, cfg)
                             step_log.update(runner_log)
+
+                        # validation: nll computation
+                        if ((current_step % val_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
+                            nlls = []
+                            val_losses = []
+                            with tqdm.tqdm(val_dataloader, desc=f"Validation step {current_step}: NLL computation on the test set", 
+                                    leave=False, mininterval=cfg.training.tqdm_interval_sec) as vepoch:
+                                n_samples_total=0
+                                for v_idx, vbatch in enumerate(vepoch):
+                                    n_samples = len(vbatch["obs"])
+                                    n_samples_total = n_samples_total + n_samples
+                                    vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
+                                    
+                                    val_loss = policy.compute_loss(vbatch)
+                                    nll = policy.compute_nll(vbatch, method=cfg.validation.method, 
+                                                                step_size=cfg.validation.step_size, 
+                                                                atol=cfg.validation.atol, 
+                                                                rtol=cfg.validation.rtol, 
+                                                                exact_divergence=cfg.validation.exact_divergence,
+                                                                return_intermediates=cfg.validation.return_intermediates, 
+                                                                enable_grad=cfg.validation.enable_grad)
+                                    
+                                    nlls.append(nll.item() * n_samples)
+                                    val_losses.append(val_loss.item() * n_samples)
+                                    if (cfg.training.max_val_steps is not None) and v_idx >= (cfg.training.max_val_steps - 1):
+                                        break
+                            if len(nlls) > 0:
+                                nll = np.sum(nlls) / n_samples_total
+                                step_log['test_NLL'] = nll
+                            if len(val_losses) > 0:
+                                val_loss = np.sum(val_losses) / n_samples_total
+                                step_log['test_loss'] = val_loss
 
                         policy.train()
                         

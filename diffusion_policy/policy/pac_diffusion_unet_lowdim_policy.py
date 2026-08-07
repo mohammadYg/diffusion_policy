@@ -280,7 +280,8 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
         loss = loss.mean()
         return loss
     
-    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, kl_penalty = 0.005, mc_sampling=1000, stochastic = True, bounded = False, train=True):
+    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, 
+    kl_penalty = 0.005, stochastic = True, bounded = False, train=True):
         
         # DM emprical risk
         loss_emp = self.compute_loss(batch, stochastic=stochastic, train=train)
@@ -610,7 +611,7 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
         model.set_normalizer(normalizer)
 
         # configure number of epochs based on the number of updates and dataloader size
-        num_epochs = int(cfg.prior_training.num_updates) // len(train_dataloader)
+        num_updates = int(cfg.prior_training.num_updates) // len(train_dataloader)
 
         # configure lr scheduler
         lr_scheduler = get_scheduler(
@@ -693,7 +694,6 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
                         # Allow unmatched params (e.g. new Bayesian-only params)
                         pass
     
-
     def prior_initialization(
     self,
     prior_model,
@@ -742,16 +742,16 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
 
     # =============== Compute Reconstruction Loss of PAC-Bayes Bounds of Mbacke =======================
     # see https://arxiv.org/pdf/2312.05989
-    
+
     @torch.no_grad()
-    def compute_action_reconst_loss(self, dataloader, cfg):
+    def compute_action_reconst_loss(self, dataloader, stochastic=False):
         total_loss_rec = 0
-        for _ in range (cfg.num_mc_samples):
+        for _ in range (1):
             # sample once for the whole trajectory, to be used in all steps of the reverse process
             self.model.sample_weights()   
             loss_rec=0
             with tqdm.tqdm(dataloader, desc=f"Reconstruction Loss", 
-                        leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                        leave=False, mininterval=1.0) as tepoch:
                 for batch in tepoch:
                     batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
                     
@@ -759,13 +759,13 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
                     obs_dict = {'obs': batch['obs']}
                     ref_action = batch["action"]
 
-                    if cfg.pred_action_steps_only:
-                        start = cfg.n_obs_steps - 1
-                        end = start + cfg.n_action_steps
+                    if self.pred_action_steps_only:
+                        start = self.n_obs_steps - 1
+                        end = start + self.n_action_steps
                         ref_action = ref_action[:, start:end]
 
-                    result = self.predict_action(obs_dict, cfg.eval.stochastic)
-                    if cfg.pred_action_steps_only:
+                    result = self.predict_action(obs_dict, stochastic)
+                    if self.pred_action_steps_only:
                         pred_action = result['action']
                     else:
                         pred_action = result['action_pred']
@@ -781,7 +781,7 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
             # clear sampled weights
             self.model.clear_sampled_weights()
 
-        return total_loss_rec/(cfg.num_mc_samples*len(dataloader.dataset))
+        return total_loss_rec/(len(dataloader.dataset))
 
     
     # def nll_sde(self, dataloader, stochastic=False):
