@@ -134,6 +134,7 @@ training:
   # Flow
   prior_std: 1.0
   skewed_timesteps: False
+  x1_vf_bs: 0
 
 eval:
   # PAC

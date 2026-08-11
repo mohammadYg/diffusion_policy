@@ -90,8 +90,8 @@ training:
   debug: False
   resume: False
   desired_ckpt_path: null
-  skewed_timesteps: True
-  x1_vf_bs: 8
+  skewed_timesteps: False
+  x1_vf_bs: 0
 
   
   # optimization

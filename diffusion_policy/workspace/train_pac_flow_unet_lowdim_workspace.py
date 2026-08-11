@@ -242,14 +242,9 @@ class TrainPacFlowUnetLowdimWorkspace(BaseWorkspace):
                                     vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
                                     
                                     val_loss = policy.compute_loss(vbatch, stochastic=cfg.eval.stochastic)
-                                    nll = policy.compute_nll(vbatch, stochastic=cfg.eval.stochastic, 
-                                                                method=cfg.validation.method, 
-                                                                step_size=cfg.validation.step_size, 
-                                                                atol=cfg.validation.atol, 
-                                                                rtol=cfg.validation.rtol, 
+                                    nll = policy.compute_nll(vbatch, stochastic=cfg.eval.stochastic,
                                                                 exact_divergence=cfg.validation.exact_divergence,
-                                                                return_intermediates=cfg.validation.return_intermediates, 
-                                                                enable_grad=cfg.validation.enable_grad)
+                                                            )
                                     
                                     nlls.append(nll.item() * n_samples)
                                     val_losses.append(val_loss.item() * n_samples)

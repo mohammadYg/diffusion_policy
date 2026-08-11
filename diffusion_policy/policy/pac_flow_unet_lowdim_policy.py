@@ -178,12 +178,17 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def compute_loss(self, batch, stochastic=False, x1_vf_batch=None, debug=False):
+    def compute_loss(self, batch, stochastic=False, x1_vf_batch=None, skewed_timesteps=False,
+                     debug=False):
         # normalize input
         assert 'valid_mask' not in batch
         nbatch = self.normalizer.normalize(batch)
         obs = nbatch['obs']
         action = nbatch['action']
+
+        if x1_vf_batch is not None:
+                    # normalize x1_vf_batch
+                    x1_vf_batch = self.normalizer['action'].normalize(x1_vf_batch)
 
         # handle different ways of passing observation
         global_cond = None
@@ -209,7 +214,11 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
 
         # Sample noise that we'll add to the images
         x_0 = torch.randn(x_1.shape, device=x_1.device)*self.prior_std
-        t = torch.rand(x_1.shape[0], device=x_1.device)
+        if skewed_timesteps:
+            t = skewed_timestep_sample(x_1.shape[0], device=x_1.device)
+        else:
+            t = torch.rand(x_1.shape[0], device=x_1.device)
+
         if debug:
             out, first_element_prob, norm_score = self.FM.sample(x_0, x_1, t, x1_vf_batch, prior_std = self.prior_std, debug=debug) 
         else:
@@ -235,11 +244,13 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
 
     def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, 
                         kl_penalty = 0.005, stochastic = True, bounded = False, 
-                        x1_vf_batch=None, debug=False):
+                        x1_vf_batch=None, skewed_timesteps=False, debug=False):
         
         # DM emprical risk
         loss_emp = self.compute_loss(batch, stochastic=stochastic, 
-                                     x1_vf_batch=x1_vf_batch, debug=debug )
+                                     x1_vf_batch=x1_vf_batch, 
+                                     skewed_timesteps = skewed_timesteps,
+                                     debug=debug )
         scale = 300.0
         if bounded:
             loss_emp_scaled = loss_emp/scale
@@ -310,7 +321,7 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
             global_cond=global_cond,
             stochastic=stochastic,
             exact_divergence = exact_divergence,
-            **kwargs,
+            **self.kwargs,
         )
 
         # action_normalizer = self.normalizer['action']

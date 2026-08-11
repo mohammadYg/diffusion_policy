@@ -217,7 +217,6 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 objective=cfg.training.pac_objective,
                                 delta=cfg.training.delta,
                                 kl_penalty=cfg.training.kl_penalty,
-                                mc_sampling=cfg.eval.mc_sampling,
                                 stochastic=cfg.training.stochastic,
                                 bounded=cfg.training.bounded,
                                 train=True,
