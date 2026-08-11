@@ -51,7 +51,7 @@ policy:
     init_prior: 'random'
 
   FM:
-    _target_: diffusion_policy.CFM.conditional_flow_matching.ConditionalFlowMatcher
+    _target_: diffusion_policy.CFM.path.affine.CondOTProbPath
     sigma: 0.0
 
   horizon: ${horizon}
