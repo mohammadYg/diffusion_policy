@@ -1,4 +1,3 @@
-from sched import scheduler
 from typing import Dict
 import torch
 import torch.nn.functional as F
@@ -9,24 +8,21 @@ from functools import partial
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.model.diffusion.conditional_prob1_unet1d import BayesianConditionalUnet1D
-
 from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
-from diffusion_policy.common.pytorch_util import dict_apply
+
 from diffusion_policy.CFM.ode_solver import ODESolver
-from diffusion_policy.CFM.affine import normal_log_prob
-from diffusion_policy.CFM.conditional_flow_matching import ConditionalFlowMatcher
+from diffusion_policy.CFM.path.affine import normal_log_prob
+from diffusion_policy.CFM.path.affine import CondOTProbPath
 from diffusion_policy.CFM.cfm_model import CFMVectorField
 from diffusion_policy.CFM.utils import skewed_timestep_sample
 
 
 import numpy as np
-import math 
-import tqdm
 
 class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
     def __init__(self, 
             model: BayesianConditionalUnet1D,
-            FM: ConditionalFlowMatcher,
+            FM: CondOTProbPath,
             horizon, 
             obs_dim, 
             action_dim, 
@@ -36,7 +32,7 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
             obs_as_global_cond=False,
             pred_action_steps_only=False,
             oa_step_convention=False,
-            prior_std=1.0,
+            prior_std = 1.0,
             # parameters passed to integrator
             **kwargs):
         
@@ -71,8 +67,8 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
         self.obs_as_global_cond = obs_as_global_cond
         self.pred_action_steps_only = pred_action_steps_only
         self.oa_step_convention = oa_step_convention
-        self.kwargs = kwargs
         self.prior_std = prior_std
+        self.kwargs = kwargs
 
     # ========= inference  ============
     def conditional_sample(self, 
@@ -84,7 +80,7 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
             **kwargs
             ):
         
-        X0 = torch.randn(
+        x_0 = torch.randn(
             size=condition_data.shape, 
             dtype=condition_data.dtype,
             device=condition_data.device,
@@ -92,18 +88,17 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
 
         time_grid=torch.tensor(
                 [0.0, 1.0],
-                device=X0.device,
+                device=x_0.device,
             )
         # integrate the ODE backwards in time
-        #! make sute to pass the solver parameters to the integrator
-        X1 = self.solver.sample(
-            x_init=X0,
+        x_1 = self.solver.sample(
+            x_init=x_0,
             time_grid=time_grid,
             **kwargs,
             global_cond=global_cond,
             stochastic=stochastic
         )
-        return X1
+        return x_1
 
 
     def predict_action(self, obs_dict: Dict[str, torch.Tensor], stochastic=False) -> Dict[str, torch.Tensor]:
@@ -183,7 +178,7 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def compute_loss(self, batch, stochastic=False):
+    def compute_loss(self, batch, stochastic=False, x1_vf_batch=None, debug=False):
         # normalize input
         assert 'valid_mask' not in batch
         nbatch = self.normalizer.normalize(batch)
@@ -192,7 +187,7 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
 
         # handle different ways of passing observation
         global_cond = None
-        x1 = action
+        x_1 = action
         if self.obs_as_global_cond:
             global_cond = obs[:,:self.n_obs_steps,:].reshape(
                 obs.shape[0], -1)
@@ -202,40 +197,49 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
                 if self.oa_step_convention:
                     start = To - 1
                 end = start + self.n_action_steps
-                x1 = action[:,start:end]
+                x_1 = action[:,start:end]
         else:
-            x1 = torch.cat([action, obs], dim=-1)
+            x_1 = torch.cat([action, obs], dim=-1)
 
         # generate impainting mask
         if self.pred_action_steps_only:
-            condition_mask = torch.zeros_like(x1, dtype=torch.bool)
+            condition_mask = torch.zeros_like(x_1, dtype=torch.bool)
         else:
-            condition_mask = self.mask_generator(x1.shape)
+            condition_mask = self.mask_generator(x_1.shape)
 
         # Sample noise that we'll add to the images
-        x0 = torch.randn(x1.shape, device=x1.device)*self.prior_std
-        t, xt, ut = self.FM.sample_location_and_conditional_flow(x0, x1)
+        x_0 = torch.randn(x_1.shape, device=x_1.device)*self.prior_std
+        t = torch.rand(x_1.shape[0], device=x_1.device)
+        if debug:
+            out, first_element_prob, norm_score = self.FM.sample(x_0, x_1, t, x1_vf_batch, prior_std = self.prior_std, debug=debug) 
+        else:
+            out = self.FM.sample(x_0, x_1, t, x1_vf_batch, prior_std = self.prior_std, debug=debug) 
+        x_t = out.x_t
+        x_1 = out.x_1
+        u_t = out.dx_t
         
         # compute loss mask
         loss_mask = ~condition_mask
 
         # apply conditioning
-        xt[condition_mask] = x1[condition_mask]
+        x_t[condition_mask] = x_1[condition_mask]
         
         # Predict the noise residual
-        vt_pred = self.model(xt, t, global_cond=global_cond, stochastic=stochastic)
+        vt_pred = self.model(x_t, t, global_cond=global_cond, stochastic=stochastic)
        
-        loss = F.mse_loss(vt_pred, ut, reduction='none')
+        loss = F.mse_loss(vt_pred, u_t, reduction='none')
         loss = loss * loss_mask.type(loss.dtype)
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss.mean()
         return loss
 
     def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, 
-    kl_penalty = 0.005, stochastic = True, bounded = False):
+                        kl_penalty = 0.005, stochastic = True, bounded = False, 
+                        x1_vf_batch=None, debug=False):
         
         # DM emprical risk
-        loss_emp = self.compute_loss(batch, stochastic=stochastic)
+        loss_emp = self.compute_loss(batch, stochastic=stochastic, 
+                                     x1_vf_batch=x1_vf_batch, debug=debug )
         scale = 300.0
         if bounded:
             loss_emp_scaled = loss_emp/scale
@@ -277,65 +281,7 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
 
         return loss_sum, loss_emp, kl
 
-    def compute_loss_novel(self, batch, x1_vf_batch, skewed_timesteps=False):
-        # normalize input
-        assert 'valid_mask' not in batch
-        nbatch = self.normalizer.normalize(batch)
-        obs = nbatch['obs']
-        action = nbatch['action']
-
-        # normalize x1_vf_batch
-        x1_vf_batch = self.normalizer['action'].normalize(x1_vf_batch)
-
-        # handle different ways of passing observation
-        global_cond = None
-        x1 = action
-        if self.obs_as_global_cond:
-            global_cond = obs[:,:self.n_obs_steps,:].reshape(
-                obs.shape[0], -1)
-            if self.pred_action_steps_only:
-                To = self.n_obs_steps
-                start = To
-                if self.oa_step_convention:
-                    start = To - 1
-                end = start + self.n_action_steps
-                x1 = action[:,start:end]
-        else:
-            x1 = torch.cat([action, obs], dim=-1)
-
-        # generate impainting mask
-        if self.pred_action_steps_only:
-            condition_mask = torch.zeros_like(x1, dtype=torch.bool)
-        else:
-            condition_mask = self.mask_generator(x1.shape)
-
-        # Sample noise that we'll add to the images
-        x0 = torch.randn(x1.shape, device=x1.device)*self.prior_std
-        if skewed_timesteps:
-            t = skewed_timestep_sample(x1.shape[0], device=x1.device)
-        else:
-            t = torch.rand(x1.shape[0], device=x1.device)
-
-        t, xt, ut = self.FM.sample_location_and_conditional_flow(x0, x1, t=t, 
-                                                                 x1_vf_batch=x1_vf_batch,
-                                                                 prior_std = self.prior_std)
-        
-        # compute loss mask
-        loss_mask = ~condition_mask
-
-        # apply conditioning
-        xt[condition_mask] = x1[condition_mask]
-        
-        # Predict the noise residual
-        vt_pred = self.model(xt, t, global_cond=global_cond)
-       
-        loss = F.mse_loss(vt_pred, ut, reduction='none')
-        loss = loss * loss_mask.type(loss.dtype)
-        loss = reduce(loss, 'b ... -> b (...)', 'mean')
-        loss = loss.mean()
-        return loss
-
-    def compute_nll(self, batch, stochastic=False, **kwargs):
+    def compute_nll(self, batch, stochastic=False, exact_divergence=True, **kwargs):
         # normalize input
         nbatch = self.normalizer.normalize(batch)
         obs = nbatch['obs']
@@ -363,6 +309,7 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
             log_p0=partial(normal_log_prob, std=self.prior_std),
             global_cond=global_cond,
             stochastic=stochastic,
+            exact_divergence = exact_divergence,
             **kwargs,
         )
 

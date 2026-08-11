@@ -91,7 +91,7 @@ training:
   resume: False
   desired_ckpt_path: null
   skewed_timesteps: True
-  x1_vf_bs: 4
+  x1_vf_bs: 8
 
   
   # optimization

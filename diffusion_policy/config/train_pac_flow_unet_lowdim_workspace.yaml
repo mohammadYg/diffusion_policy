@@ -62,9 +62,9 @@ policy:
   obs_as_global_cond: ${obs_as_global_cond}
   pred_action_steps_only: ${pred_action_steps_only}
   oa_step_convention: True
-  prior_std: 1.0
-  
-  #solver settings
+  prior_std: ${training.prior_std}
+
+  # ODE Solver parameters
   method: "dopri5"
   step_size: null
   atol: 1e-5
@@ -117,7 +117,7 @@ training:
   # in epochs
   rollout_every: 1e4
   checkpoint_every: 1e4
-  val_every: 1e4
+  val_every: 1e3
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
@@ -131,20 +131,18 @@ training:
   pac_objective: "fquad"  # "fquad" or "calssic", "bbb"
   init_model_path: "data/outputs/2026.05.08/22.12.26_train_pac_diffusion_unet_lowdim_square_lowdim/checkpoints/epoch=8750.ckpt"
   data_dependent_prior: False
+  # Flow
+  prior_std: 1.0
+  skewed_timesteps: False
 
 eval:
+  # PAC
   stochastic: True
   delta: 0.05
   mc_sampling: 1000
-
-validation:
-  method: "dopri5"
-  step_size: null
-  atol: 1e-5
-  rtol: 1e-5
+  # Flow
+  prior_std: ${training.prior_std}
   exact_divergence: True
-  return_intermediates: False
-  enable_grad: False
 
 logging:
   project: diffusion_policy_debug

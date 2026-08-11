@@ -23,7 +23,7 @@ num_mc_samples: 1
 
 policy:
   _target_: diffusion_policy.policy.flow_unet_lowdim_policy.FlowUnetLowdimPolicy
-
+  
   model:
     _target_: diffusion_policy.model.diffusion.conditional_unet1d.ConditionalUnet1D
     input_dim: "${eval: ${task.action_dim} if ${obs_as_global_cond} else ${task.obs_dim} + ${task.action_dim}}"
@@ -35,7 +35,7 @@ policy:
     cond_predict_scale: True
 
   FM:
-    _target_: diffusion_policy.CFM.conditional_flow_matching.ConditionalFlowMatcher
+    _target_: diffusion_policy.CFM.path.affine.CondOTProbPath
     sigma: 0.0
 
   horizon: ${horizon}
@@ -46,9 +46,9 @@ policy:
   obs_as_global_cond: ${obs_as_global_cond}
   pred_action_steps_only: ${pred_action_steps_only}
   oa_step_convention: True
-  prior_std: 1.0
+  prior_std: ${training.prior_std}
   
-  #solver settings
+  # ODE solver parameters
   method: "dopri5"
   step_size: null
   atol: 1e-5
@@ -101,21 +101,20 @@ training:
   # in epochs
   rollout_every: 1e4
   checkpoint_every: 1e4
-  val_every: 1e4
+  val_every: 2e3
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
   # misc
   tqdm_interval_sec: 1.0
+  #flow
+  prior_std: 1.0
+  x1_vf_bs: 0
+  skewed_timesteps: False
 
-validation:
-  method: "dopri5"
-  step_size: null
-  atol: 1e-5
-  rtol: 1e-5
+eval:
+  prior_std: ${training.prior_std}
   exact_divergence: True
-  return_intermediates: False
-  enable_grad: False
 
 logging:
   project: diffusion_policy_debug

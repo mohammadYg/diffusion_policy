@@ -58,6 +58,18 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
 
         self.global_step = 0
 
+    def sample_x1_vf_batch(self, dataset, batch_size: int, device)-> torch.Tensor:
+        total_samples = len(dataset)
+        if total_samples == 0:
+            return torch.empty(0, device=device)
+
+
+        random_indices = torch.randint(0, total_samples, (batch_size,))
+        batch_data = torch.stack(
+            [dataset[idx.item()]['action'] for idx in random_indices]
+        )
+        return batch_data.to(device)
+    
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
@@ -114,12 +126,12 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
                 cfg.ema,
                 model=self.ema_model)
 
-        # configure env runner
-        env_runner: BaseLowdimRunner
-        env_runner = hydra.utils.instantiate(
-            cfg.task.env_runner,
-            output_dir=self.output_dir)
-        assert isinstance(env_runner, BaseLowdimRunner)
+        # # configure env runner
+        # env_runner: BaseLowdimRunner
+        # env_runner = hydra.utils.instantiate(
+        #     cfg.task.env_runner,
+        #     output_dir=self.output_dir)
+        # assert isinstance(env_runner, BaseLowdimRunner)
 
         # configure logging
         wandb_run = wandb.init(
@@ -171,16 +183,21 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
             # training: run until we hit num_updates
             while self.global_step < num_updates:
                 step_log = dict()
-
+                x1_vf_batch = None
                 with tqdm.tqdm(train_dataloader, desc=f"Training step {self.global_step}", 
                     leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
 
                     for batch_idx, batch in enumerate(tepoch):
                         # device transfer
+                        batch['obs'] = torch.zeros_like(batch['obs'])
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                        # sample x1_vf_batch for conditional flow matching
+                        if cfg.training.x1_vf_bs > 0:
+                            x1_vf_batch = self.sample_x1_vf_batch(dataset, cfg.training.x1_vf_bs, device=device)
 
                         # compute objective
-                        raw_loss = self.model.compute_loss(batch)
+                        raw_loss = self.model.compute_loss(batch, x1_vf_batch=x1_vf_batch, 
+                                                           skewed_timesteps=cfg.training.skewed_timesteps)
                             
                         loss = raw_loss
                         loss.backward()
@@ -208,31 +225,32 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
                         policy = self.ema_model if cfg.training.use_ema else self.model
                         policy.eval()
 
-                        # run rollout
-                        if (current_step % rollout_every) == 0 or self.global_step==0:
-                            runner_log = env_runner.run(policy, cfg)
-                            step_log.update(runner_log)
+                        # # run rollout
+                        # if (current_step % rollout_every) == 0 or self.global_step==0:
+                        #     runner_log = env_runner.run(policy, cfg)
+                        #     step_log.update(runner_log)
 
                         # validation: nll computation
                         if ((current_step % val_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
                             nlls = []
                             val_losses = []
+                            x1_vf_batch = None
                             with tqdm.tqdm(val_dataloader, desc=f"Validation step {current_step}: NLL computation on the test set", 
                                     leave=False, mininterval=cfg.training.tqdm_interval_sec) as vepoch:
                                 n_samples_total=0
                                 for v_idx, vbatch in enumerate(vepoch):
                                     n_samples = len(vbatch["obs"])
                                     n_samples_total = n_samples_total + n_samples
+                                    vbatch['obs'] = torch.zeros_like(vbatch['obs'])
                                     vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
+                                    if cfg.training.x1_vf_bs > 0:
+                                        x1_vf_batch = self.sample_x1_vf_batch(val_dataset, cfg.training.x1_vf_bs, device=device)
+                                       
+                                    val_loss = policy.compute_loss(vbatch, x1_vf_batch=x1_vf_batch, 
+                                                                   skewed_timesteps=cfg.training.skewed_timesteps)
                                     
-                                    val_loss = policy.compute_loss(vbatch)
-                                    nll = policy.compute_nll(vbatch, method=cfg.validation.method, 
-                                                                step_size=cfg.validation.step_size, 
-                                                                atol=cfg.validation.atol, 
-                                                                rtol=cfg.validation.rtol, 
-                                                                exact_divergence=cfg.validation.exact_divergence,
-                                                                return_intermediates=cfg.validation.return_intermediates, 
-                                                                enable_grad=cfg.validation.enable_grad)
+                                    nll = policy.compute_nll(vbatch, exact_divergence=cfg.eval.exact_divergence,
+                                                            )
                                     
                                     nlls.append(nll.item() * n_samples)
                                     val_losses.append(val_loss.item() * n_samples)

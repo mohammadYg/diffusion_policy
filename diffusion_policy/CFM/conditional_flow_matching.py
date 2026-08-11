@@ -12,7 +12,7 @@ from typing import Union
 import torch
 
 from .optimal_transport import OTPlanSampler
-from diffusion_policy.CFM.affine import vectorized_computation
+from diffusion_policy.CFM.path.affine import vectorized_computation
 
 def pad_t_like_x(t, x):
     """Function to reshape the time vector t by the number of dimensions of x.
