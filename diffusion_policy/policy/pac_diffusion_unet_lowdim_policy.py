@@ -159,6 +159,7 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
             cond_mask[:,:To,Da:] = True
         
         # run sampling
+        self.model.sample_weights()
         nsample = self.conditional_sample(
             cond_data, 
             cond_mask,
@@ -166,6 +167,7 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
             global_cond=global_cond,
             stochastic=stochastic,
             **self.kwargs)
+        self.model.clear_sampled_weights()
 
         naction_pred = nsample[...,:Da]
         action_pred_normalized = naction_pred

@@ -68,6 +68,18 @@ class FlowUnetLowdimPolicy(BaseLowdimPolicy):
         self.prior_std = prior_std
         self.kwargs = kwargs
 
+    def sample_x1_vf_batch(self, dataset, batch_size: int, device)-> torch.Tensor:
+        total_samples = len(dataset)
+        if total_samples == 0:
+            return torch.empty(0, device=device)
+
+
+        random_indices = torch.randint(0, total_samples, (batch_size,))
+        batch_data = torch.stack(
+            [dataset[idx.item()]['action'] for idx in random_indices]
+        )
+        return batch_data.to(device)
+    
     # ========= inference  ============
     def conditional_sample(self, 
             condition_data,

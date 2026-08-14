@@ -1,5 +1,5 @@
 """
-Evaluate Diffusion Policy checkpoints.
+Evaluate Flow Matching checkpoints.
 
 Usage:
     python eval_ckpts.py --ckpts_dir data/outputs/.../checkpoints -o data/outputs/.../eval
@@ -19,11 +19,9 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
-from diffusion_policy.common.checkpoint_util import TopKCheckpointManager  
+ 
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
-from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 
 # Attempt to import probabilistic policy if available (optional feature)
@@ -73,45 +71,65 @@ def instantiate_workspace(cfg: OmegaConf, output_dir: Path) -> BaseWorkspace:
     cls = hydra.utils.get_class(cfg._target_)
     return cls(cfg, output_dir=str(output_dir))
 
+    
 
-def compute_loss(policy, batch: Dict, device: torch.device, cfg) -> float:
-    """Compute the Diffusion Model loss for a batch."""
-    batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-    if BaseLowdimProbPolicy is not None and isinstance(policy, BaseLowdimProbPolicy):
-        loss = policy.compute_loss(batch, stochastic=cfg.eval.stochastic, train=False)
-    else:
-        loss = policy.compute_loss(batch, train=False)
-    return loss.item()
-
-def evaluate_DM_loss(policy, dataloader: DataLoader, cfg, device: torch.device) -> float:
-    """Evaluate average Diffusion Model loss over a dataset."""
+def evaluate_loss(policy, dataloader: DataLoader, cfg, device: torch.device) -> float:
+    """Evaluate average Flow matching loss over a dataset."""
     policy.eval()
     total_loss = 0.0
     total_samples = 0
+    x1_vf_batch = None
 
     with torch.inference_mode():
-        pbar = tqdm(dataloader, desc="Evaluating loss", leave=False, mininterval=cfg.training.tqdm_interval_sec)
+        pbar = tqdm(dataloader, desc="Validation loss", leave=False, mininterval=cfg.training.tqdm_interval_sec)
         for batch in pbar:
             n = len(batch["obs"])
             total_samples += n
-            loss = compute_loss(policy, batch, device, cfg)
-            total_loss += loss * n
+            batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
-    return total_loss / total_samples if total_samples > 0 else 0.0
+            # Sample x1_vf_batch if x1_vf_bs > 0
+            if cfg.training.x1_vf_bs > 0:
+                x1_vf_batch = policy.sample_x1_vf_batch(dataloader.dataset, cfg.training.x1_vf_bs, device=device)
+                                       
+            if BaseLowdimProbPolicy is not None and isinstance(policy, BaseLowdimProbPolicy):
+                loss = policy.compute_loss(batch, stochastic=cfg.eval.stochastic, 
+                                            x1_vf_batch=x1_vf_batch, 
+                                            skewed_timesteps=cfg.training.skewed_timesteps,
+                                            debug=False)
+            else:
+                loss = policy.compute_loss(batch,
+                                            x1_vf_batch=x1_vf_batch, 
+                                            skewed_timesteps=cfg.training.skewed_timesteps,
+                                            debug=False)
+            total_loss += loss.item() * n
 
-def evaluate_nll(policy, dataloader: DataLoader, step: int, cfg, device: torch.device) -> float:
-    """Compute the negative log‑likelihood lower bound if the policy supports it."""
-    if not hasattr(policy, "nll_bound"):
+    return total_loss / total_samples if total_samples > 0 else 99999
+
+def evaluate_nll(policy, dataloader: DataLoader, cfg, device: torch.device) -> float:
+    """Compute the negative log‑likelihood if the policy supports it."""
+    if not hasattr(policy, "compute_nll"):
         return 0.0
+    
     policy.eval()
-    npoints = 100
-    with torch.inference_mode():
+    total_nll  = 0.0
+    total_samples = 0
+    pbar = tqdm(dataloader, desc="NLL Computation", leave=False, mininterval=cfg.training.tqdm_interval_sec)
+    for batch in pbar:
+        n = len(batch["obs"])
+        total_samples += n
+        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
         if BaseLowdimProbPolicy is not None and isinstance(policy, BaseLowdimProbPolicy):
-            stochastic = getattr(cfg.eval, "stochastic", False)
-            nll = policy.nll_bound(dataloader, step, npoints=npoints, stochastic=stochastic)
+            nll = policy.compute_nll(batch, stochastic=cfg.eval.stochastic,
+                                    exact_divergence=cfg.eval.exact_divergence,
+                                                            )
         else:
-            nll = policy.nll_bound(dataloader, step, npoints=npoints)
-    return nll.item()
+             nll = policy.compute_nll(batch, 
+                                    exact_divergence=cfg.eval.exact_divergence,
+                                                                        )
+        total_nll  += nll.item() * n
+
+    return total_nll / total_samples if total_samples > 0 else 99999
+
 
 def run_env_runner(env_runner, policy, cfg) -> Tuple[dict, float]:
     """Run the environment runner and return the log dict and mean score."""
@@ -185,24 +203,6 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
         pin_memory=torch.cuda.is_available(),
         persistent_workers=False,
     )
-    
-    # Train dataloader
-    train_dataloader = DataLoader(
-        dataset,
-        batch_size=1024,
-        num_workers=1,
-        pin_memory=True,
-        persistent_workers=False,
-    )
-
-    # Dataloader for full dataset (used for covariance spectrum)
-    full_dataloader = DataLoader(
-        dataset,
-        batch_size=len(dataset),
-        num_workers=1,
-        pin_memory=True,
-        persistent_workers=False,
-    )
 
     # Environment runner
     env_runner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir))
@@ -212,17 +212,14 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
     step_results = {
         "steps": [],
         "success_rates": [],
-        "validation_losses": [],
-        "nll_values": [],
+        #"validation_losses": [],
+        #"nll_values": [],
     }
     sum_success_rates = 0.0
     num_evaluated = 0
 
-    noise_loss_val=[]
-    noise_loss_train=[]
-
+    loss_val=[]
     nll_val=[]
-    nll_train=[]
 
     # Iterate over checkpoints
     for ckpt_path in all_ckpt_files:
@@ -250,35 +247,26 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
         # Compute Validation metrics (if dataloader is not empty)
         if len(val_dataloader) == 0:
-            noise_loss_val.append(0.0)
-            noise_loss_train.append
+            loss_val.append(0.0)
             nll_val.append(0.0)
-            nll_train.append(0.0)
             logger.warning("Validation dataloader is empty, skipping loss and nll evaluation.")
         else:
-            loss = evaluate_DM_loss(policy, val_dataloader, cfg, device_obj)
-            noise_loss_val.append(loss)
+            loss = evaluate_loss(policy, val_dataloader, cfg, device_obj)
+            loss_val.append(loss)
             
-            loss = evaluate_DM_loss(policy, train_dataloader, cfg, device_obj)
-            noise_loss_train.append(loss)
-
-            policy.dataset_info(full_dataloader, covariance_spectrum=None, diagonal=False)
-            nll = evaluate_nll(policy, val_dataloader, step, cfg, device_obj)
+            nll = evaluate_nll(policy, val_dataloader, cfg, device_obj)
             nll_val.append(nll)
-
-            nll = evaluate_nll(policy, train_dataloader, step, cfg, device_obj)
-            nll_train.append(nll)
 
         # Store results
         key = f"model_at_step_{step:06d}"
         json_log[key] = {
             "success_rate": success_rate,
-            #"test": {"validation_loss": noise_loss, "nll": nll_val},
+            #"test": {"loss_val": loss_val, "nll": nll_val},
         }
         step_results["steps"].append(step)
         step_results["success_rates"].append(success_rate)
-        # step_results["validation_losses"].append(noise_loss)
-        # step_results["nll_values"].append(nll_val)
+        #step_results["validation_losses"].append(noise_loss)
+        #step_results["nll_values"].append(nll_val)
 
         sum_success_rates += success_rate
         num_evaluated += 1
@@ -292,10 +280,8 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
     # Final summary
     if num_evaluated > 0:
-        json_log["noise_pred_loss_val"] = np.mean(noise_loss_val)
-        json_log["noise_pred_loss_train"] = np.mean(noise_loss_train)
+        json_log["loss_val"] = np.mean(loss_val)
         json_log["nll_val"] = np.mean(nll_val)
-        json_log["nll_train"] = np.mean(nll_train)
         json_log["mean_scores"] = step_results["success_rates"]
         json_log["num_steps"] = step_results["steps"]
         json_log[f"mean_success_rate_last_{num_evaluated}_checkpoints"] = sum_success_rates / num_evaluated

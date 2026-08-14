@@ -70,6 +70,18 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
         self.prior_std = prior_std
         self.kwargs = kwargs
 
+    def sample_x1_vf_batch(self, dataset, batch_size: int, device)-> torch.Tensor:
+        total_samples = len(dataset)
+        if total_samples == 0:
+            return torch.empty(0, device=device)
+
+
+        random_indices = torch.randint(0, total_samples, (batch_size,))
+        batch_data = torch.stack(
+            [dataset[idx.item()]['action'] for idx in random_indices]
+        )
+        return batch_data.to(device)
+    
     # ========= inference  ============
     def conditional_sample(self, 
             condition_data,
@@ -140,11 +152,13 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
             # cond_mask[:,:To,Da:] = True
 
         # run sampling
+        self.model.sample_weights()
         nsample = self.conditional_sample(
             cond_data, 
             global_cond=global_cond,
             stochastic=stochastic,
             **self.kwargs)
+        self.model.clear_sampled_weights()
         
         # unnormalize prediction
         naction_pred = nsample[...,:Da]
@@ -292,7 +306,7 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
 
         return loss_sum, loss_emp, kl
 
-    def compute_nll(self, batch, stochastic=False, exact_divergence=True, **kwargs):
+    def compute_nll(self, batch, stochastic=False, exact_divergence=True):
         # normalize input
         nbatch = self.normalizer.normalize(batch)
         obs = nbatch['obs']
@@ -315,6 +329,7 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
             #! inpainting is not supported for lowdim policy yet. Please use obs_as_global_cond=True.
             x1 = torch.cat([action, obs], dim=-1)
 
+        self.model.sample_weights()
         _, logp = self.solver.compute_likelihood(
             x_1=x1,
             log_p0=partial(normal_log_prob, std=self.prior_std),
@@ -323,6 +338,7 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
             exact_divergence = exact_divergence,
             **self.kwargs,
         )
+        self.model.clear_sampled_weights()
 
         # action_normalizer = self.normalizer['action']
         # scale = action_normalizer.params_dict['scale'].to(

@@ -363,9 +363,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                 # run policy
                 with torch.no_grad():      
                     if isinstance(policy, BaseLowdimPacPolicy):   
-                        policy.model.sample_weights()
                         action_dict = policy.predict_action(obs_dict, stochastic=cfg.eval.stochastic)
-                        policy.model.clear_sampled_weights()
                     else:                 
                         action_dict = policy.predict_action(obs_dict)
 
