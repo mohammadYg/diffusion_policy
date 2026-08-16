@@ -92,6 +92,7 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
         print ("validation dataset size: ", len(val_dataset))
+
         
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
@@ -178,7 +179,7 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
 
                     for batch_idx, batch in enumerate(tepoch):
                         # device transfer
-                        batch['obs'] = torch.zeros_like(batch['obs'])
+                        #batch['obs'] = torch.zeros_like(batch['obs'])
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                         # sample x1_vf_batch for conditional flow matching
                         if cfg.training.x1_vf_bs > 0:
@@ -230,7 +231,7 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
                                 for v_idx, vbatch in enumerate(vepoch):
                                     n_samples = len(vbatch["obs"])
                                     n_samples_total = n_samples_total + n_samples
-                                    vbatch['obs'] = torch.zeros_like(vbatch['obs'])
+                                    #vbatch['obs'] = torch.zeros_like(vbatch['obs'])
                                     vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
                                     if cfg.training.x1_vf_bs > 0:
                                         x1_vf_batch = policy.sample_x1_vf_batch(val_dataset, cfg.training.x1_vf_bs, device=device)

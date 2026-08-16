@@ -264,6 +264,7 @@ class ExactOptimalTransportConditionalFlowMatcher(ConditionalFlowMatcher):
         ----------
         [1] Improving and Generalizing Flow-Based Generative Models with minibatch optimal transport, Preprint, Tong et al.
         """
+        print ("gholi")
         x0, x1 = self.ot_sampler.sample_plan(x0, x1)
         return super().sample_location_and_conditional_flow(x0, x1, t, return_noise)
 

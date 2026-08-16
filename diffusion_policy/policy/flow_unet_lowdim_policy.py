@@ -226,14 +226,17 @@ class FlowUnetLowdimPolicy(BaseLowdimPolicy):
         else:
             t = torch.rand(x_1.shape[0], device=x_1.device)
 
-        if debug:
-            out, first_element_prob, norm_score = self.FM.sample(x_0, x_1, t, x1_vf_batch, prior_std = self.prior_std, debug=debug) 
+        if x1_vf_batch is not None:
+            if debug:
+                out, first_element_prob, norm_score = self.FM.sample(x_0, x_1, t, x1_vf_batch, prior_std = self.prior_std, debug=debug) 
+            else:
+                out = self.FM.sample(x_0, x_1, t, x1_vf_batch, prior_std = self.prior_std, debug=debug) 
+            x_t = out.x_t
+            x_1 = out.x_1
+            u_t = out.dx_t
         else:
-            out = self.FM.sample(x_0, x_1, t, x1_vf_batch, prior_std = self.prior_std, debug=debug) 
-        x_t = out.x_t
-        x_1 = out.x_1
-        u_t = out.dx_t
-
+            print ("ali")
+            t, x_t, u_t = self.FM.sample_location_and_conditional_flow(x_0, x_1, t)
         # compute loss mask
         loss_mask = ~condition_mask
 
@@ -272,7 +275,7 @@ class FlowUnetLowdimPolicy(BaseLowdimPolicy):
             #! inpainting is not supported for lowdim policy yet. Please use obs_as_global_cond=True.
             x1 = torch.cat([action, obs], dim=-1)
 
-        _, logp = self.solver.compute_likelihood(
+        _, logp = self.solver.computenvi_likelihood(
             x_1=x1,
             log_p0=partial(normal_log_prob, std=self.prior_std),
             global_cond=global_cond,
