@@ -146,6 +146,12 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
             save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_last_N.topk
         )
 
+        # configure checkpoint for nll
+        topk_manager_nll = TopKCheckpointManager(
+            save_dir=os.path.join(self.output_dir, 'checkpoints'),
+            **cfg.checkpoint_nll.topk
+        )
+        
         # device transfer
         device = torch.device(cfg.training.device)
         self.model.to(device)
@@ -171,6 +177,7 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
             checkpoint_every = int(cfg.training.checkpoint_every)
 
             # training: run until we hit num_updates
+            flag=False
             while self.global_step < num_updates:
                 step_log = dict()
                 x1_vf_batch = None
@@ -248,7 +255,18 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
                                         break
                             if len(nlls) > 0:
                                 nll = np.sum(nlls) / n_samples_total
-                                step_log['test_NLL'] = nll
+                                step_log['test_nll_bpd'] = nll
+                                if cfg.training.x1_vf_bs > 0:
+                                    if (nll)<=-2.454:
+                                        flag=True
+                                        topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
+                                        if topk_ckpt_path_nll is not None:
+                                            self.save_checkpoint(path=topk_ckpt_path_nll)
+                                else:
+                                    topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
+                                    if topk_ckpt_path_nll is not None:
+                                        self.save_checkpoint(path=topk_ckpt_path_nll)
+                                        
                             if len(val_losses) > 0:
                                 val_loss = np.sum(val_losses) / n_samples_total
                                 step_log['test_loss'] = val_loss
@@ -273,15 +291,15 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
                         #         self.save_checkpoint(path=topk_ckpt_path)
 
 
-                        # checkpointing (last N)
-                        if (current_step % checkpoint_every) == 0:
-                            if cfg.checkpoint_last_N.save_last_ckpt:
-                                self.save_checkpoint()
-                            if cfg.checkpoint_last_N.save_last_snapshot:
-                                self.save_snapshot()
-                            lastN_ckpt_path = lastN_manager.get_ckpt_path(step_log)
-                            if lastN_ckpt_path is not None:
-                                self.save_checkpoint(path=lastN_ckpt_path)
+                        # # checkpointing (last N)
+                        # if (current_step % checkpoint_every) == 0:
+                        #     if cfg.checkpoint_last_N.save_last_ckpt:
+                        #         self.save_checkpoint()
+                        #     if cfg.checkpoint_last_N.save_last_snapshot:
+                        #         self.save_snapshot()
+                        #     lastN_ckpt_path = lastN_manager.get_ckpt_path(step_log)
+                        #     if lastN_ckpt_path is not None:
+                        #         self.save_checkpoint(path=lastN_ckpt_path)
 
                         # log & step
                         wandb_run.log(step_log, step=current_step)
@@ -296,6 +314,12 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
                         if self.global_step >= num_updates:
                             break
 
+                        if flag:
+                            break
+                    if flag:
+                        break
+                if flag:
+                    break
                     # end for batches in dataloader
                 # end tepoch
             # end while self.global_step < num_updates

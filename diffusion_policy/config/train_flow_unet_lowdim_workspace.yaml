@@ -35,7 +35,7 @@ policy:
     cond_predict_scale: True
 
   FM:
-    _target_: diffusion_policy.CFM.path.affine.CondOTProbPath 
+    _target_: diffusion_policy.CFM.conditional_flow_matching.ExactOptimalTransportConditionalFlowMatcher
     sigma: 0.0
 
   horizon: ${horizon}
@@ -141,7 +141,16 @@ checkpoint_last_N:
     format_str: 'step={global_step:06d}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
-  
+
+checkpoint_nll:
+  topk:
+    monitor_key: test_nll_bpd
+    mode: min
+    k: 1
+    format_str: 'step={global_step:06d}-nll_bpd={test_nll_bpd:.3f}.ckpt'
+  save_last_ckpt: False
+  save_last_snapshot: False
+
 multi_run:
   run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
   wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
