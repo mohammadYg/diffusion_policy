@@ -1,4 +1,5 @@
 from typing import Dict
+import warnings
 import torch
 import numpy as np
 from diffusion_policy.model.common.normalizer import LinearNormalizer
@@ -157,3 +158,68 @@ class PacDriftingUnetLowdimPolicy(BaseLowdimPacPolicy):
             raise RuntimeError(f"Wrong objective {self.objective}")
 
         return loss_sum, loss_emp, kl, metrics
+
+    def prior_initialization(self, prior_model, init_posterior=True):
+        """
+        Seed this network's (fixed) prior distribution from `prior_model` -
+        another BayesianConditionalUnet1D whose `.weight.mu`/`.weight.rho` (its
+        own posterior) become this network's `.weight_prior.mu`/`.weight_prior.rho`
+        (the new, data-dependent prior). This part always runs.
+
+        If init_posterior=True (default): ALSO copy `prior_model`'s posterior and
+        every other matching param (deterministic layers included) onto this
+        network's own posterior, so posterior training starts exactly at the
+        prior (zero initial KL).
+
+        If init_posterior=False: skip that - leave this network's posterior and
+        any non-Bayesian params untouched. Use this to refresh only the fixed
+        prior buffer (e.g. on resume, where the posterior already reflects
+        partially completed training that must not be discarded, but the
+        PAC-Bayes bound should still measure KL against the trained prior).
+
+        Mirrors PacDiffusionUnetLowdimPolicy.prior_initialization (which doesn't
+        yet have the init_posterior option) - keep them in sync if you add it there.
+        """
+        prior_model.eval()
+        with torch.no_grad():
+            for name, param in self.model.state_dict().items():
+                if name.endswith(".weight_prior.mu"):
+                    w0_name = name.replace(".weight_prior.mu", ".weight.mu")
+                    param.copy_(prior_model.state_dict()[w0_name])
+
+                elif name.endswith(".bias_prior.mu"):
+                    b0_name = name.replace(".bias_prior.mu", ".bias.mu")
+                    param.copy_(prior_model.state_dict()[b0_name])
+
+                elif name.endswith(".weight_prior.rho"):
+                    w0_name = name.replace(".weight_prior.rho", ".weight.rho")
+                    param.copy_(prior_model.state_dict()[w0_name])
+
+                elif name.endswith(".bias_prior.rho"):
+                    b0_name = name.replace(".bias_prior.rho", ".bias.rho")
+                    param.copy_(prior_model.state_dict()[b0_name])
+
+                elif not init_posterior:
+                    # Prior-only refresh: everything below this point is either
+                    # the posterior (.weight/.bias .mu/.rho) or a non-Bayesian,
+                    # deterministic param - leave it as-is.
+                    continue
+
+                elif name.endswith(".weight.mu"):
+                    param.copy_(prior_model.state_dict()[name])
+
+                elif name.endswith(".bias.mu"):
+                    param.copy_(prior_model.state_dict()[name])
+
+                elif name.endswith(".weight.rho"):
+                    param.copy_(prior_model.state_dict()[name])
+
+                elif name.endswith(".bias.rho"):
+                    param.copy_(prior_model.state_dict()[name])
+
+                else:
+                    if name in prior_model.state_dict():
+                        param.copy_(prior_model.state_dict()[name])
+                    else:
+                        # Allow unmatched params (e.g. new Bayesian-only params)
+                        pass

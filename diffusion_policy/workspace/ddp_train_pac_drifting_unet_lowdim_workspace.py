@@ -32,7 +32,7 @@ from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.policy.pac_drifting_unet_lowdim_policy import PacDriftingUnetLowdimPolicy
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
-from diffusion_policy.common.checkpoint_util import TopKCheckpointManager, LastNCheckpointManager
+from diffusion_policy.common.checkpoint_util import LastNCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 
@@ -106,35 +106,32 @@ def cleanup_ddp():
         dist.destroy_process_group()
 
 
-def reduce_tensor(tensor: torch.Tensor, world_size: int) -> torch.Tensor:
-    """Averages a scalar tensor across all distributed processes."""
-    if world_size <= 1 or not dist.is_initialized():
-        return tensor
-    reduced = tensor.detach().clone()
-    dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
-    reduced /= world_size
-    return reduced
+def reduce_scalars(scalars: dict, world_size: int, device: torch.device) -> dict:
+    """Averages a dict of scalar tensors/floats across all workers in deterministic key
+    order, using a single collective call (all values stacked into one tensor) instead
+    of one all_reduce per entry - this keeps the per-step communication cost constant
+    regardless of how many scalars are logged (loss/emp_risk/kl plus whatever metrics
+    the policy returns), which matters once world_size grows or ranks span multiple
+    nodes."""
+    if not scalars:
+        return {}
 
-
-def reduce_metrics(metrics: dict, world_size: int, device: torch.device) -> dict:
-    """Averages a dictionary of scalar metrics across all workers in deterministic key order."""
+    keys = sorted(scalars.keys())
     if world_size <= 1 or not dist.is_initialized():
         return {
-            k: v.item() if isinstance(v, torch.Tensor) else float(v)
-            for k, v in metrics.items()
+            k: scalars[k].item() if isinstance(scalars[k], torch.Tensor) else float(scalars[k])
+            for k in keys
         }
 
-    reduced_metrics = {}
-    for k in sorted(metrics.keys()):
-        v = metrics[k]
-        if isinstance(v, torch.Tensor):
-            t = v.detach().clone().to(device)
-        else:
-            t = torch.tensor(float(v), device=device)
-        dist.all_reduce(t, op=dist.ReduceOp.SUM)
-        t /= world_size
-        reduced_metrics[k] = t.item()
-    return reduced_metrics
+    values = torch.stack([
+        scalars[k].detach().to(device=device, dtype=torch.float32).reshape(())
+        if isinstance(scalars[k], torch.Tensor)
+        else torch.tensor(float(scalars[k]), device=device, dtype=torch.float32)
+        for k in keys
+    ])
+    dist.all_reduce(values, op=dist.ReduceOp.SUM)
+    values /= world_size
+    return dict(zip(keys, values.tolist()))
 
 
 class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
@@ -161,7 +158,12 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
         if cfg.training.data_dependent_prior:
             checkpoint = cfg.training.init_model_path
             with open(checkpoint, 'rb') as f:
-                init_payload = torch.load(f, pickle_module=dill)
+                # map_location='cpu': this runs in __init__, before setup_ddp()/
+                # torch.cuda.set_device() has assigned this process its GPU. An
+                # unmapped load would deserialize CUDA tensors onto whatever the
+                # default device is (typically GPU 0) for every rank, causing
+                # redundant allocations / OOM risk on GPU 0 as world_size grows.
+                init_payload = torch.load(f, pickle_module=dill, map_location='cpu')
             init_cfg = init_payload['cfg']
             cls = hydra.utils.get_class(init_cfg._target_)
             init_workspace = cls(init_cfg, output_dir=output_dir)
@@ -220,6 +222,22 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
             # Barrier to guarantee all ranks finish loading checkpoints before proceeding
             if is_distributed:
                 dist.barrier()
+
+            # Decorrelate the main-process RNG across ranks now that rank is known.
+            # Model weights stay synchronized regardless (identical seed at
+            # construction, plus checkpoint loading above / DDP's parameter broadcast
+            # at wrap time below), so offsetting the seed here only affects stochastic
+            # sampling during training (Bayesian posterior weight sampling,
+            # reparameterization noise in compute_loss/compute_bound). Without this,
+            # every rank starts from the same RNG state and consumes it in lockstep
+            # (equal per-GPU batch sizes), so all ranks draw the exact same "random"
+            # samples each step - just applied to different data - which quietly
+            # throws away the Monte-Carlo diversity extra GPUs should buy you.
+            rank_seed = cfg.training.seed + rank
+            torch.manual_seed(rank_seed)
+            torch.cuda.manual_seed_all(rank_seed)
+            np.random.seed(rank_seed)
+            random.seed(rank_seed)
 
             # Dataset configuration
             dataset: BaseLowdimDataset = hydra.utils.instantiate(cfg.task.dataset)
@@ -292,6 +310,15 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
             num_updates = int(float(cfg.training.num_updates))
             checkpoint_every = int(float(cfg.training.checkpoint_every))
 
+            # Debug configuration overrides (applied before the LR scheduler is built
+            # below, so the schedule length actually matches the shortened debug run)
+            if cfg.training.debug:
+                num_updates = 1000
+                max_train_steps = 100
+                checkpoint_every = 100
+            else:
+                max_train_steps = cfg.training.max_train_steps
+
             # Learning rate scheduler
             lr_scheduler = get_scheduler(
                 cfg.training.lr_scheduler,
@@ -313,7 +340,6 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
 
             # Logging and Checkpoint Managers on rank 0
             wandb_run = None
-            topk_manager = None
             lastN_manager = None
             if rank == 0:
                 wandb_run = wandb.init(
@@ -323,10 +349,6 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
                 )
                 wandb.config.update({"output_dir": self.output_dir})
 
-                topk_manager = TopKCheckpointManager(
-                    save_dir=os.path.join(self.output_dir, 'checkpoints'),
-                    **cfg.checkpoint_max_score.topk
-                )
                 lastN_manager = LastNCheckpointManager(
                     save_dir=os.path.join(self.output_dir, "checkpoints"),
                     **cfg.checkpoint_last_N.topk
@@ -345,14 +367,6 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
             if self.ema_model is not None:
                 self.ema_model.to(device)
             optimizer_to(self.optimizer, device)
-
-            # Debug configuration overrides
-            if cfg.training.debug:
-                num_updates = 1000
-                max_train_steps = 100
-                checkpoint_every = 100
-            else:
-                max_train_steps = cfg.training.max_train_steps
 
             # Wrap in LossWrapper (with find_unused_parameters=True to support PAC prior/posterior parameter routing)
             loss_module = PacLossWrapper(self.model, cfg, n_bound=len(dataset))
@@ -404,26 +418,27 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
                             self.global_step += 1
                             current_step = self.global_step
 
-                            # Reduce loss, empirical risk, KL, and metrics across all ranks for logging
-                            reduced_loss = reduce_tensor(raw_loss, world_size).item()
-                            reduced_emp_risk = reduce_tensor(emp_risk_train, world_size).item()
-                            reduced_kl = reduce_tensor(kl_train, world_size).item()
-                            reduced_metrics = reduce_metrics(metrics, world_size, device)
+                            # Reduce loss, empirical risk, KL, and metrics across all ranks
+                            # for logging in a single collective call (see reduce_scalars)
+                            scalars_to_reduce = {
+                                'train_loss (pac_bayes bound)': raw_loss,
+                                'emp_risk_train': emp_risk_train,
+                                'kl_train': kl_train,
+                                **metrics,
+                            }
+                            reduced_scalars = reduce_scalars(scalars_to_reduce, world_size, device)
 
                             step_log = {
-                                'train_loss (pac_bayes bound)': reduced_loss,
-                                'emp_risk_train': reduced_emp_risk,
-                                'kl_train': reduced_kl,
+                                **reduced_scalars,
                                 'global_step': current_step,
                                 'lr': lr_scheduler.get_last_lr()[0],
-                                'epoch': self.epoch
+                                'epoch': self.epoch,
                             }
-                            step_log.update(reduced_metrics)
 
                             if rank == 0:
-                                tepoch.set_postfix(loss=reduced_loss, refresh=False)
+                                tepoch.set_postfix(loss=reduced_scalars['train_loss (pac_bayes bound)'], refresh=False)
 
-                            # Checkpointing (Top-K and Last-N)
+                            # Checkpointing (Last-N)
                             if (current_step % checkpoint_every) == 0:
                                 if rank == 0:
                                     if cfg.checkpoint_last_N.get('save_last_ckpt', False):
@@ -434,11 +449,6 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
                                         lastN_ckpt_path = lastN_manager.get_ckpt_path(step_log)
                                         if lastN_ckpt_path is not None:
                                             self.save_checkpoint(path=lastN_ckpt_path, use_thread=False)
-                                    if topk_manager is not None:
-                                        metric_dict = {k.replace('/', '_'): v for k, v in step_log.items()}
-                                        topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
-                                        if topk_ckpt_path is not None:
-                                            self.save_checkpoint(path=topk_ckpt_path, use_thread=False)
                                 if is_distributed:
                                     dist.barrier()
 

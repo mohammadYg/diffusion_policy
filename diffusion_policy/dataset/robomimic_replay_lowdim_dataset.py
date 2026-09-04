@@ -73,9 +73,15 @@ class RobomimicReplayLowdimDataset(BaseLowdimDataset):
         prior_mask = np.zeros(replay_buffer.n_episodes, dtype=bool)
 
         if train_episodes_for_posterior > 0:
-            if train_episodes_for_posterior > np.sum(train_mask):
+            if train_episodes_for_posterior >= np.sum(train_mask):
+                # ">=" (not ">"): using ALL training episodes for the posterior
+                # would silently leave prior_mask empty (downsample_mask is a
+                # no-op when max_n >= the mask's current count), so require at
+                # least one episode left over for the prior split.
                 raise ValueError(
-                    "train_episodes_for_posterior exceeds number of training episodes"
+                    "train_episodes_for_posterior must leave at least one training "
+                    f"episode for the prior split (got {train_episodes_for_posterior} "
+                    f"requested out of {np.sum(train_mask)} training episodes)."
                 )
 
             post_mask = downsample_mask(

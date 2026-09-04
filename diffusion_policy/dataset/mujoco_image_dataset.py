@@ -18,30 +18,56 @@ class MujocoImageDataset(BaseImageDataset):
             pad_after=0,
             seed=42,
             val_ratio=0.0,
-            max_train_episodes=None
+            max_train_episodes=None,
+            train_episodes_for_posterior=0        # This is selected from training data.
             ):
-        
+
         super().__init__()
         self.replay_buffer = ReplayBuffer.copy_from_path(
             # zarr_path, keys=['img', 'state', 'action'])
             zarr_path, keys=['robot_0_camera_images', 'robot_0_tcp_xyz_wxyz', 'robot_0_gripper_width', 'action_0_tcp_xyz_wxyz', 'action_0_gripper_width'])
         val_mask = get_val_mask(
-            n_episodes=self.replay_buffer.n_episodes, 
+            n_episodes=self.replay_buffer.n_episodes,
             val_ratio=val_ratio,
             seed=seed)
         train_mask = ~val_mask
         train_mask = downsample_mask(
-            mask=train_mask, 
-            max_n=max_train_episodes, 
+            mask=train_mask,
+            max_n=max_train_episodes,
             seed=seed)
 
+        post_mask = np.zeros(self.replay_buffer.n_episodes, dtype=bool)
+        prior_mask = np.zeros(self.replay_buffer.n_episodes, dtype=bool)
+
+        if train_episodes_for_posterior > 0:
+            if train_episodes_for_posterior >= np.sum(train_mask):
+                # ">=" (not ">"): using ALL training episodes for the posterior
+                # would silently leave prior_mask empty (downsample_mask is a
+                # no-op when max_n >= the mask's current count), so require at
+                # least one episode left over for the prior split.
+                raise ValueError(
+                    "train_episodes_for_posterior must leave at least one training "
+                    f"episode for the prior split (got {train_episodes_for_posterior} "
+                    f"requested out of {np.sum(train_mask)} training episodes)."
+                )
+
+            post_mask = downsample_mask(
+                mask=train_mask,
+                max_n=train_episodes_for_posterior,
+                seed=seed
+            )
+
+            prior_mask = train_mask & (~post_mask)
+
         self.sampler = SequenceSampler(
-            replay_buffer=self.replay_buffer, 
+            replay_buffer=self.replay_buffer,
             sequence_length=horizon,
-            pad_before=pad_before, 
+            pad_before=pad_before,
             pad_after=pad_after,
             episode_mask=train_mask)
         self.train_mask = train_mask
+        self.post_mask = post_mask
+        self.prior_mask = prior_mask
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
@@ -49,14 +75,38 @@ class MujocoImageDataset(BaseImageDataset):
     def get_validation_dataset(self):
         val_set = copy.copy(self)
         val_set.sampler = SequenceSampler(
-            replay_buffer=self.replay_buffer, 
+            replay_buffer=self.replay_buffer,
             sequence_length=self.horizon,
-            pad_before=self.pad_before, 
+            pad_before=self.pad_before,
             pad_after=self.pad_after,
             episode_mask=~self.train_mask
             )
         val_set.train_mask = ~self.train_mask
         return val_set
+
+    def get_post_dataset(self):
+        post_set = copy.copy(self)
+        post_set.sampler = SequenceSampler(
+            replay_buffer=self.replay_buffer,
+            sequence_length=self.horizon,
+            pad_before=self.pad_before,
+            pad_after=self.pad_after,
+            episode_mask=self.post_mask
+            )
+        post_set.train_mask = self.post_mask
+        return post_set
+
+    def get_prior_dataset(self):
+        prior_set = copy.copy(self)
+        prior_set.sampler = SequenceSampler(
+            replay_buffer=self.replay_buffer,
+            sequence_length=self.horizon,
+            pad_before=self.pad_before,
+            pad_after=self.pad_after,
+            episode_mask=self.prior_mask
+            )
+        prior_set.train_mask = self.prior_mask
+        return prior_set
 
     def get_normalizer(self, mode='limits', **kwargs):
         

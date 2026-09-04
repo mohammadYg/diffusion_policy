@@ -117,9 +117,24 @@ training:
   delta: 0.025
   kl_penalty: 1.0e-4
   pac_objective: "fquad"  # "fquad" or "calssic", "bbb"
-  init_model_path: "data/outputs/2026.05.08/22.12.26_train_pac_diffusion_unet_lowdim_square_lowdim/checkpoints/epoch=8750.ckpt"
+  # If True: train with a data-dependent prior. task.dataset.train_episodes_for_posterior
+  # demos go to posterior/bound training, the rest to prior training. If
+  # prior_checkpoint_path already exists it's loaded as-is; otherwise the prior is
+  # trained here (Bayesian: stochastic weight sampling, no PAC-Bayes bound - see
+  # _train_prior) for prior_num_updates steps and saved there, so a later run
+  # pointed at the same path skips retraining. Either way, the posterior is then
+  # initialized from the resulting prior and trained with the full PAC-Bayes bound.
+  # If False: prior/posterior stay exactly as cfg.policy constructs them (init_prior/
+  # init_post/rho_prior/rho_post), and training runs on the full dataset.
   data_dependent_prior: False
-  
+  prior_num_updates: 1e3
+  # {task_name}/{n_prior_demos} are plain Python str.format() placeholders (NOT
+  # OmegaConf ${...} interpolation - n_prior_demos isn't known until the dataset
+  # is split at runtime). Resolved in TrainPacDriftingUnetLowdimWorkspace.
+  # _resolve_prior_checkpoint_path() once the actual prior split size is known,
+  # e.g. -> "pac_drifting_prior_pusht_lowdim_demos=102.ckpt".
+  prior_checkpoint_path: "data/outputs/prior_checkpoints/pac_drifting_prior_{task_name}_demos={n_prior_demos}.ckpt"
+
 eval:
   # PAC
   stochastic: True
