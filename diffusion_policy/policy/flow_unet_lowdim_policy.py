@@ -226,16 +226,14 @@ class FlowUnetLowdimPolicy(BaseLowdimPolicy):
         else:
             t = torch.rand(x_1.shape[0], device=x_1.device)
 
-        if x1_vf_batch is not None:
-            if debug:
-                out, first_element_prob, norm_score = self.FM.sample(x_0, x_1, t, x1_vf_batch, prior_std = self.prior_std, debug=debug) 
-            else:
-                out = self.FM.sample(x_0, x_1, t, x1_vf_batch, prior_std = self.prior_std, debug=debug) 
-            x_t = out.x_t
-            x_1 = out.x_1
-            u_t = out.dx_t
+        if debug:
+            out, first_element_prob, norm_score = self.FM.sample(x_0, x_1, t, x1_vf_batch, prior_std = self.prior_std, debug=debug) 
         else:
-            t, x_t, u_t = self.FM.sample_location_and_conditional_flow(x_0, x_1, t)
+            out = self.FM.sample(x_0, x_1, t, x1_vf_batch, prior_std = self.prior_std, debug=debug) 
+        x_t = out.x_t
+        x_1 = out.x_1
+        u_t = out.dx_t
+        
         # compute loss mask
         loss_mask = ~condition_mask
 

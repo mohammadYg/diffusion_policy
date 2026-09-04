@@ -30,5 +30,7 @@ dataset:
   pad_after: ${eval:'${n_action_steps}-1'}
   obs_eef_target: ${task.obs_eef_target}
   use_manual_normalizer: False
-  seed: 42
+  seed: ${training.seed}
   val_ratio: 0.02
+  max_train_episodes: null
+  train_episodes_for_posterior: 0        # This is selected from training data.

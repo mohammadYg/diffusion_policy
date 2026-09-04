@@ -148,6 +148,7 @@ class RobomimicReplayImageDataset(BaseImageDataset):
     def get_normalizer(self, **kwargs) -> LinearNormalizer:
         normalizer = LinearNormalizer()
 
+
         # action
         stat = array_to_stats(self.replay_buffer['action'])
         if self.abs_action:
@@ -167,7 +168,7 @@ class RobomimicReplayImageDataset(BaseImageDataset):
         # obs
         for key in self.lowdim_keys:
             stat = array_to_stats(self.replay_buffer[key])
-
+            
             if key.endswith('pos'):
                 this_normalizer = get_range_normalizer_from_stat(stat)
             elif key.endswith('quat'):

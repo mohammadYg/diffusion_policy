@@ -4,7 +4,7 @@ import numpy as np
 import copy
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.common.replay_buffer import ReplayBuffer
-from diffusion_policy.common.sampler import SequenceSampler, get_val_mask
+from diffusion_policy.common.sampler import SequenceSampler, get_val_mask, downsample_mask
 from diffusion_policy.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 
@@ -19,23 +19,32 @@ class BlockPushLowdimDataset(BaseLowdimDataset):
             obs_eef_target=True,
             use_manual_normalizer=False,
             seed=42,
-            val_ratio=0.0
+            val_ratio=0.0,
+            max_train_episodes=None,
+            train_episodes_for_posterior= 0        # This is selected from training data.
             ):
         super().__init__()
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path, keys=[obs_key, action_key])
 
+        print (self.replay_buffer.n_episodes)
         val_mask = get_val_mask(
             n_episodes=self.replay_buffer.n_episodes, 
             val_ratio=val_ratio,
             seed=seed)
         train_mask = ~val_mask
+        train_mask = downsample_mask(
+                    mask=train_mask, 
+                    max_n=max_train_episodes, 
+                    seed=seed)
+        
         self.sampler = SequenceSampler(
             replay_buffer=self.replay_buffer, 
             sequence_length=horizon,
             pad_before=pad_before, 
             pad_after=pad_after,
             episode_mask=train_mask)
+        
         self.obs_key = obs_key
         self.action_key = action_key
         self.obs_eef_target = obs_eef_target
@@ -58,6 +67,8 @@ class BlockPushLowdimDataset(BaseLowdimDataset):
         return val_set
 
     def get_normalizer(self, mode='limits', **kwargs):
+        
+        # Compute normalizer from all demos
         data = self._sample_to_data(self.replay_buffer)
 
         normalizer = LinearNormalizer()

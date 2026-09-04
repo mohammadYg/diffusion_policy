@@ -160,6 +160,7 @@ class RealPushTImageDataset(BaseImageDataset):
     def get_normalizer(self, **kwargs) -> LinearNormalizer:
         normalizer = LinearNormalizer()
 
+       
         # action
         normalizer['action'] = SingleFieldLinearNormalizer.create_fit(
             self.replay_buffer['action'])
@@ -167,7 +168,7 @@ class RealPushTImageDataset(BaseImageDataset):
         # obs
         for key in self.lowdim_keys:
             normalizer[key] = SingleFieldLinearNormalizer.create_fit(
-                self.replay_buffer[key])
+                 self.replay_buffer[key])
         
         # image
         for key in self.rgb_keys:

@@ -120,7 +120,7 @@ training:
   use_ema: True
   # training loop control
   # in epochs
-  rollout_every: 2.5e4
+  rollout_every: 1.e3
   checkpoint_every: 2.5e4
   val_every: 2.5e4
   sample_every: 2.5e4

@@ -88,7 +88,8 @@ def main(checkpoint, output_dir, device, override):
     env_runner.current_epoch = pickle.loads(payload["pickles"]["epoch"])
     success_rate = list()
     
-    runner_log = env_runner.run(policy, cfg)
+    runner_log, all_generated_actions = env_runner.run(policy, cfg)
+    print (all_generated_actions.shape)
     success_rate.append(runner_log["test/mean_score"])
 
     ddof = 0

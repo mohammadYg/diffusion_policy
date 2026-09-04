@@ -14,7 +14,7 @@ from diffusion_policy.gym_util.multistep_wrapper import MultiStepWrapper
 from diffusion_policy.gym_util.video_recording_wrapper import VideoRecordingWrapper, VideoRecorder
 from gym.wrappers import FlattenObservation
 
-from diffusion_policy.policy.base_lowdim_policy import BaseLowdimPolicy
+from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
 
@@ -147,7 +147,7 @@ class BlockPushLowdimRunner(BaseLowdimRunner):
         self.obs_eef_target = obs_eef_target
 
 
-    def run(self, policy: BaseLowdimPolicy):
+    def run(self, policy, cfg):
         device = policy.device
         dtype = policy.dtype
         env = self.env
@@ -204,8 +204,11 @@ class BlockPushLowdimRunner(BaseLowdimRunner):
                         device=device))
 
                 # run policy
-                with torch.no_grad():
-                    action_dict = policy.predict_action(obs_dict)
+                with torch.no_grad():      
+                    if isinstance(policy, BaseLowdimPacPolicy):   
+                        action_dict = policy.predict_action(obs_dict, stochastic=cfg.eval.stochastic)
+                    else:                 
+                        action_dict = policy.predict_action(obs_dict)
 
                 # device_transfer
                 np_action_dict = dict_apply(action_dict,
@@ -265,7 +268,7 @@ class BlockPushLowdimRunner(BaseLowdimRunner):
             # visualize sim
             video_path = all_video_paths[i]
             if video_path is not None:
-                sim_video = wandb.Video(video_path)
+                sim_video = wandb.Video(video_path, format="gif")
                 log_data[prefix+f'sim_video_{seed}'] = sim_video
 
         # log aggregate metrics

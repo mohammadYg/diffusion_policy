@@ -16,7 +16,6 @@ from diffusion_policy.gym_util.multistep_wrapper import MultiStepWrapper
 from diffusion_policy.gym_util.video_recording_wrapper import VideoRecordingWrapper, VideoRecorder
 from diffusion_policy.model.common.rotation_transformer import RotationTransformer
 
-from diffusion_policy.policy.base_lowdim_policy import BaseLowdimPolicy
 from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
@@ -303,7 +302,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
     def make_video_filename(self, *, epoch, idx):
             return f"epoch={epoch:04d}_seed={idx:05d}.mp4"
     
-    def run(self, policy, cfg):
+    def run(self, policy, stochastic=False):
         device = policy.device
         dtype = policy.dtype
         env = self.env
@@ -363,7 +362,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                 # run policy
                 with torch.no_grad():      
                     if isinstance(policy, BaseLowdimPacPolicy):   
-                        action_dict = policy.predict_action(obs_dict, stochastic=cfg.eval.stochastic)
+                        action_dict = policy.predict_action(obs_dict, stochastic=stochastic)
                     else:                 
                         action_dict = policy.predict_action(obs_dict)
 
@@ -412,20 +411,31 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             prefix = self.env_prefixs[i]
             max_reward = np.max(all_rewards[i])
             max_rewards[prefix].append(max_reward)
-            log_data[prefix+f'sim_max_reward_{seed}'] = max_reward
+            #log_data[prefix+f'sim_max_reward_{seed}'] = max_reward
 
-            # visualize sim
-            video_path = all_video_paths[i]
-            if video_path is not None:
-                sim_video = wandb.Video(video_path, format="gif")
-                log_data[prefix+f'sim_video_{seed}'] = sim_video
+            # # visualize sim
+            # video_path = all_video_paths[i]
+            # if video_path is not None:
+            #     sim_video = wandb.Video(video_path, format="gif")
+            #     log_data[prefix+f'sim_video_{seed}'] = sim_video
 
         # log aggregate metrics
-        for prefix, value in max_rewards.items():
-            name = prefix+'mean_score'
-            value = np.mean(value)
-            log_data[name] = value
-
+        if isinstance(policy, BaseLowdimPacPolicy):  
+            if stochastic==False:  
+                for prefix, value in max_rewards.items():
+                    name = prefix+'mean_score_deterministic'
+                    value = np.mean(value)
+                    log_data[name] = value
+            else:
+                for prefix, value in max_rewards.items():
+                    name = prefix+'mean_score_stochastic'
+                    value = np.mean(value)
+                    log_data[name] = value
+        else:
+            for prefix, value in max_rewards.items():
+                name = prefix+'mean_score'
+                value = np.mean(value)
+                log_data[name] = value
         return log_data
 
     def undo_transform_action(self, action):

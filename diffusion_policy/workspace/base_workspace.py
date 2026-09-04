@@ -52,7 +52,7 @@ class BaseWorkspace:
             'cfg': self.cfg,
             'state_dicts': dict(),
             'pickles': dict(),
-            'last_global_step': self.global_step + 1
+            'last_global_step': self.global_step
         }
 
         #save randomness

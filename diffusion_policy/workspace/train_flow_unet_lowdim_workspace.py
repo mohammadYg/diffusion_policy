@@ -116,12 +116,12 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
                 cfg.ema,
                 model=self.ema_model)
 
-        # # configure env runner
-        # env_runner: BaseLowdimRunner
-        # env_runner = hydra.utils.instantiate(
-        #     cfg.task.env_runner,
-        #     output_dir=self.output_dir)
-        # assert isinstance(env_runner, BaseLowdimRunner)
+        # configure env runner
+        env_runner: BaseLowdimRunner
+        env_runner = hydra.utils.instantiate(
+            cfg.task.env_runner,
+            output_dir=self.output_dir)
+        assert isinstance(env_runner, BaseLowdimRunner)
 
         # configure logging
         wandb_run = wandb.init(
@@ -222,10 +222,10 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
                         policy = self.ema_model if cfg.training.use_ema else self.model
                         policy.eval()
 
-                        # # run rollout
-                        # if (current_step % rollout_every) == 0 or self.global_step==0:
-                        #     runner_log = env_runner.run(policy, cfg)
-                        #     step_log.update(runner_log)
+                        # run rollout
+                        if (current_step % rollout_every) == 0 or self.global_step==0:
+                            runner_log = env_runner.run(policy)
+                            step_log.update(runner_log)
 
                         # validation: nll computation
                         if ((current_step % val_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
@@ -291,15 +291,15 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
                         #         self.save_checkpoint(path=topk_ckpt_path)
 
 
-                        # # checkpointing (last N)
-                        # if (current_step % checkpoint_every) == 0:
-                        #     if cfg.checkpoint_last_N.save_last_ckpt:
-                        #         self.save_checkpoint()
-                        #     if cfg.checkpoint_last_N.save_last_snapshot:
-                        #         self.save_snapshot()
-                        #     lastN_ckpt_path = lastN_manager.get_ckpt_path(step_log)
-                        #     if lastN_ckpt_path is not None:
-                        #         self.save_checkpoint(path=lastN_ckpt_path)
+                        # checkpointing (last N)
+                        if (current_step % checkpoint_every) == 0:
+                            if cfg.checkpoint_last_N.save_last_ckpt:
+                                self.save_checkpoint()
+                            if cfg.checkpoint_last_N.save_last_snapshot:
+                                self.save_snapshot()
+                            lastN_ckpt_path = lastN_manager.get_ckpt_path(step_log)
+                            if lastN_ckpt_path is not None:
+                                self.save_checkpoint(path=lastN_ckpt_path)
 
                         # log & step
                         wandb_run.log(step_log, step=current_step)

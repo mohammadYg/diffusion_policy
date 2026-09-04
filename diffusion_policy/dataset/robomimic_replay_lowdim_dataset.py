@@ -163,7 +163,6 @@ class RobomimicReplayLowdimDataset(BaseLowdimDataset):
         # aggregate obs stats
         obs_stat = array_to_stats(self.replay_buffer['obs'])
 
-
         normalizer['obs'] = normalizer_from_stat(obs_stat)
         return normalizer
 
