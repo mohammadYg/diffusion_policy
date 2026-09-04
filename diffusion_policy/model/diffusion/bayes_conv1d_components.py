@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import math
 import numpy as np
 
+FIXED_RHO=-5.0
 
 def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
     # type: (Tensor, float, float, float, float) -> Tensor
@@ -80,10 +81,10 @@ class Gaussian(nn.Module):
 
     """
 
-    def __init__(self, mu, rho, fixed=False):
+    def __init__(self, mu, rho, fixed_mu=False, fixed_rho=False):
         super().__init__()
-        self.mu = nn.Parameter(mu, requires_grad=not fixed)
-        self.rho = nn.Parameter(rho, requires_grad=not fixed)
+        self.mu = nn.Parameter(mu, requires_grad=not fixed_mu)
+        self.rho = nn.Parameter(rho, requires_grad=not fixed_rho)
 
     @property
     def sigma(self):
@@ -130,10 +131,10 @@ class Laplace(nn.Module):
         or learnt.
 
     """
-    def __init__(self, mu, rho, fixed=False):
+    def __init__(self, mu, rho, fixed_mu=False, fixed_rho=False):
         super().__init__()
-        self.mu = nn.Parameter(mu, requires_grad=not fixed)
-        self.rho = nn.Parameter(rho, requires_grad=not fixed)
+        self.mu = nn.Parameter(mu, requires_grad=not fixed_mu)
+        self.rho = nn.Parameter(rho, requires_grad=not fixed_rho)
 
     @property
     def scale(self):
@@ -199,12 +200,16 @@ class ProbLinear(nn.Module):
 
     """
 
-    def __init__(self, in_features, out_features, rho_post = -3.0, rho_prior=-3.0, prior_dist='gaussian', init_post = 'random', init_prior = 'zeros'):
+    def __init__(self, in_features, out_features, rho_post = -3.0, rho_prior=-3.0, 
+                 prior_dist='gaussian', init_post = 'random', init_prior = 'zeros', 
+                 fixed_mu=False, fixed_rho=False):
+        
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.sampled_weight = None
         self.sampled_bias = None
+
 
         # Set sigma for the truncated gaussian of weights
         sigma_weights = 1/np.sqrt(in_features)
@@ -233,8 +238,12 @@ class ProbLinear(nn.Module):
             raise RuntimeError(f'Wrong posterior initialization. It should be either "zeros" or "random", but got {init_post}')
 
         bias_mu_init = torch.zeros(out_features)
-        weights_rho_post = torch.ones(out_features, in_features) * rho_post
-        bias_rho_post = torch.ones(out_features) * rho_post
+        if fixed_rho:
+            bias_rho_post = torch.ones(out_features) * FIXED_RHO
+            weights_rho_post = torch.ones(out_features, in_features) * FIXED_RHO
+        else:
+            weights_rho_post = torch.ones(out_features, in_features) * rho_post
+            bias_rho_post = torch.ones(out_features) * rho_post
        
         if prior_dist == 'gaussian':
             dist = Gaussian
@@ -244,13 +253,13 @@ class ProbLinear(nn.Module):
             raise RuntimeError(f'Wrong prior_dist {prior_dist}')
 
         self.bias = dist(bias_mu_init.clone(),
-                         bias_rho_post.clone(), fixed=False)
+                         bias_rho_post.clone(), fixed_mu=fixed_mu, fixed_rho=fixed_rho)
         self.weight = dist(weights_mu_init.clone(),
-                           weights_rho_post.clone(), fixed=False)
+                           weights_rho_post.clone(), fixed_mu=fixed_mu, fixed_rho=fixed_rho)
         self.weight_prior = dist(
-            weights_mu_prior.clone(), weights_rho_prior.clone(), fixed=True)
+            weights_mu_prior.clone(), weights_rho_prior.clone(), fixed_mu=True, fixed_rho=True)
         self.bias_prior = dist(
-            bias_mu_prior.clone(), bias_rho_prior.clone(), fixed=True)
+            bias_mu_prior.clone(), bias_rho_prior.clone(), fixed_mu=True, fixed_rho=True)
 
         self.kl_div = 0
 
@@ -259,7 +268,7 @@ class ProbLinear(nn.Module):
         self.sampled_bias = self.bias.sample()
 
     def clear_sample(self):
-        self.sampled_weight = None
+        self.sampledrho_post_weight = None
         self.sampled_bias = None
 
     def forward(self, input, stochastic=False, local_reparam: bool = True):
@@ -329,7 +338,9 @@ class ProbConv1d(nn.Module):
     """
 
     def __init__(self, in_channels, out_channels, kernel_size, rho_post = -3.0, rho_prior=-3.0,
-                 prior_dist='gaussian', init_post = 'random', init_prior = 'zeros', stride=1, padding=0, dilation=1, groups = 1):
+                 prior_dist='gaussian', init_post = 'random', init_prior = 'zeros', stride=1, 
+                 padding=0, dilation=1, groups = 1,
+                 fixed_mu=False, fixed_rho=False):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -372,8 +383,12 @@ class ProbConv1d(nn.Module):
             raise RuntimeError(f'Wrong posterior initialization. It should be either "zeros" or "random", but got {init_post}')
         
         bias_mu_init = torch.zeros(out_channels)
-        weights_rho_post = torch.ones(out_channels, in_channels, kernel_size) * rho_post
-        bias_rho_post = torch.ones(out_channels) * rho_post
+        if fixed_rho:
+            weights_rho_post = torch.ones(out_channels, in_channels, kernel_size) * FIXED_RHO
+            bias_rho_post = torch.ones(out_channels) * FIXED_RHO
+        else:
+            weights_rho_post = torch.ones(out_channels, in_channels, kernel_size) * rho_post
+            bias_rho_post = torch.ones(out_channels) * rho_post
 
         # priors = fixed, posteriors = learnable
         if prior_dist == 'gaussian':
@@ -383,10 +398,10 @@ class ProbConv1d(nn.Module):
         else:
             raise RuntimeError(f'Unknown prior_dist {prior_dist}')
 
-        self.weight = dist(weights_mu_init.clone(), weights_rho_post.clone(), fixed=False)
-        self.bias = dist(bias_mu_init.clone(), bias_rho_post.clone(), fixed=False)
-        self.weight_prior = dist(weights_mu_prior.clone(), weights_rho_prior.clone(), fixed=True)
-        self.bias_prior = dist(bias_mu_prior.clone(), bias_rho_prior.clone(), fixed=True)
+        self.weight = dist(weights_mu_init.clone(), weights_rho_post.clone(), fixed_mu=fixed_mu, fixed_rho=fixed_rho)
+        self.bias = dist(bias_mu_init.clone(), bias_rho_post.clone(), fixed_mu=fixed_mu, fixed_rho=fixed_rho)
+        self.weight_prior = dist(weights_mu_prior.clone(), weights_rho_prior.clone(), fixed_mu=True, fixed_rho=True)
+        self.bias_prior = dist(bias_mu_prior.clone(), bias_rho_prior.clone(), fixed_mu=True, fixed_rho=True)
 
         self.kl_div = 0
 
@@ -464,7 +479,8 @@ class ProbConvTranspose1d(nn.Module):
 
     def __init__(self, in_channels, out_channels, kernel_size, rho_post = -3.0, rho_prior=-3.0,
                  prior_dist='gaussian', init_post = 'random', init_prior = 'zeros', stride=1, padding=0,
-                 output_padding=0, dilation=1, groups=1):
+                 output_padding=0, dilation=1, groups=1,
+                 fixed_mu=False, fixed_rho=False):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -506,8 +522,13 @@ class ProbConvTranspose1d(nn.Module):
             raise RuntimeError(f'Wrong posterior initialization. It should be either "zeros" or "random", but got {init_post}')
 
         bias_mu_init = torch.zeros(out_channels)
-        weights_rho_post = torch.ones(in_channels, out_channels, kernel_size) * rho_post
-        bias_rho_post = torch.ones(out_channels) * rho_post
+
+        if fixed_rho:
+            weights_rho_post = torch.ones(in_channels, out_channels, kernel_size) * FIXED_RHO
+            bias_rho_post = torch.ones(out_channels) * FIXED_RHO
+        else:
+            weights_rho_post = torch.ones(in_channels, out_channels, kernel_size) * rho_post
+            bias_rho_post = torch.ones(out_channels) * rho_post
 
         # priors = fixed, posteriors = learnable
         if prior_dist == 'gaussian':
@@ -517,10 +538,10 @@ class ProbConvTranspose1d(nn.Module):
         else:
             raise RuntimeError(f'Unknown prior_dist {prior_dist}')
 
-        self.weight = dist(weights_mu_init.clone(), weights_rho_post.clone(), fixed=False)
-        self.bias = dist(bias_mu_init.clone(), bias_rho_post.clone(), fixed=False)
-        self.weight_prior = dist(weights_mu_prior.clone(), weights_rho_prior.clone(), fixed=True)
-        self.bias_prior = dist(bias_mu_prior.clone(), bias_rho_prior.clone(), fixed=True)
+        self.weight = dist(weights_mu_init.clone(), weights_rho_post.clone(), fixed_mu=fixed_mu, fixed_rho=fixed_rho)
+        self.bias = dist(bias_mu_init.clone(), bias_rho_post.clone(), fixed_mu=fixed_mu, fixed_rho=fixed_rho)
+        self.weight_prior = dist(weights_mu_prior.clone(), weights_rho_prior.clone(), fixed_mu=True, fixed_rho=True)
+        self.bias_prior = dist(bias_mu_prior.clone(), bias_rho_prior.clone(), fixed_mu=True, fixed_rho=True)
 
         self.kl_div = 0
 
@@ -556,12 +577,15 @@ class ProbDownsample1d(nn.Module):
     ''' This class is initialized with nn.conv1D layer from a deterministic network
     the init_layer and init_layer_prior must be 'Downsample1d' layer from deterministic network
     '''
-    def __init__(self, dim, rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian', init_post='random', init_prior='zeros'):
+    def __init__(self, dim, rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian', 
+                 init_post='random', init_prior='zeros',
+                 fixed_mu=False, fixed_rho=False):
         super().__init__()
 
         self.conv = ProbConv1d(
             dim, dim, kernel_size=3, stride=2, padding=1, rho_post=rho_post,
-            rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
+            rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, 
+            init_prior=init_prior, fixed_mu=fixed_mu, fixed_rho=fixed_rho
         )
     def sample_weights(self):
         self.conv.sample_weights()
@@ -578,12 +602,15 @@ class ProbDownsample1d(nn.Module):
 
     
 class ProbUpsample1d(nn.Module):
-    def __init__(self, dim, rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian', init_post='random', init_prior='zeros'):
+    def __init__(self, dim, rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian',
+                  init_post='random', init_prior='zeros',
+                  fixed_mu=False, fixed_rho=False):
         super().__init__()
         
         self.conv = ProbConvTranspose1d(
             dim, dim, kernel_size=4, stride=2, padding=1, rho_post=rho_post,
-            rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
+            rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior,
+            fixed_mu=fixed_mu, fixed_rho=fixed_rho
         )
 
     def sample_weights(self):
@@ -604,14 +631,18 @@ class ProbConv1dBlock(nn.Module):
     """
 
     def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8, 
-                 rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian', init_post='random', init_prior='zeros'):
+                 rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian', 
+                 init_post='random', init_prior='zeros',
+                 fixed_mu=False, fixed_rho=False):
         super().__init__()
 
         self.block = nn.Sequential(
             ProbConv1d(
             inp_channels, out_channels, kernel_size, rho_post = rho_post,
             rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior,
-            padding=kernel_size // 2                        # Maintain same padding
+            padding=kernel_size // 2,                        # Maintain same padding,
+            fixed_mu=fixed_mu,
+            fixed_rho=fixed_rho
         ),
             # Rearrange('batch channels horizon -> batch channels 1 horizon'),
             nn.GroupNorm(n_groups, out_channels),

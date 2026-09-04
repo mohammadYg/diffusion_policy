@@ -27,7 +27,9 @@ class ProbConditionalResidualBlock1D(nn.Module):
         rho_prior=-3.0,
         prior_dist='gaussian',
         init_post='random',
-        init_prior='random'
+        init_prior='random',
+        fixed_mu=False,
+        fixed_rho=False
     ):
         super().__init__()
         
@@ -36,12 +38,16 @@ class ProbConditionalResidualBlock1D(nn.Module):
                 ProbConv1dBlock(
                     in_channels, out_channels, kernel_size, 
                     n_groups=n_groups, rho_post=rho_post, rho_prior=rho_prior,
-                    prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
+                    prior_dist=prior_dist, init_post=init_post, init_prior=init_prior,
+                    fixed_mu=fixed_mu,
+                    fixed_rho=fixed_rho
                 ),
                 ProbConv1dBlock(
                     out_channels, out_channels, kernel_size,
                     n_groups=n_groups, rho_post=rho_post, rho_prior=rho_prior,
-                    prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
+                    prior_dist=prior_dist, init_post=init_post, init_prior=init_prior,
+                    fixed_mu=fixed_mu,
+                    fixed_rho=fixed_rho
                 ),
             ]
         )
@@ -62,7 +68,9 @@ class ProbConditionalResidualBlock1D(nn.Module):
                 rho_prior=rho_prior, 
                 prior_dist=prior_dist,
                 init_post = init_post,
-                init_prior=init_prior
+                init_prior=init_prior,
+                fixed_mu=False,
+                fixed_rho=False
             ),
             Rearrange("batch t -> batch t 1"),
         )
@@ -70,7 +78,10 @@ class ProbConditionalResidualBlock1D(nn.Module):
         if in_channels != out_channels:
             self.residual_conv = ProbConv1d(
                 in_channels, out_channels, kernel_size=1, rho_post=rho_post,
-                rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior, padding=0
+                rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, 
+                init_prior=init_prior, padding=0,
+                fixed_mu=False,
+                fixed_rho=False
             )
         else:
             self.residual_conv = nn.Identity()
@@ -156,7 +167,7 @@ class BayesianConditionalUnet1D(nn.Module):
         rho_prior=-3.0,
         prior_dist='gaussian',
         init_post='random',
-        init_prior='zeros'
+        init_prior='zeros',
     ):
         super().__init__()
         
@@ -217,6 +228,11 @@ class BayesianConditionalUnet1D(nn.Module):
         down_modules = nn.ModuleList([])
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (len(in_out) - 1)
+            if ind==0:
+                fixed_rho=False
+            else:
+                fixed_rho=False
+
             down_modules.append(
             nn.ModuleList(
                 [
@@ -230,7 +246,8 @@ class BayesianConditionalUnet1D(nn.Module):
                         rho_post=rho_post,
                         rho_prior=rho_prior,
                         prior_dist=prior_dist,
-                        init_post=init_post
+                        init_post=init_post,
+                        fixed_rho=fixed_rho
                     ),
                     ProbConditionalResidualBlock1D(
                         dim_out,
@@ -242,13 +259,15 @@ class BayesianConditionalUnet1D(nn.Module):
                         rho_post=rho_post,
                         rho_prior=rho_prior,
                         prior_dist=prior_dist,
-                        init_post=init_post
+                        init_post=init_post,
+                        fixed_rho=fixed_rho
                     ),
                     ProbDownsample1d(
                         dim_out, 
                         rho_post=rho_post,
                         rho_prior=rho_prior,
-                        prior_dist=prior_dist
+                        prior_dist=prior_dist,
+                        fixed_rho=False
                     ) if not is_last else nn.Identity()
                 ]
             )
@@ -292,7 +311,8 @@ class BayesianConditionalUnet1D(nn.Module):
                         rho_prior=rho_prior,
                         prior_dist=prior_dist,
                         init_post=init_post,
-                        init_prior=init_prior
+                        init_prior=init_prior,
+                        fixed_rho=False
                     ) if not is_last else nn.Identity(),
                 ]
             )
@@ -303,12 +323,15 @@ class BayesianConditionalUnet1D(nn.Module):
                 start_dim, start_dim, kernel_size=kernel_size,
                 n_groups=n_groups, rho_post=rho_post, rho_prior=rho_prior,
                 prior_dist=prior_dist,
-                init_post=init_post, init_prior=init_prior
+                init_post=init_post, init_prior=init_prior,
+                fixed_rho=False
             ),
             ProbConv1d(
                 start_dim, input_dim, kernel_size=1,
                 rho_post=rho_post,
-                rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior
+                rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, 
+                init_prior=init_prior,
+                fixed_rho=False
             ),
         )
 
