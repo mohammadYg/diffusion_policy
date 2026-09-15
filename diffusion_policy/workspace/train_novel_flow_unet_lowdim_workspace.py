@@ -227,7 +227,7 @@ class TrainNovelFlowUnetLowdimWorkspace(BaseWorkspace):
 
                         # run rollout
                         if (current_step % rollout_every) == 0 or self.global_step==0:
-                            runner_log = env_runner.run(policy, cfg)
+                            runner_log = env_runner.run(policy)
                             step_log.update(runner_log)
 
                         policy.train()

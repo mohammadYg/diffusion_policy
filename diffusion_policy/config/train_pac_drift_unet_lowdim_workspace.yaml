@@ -2,8 +2,8 @@ defaults:
   - _self_
   - task: pusht_lowdim
 
-name: train_pac_diffusion_unet_lowdim
-_target_: diffusion_policy.workspace.train_pac2_diffusion_unet_lowdim_workspace.TrainPacDiffusionUnetLowdimWorkspace
+name: train_pac_drift_unet_lowdim
+_target_: diffusion_policy.workspace.train_pac_drift_unet_lowdim_workspace.TrainPacDriftUnetLowdimWorkspace
 
 obs_dim: ${task.obs_dim}
 action_dim: ${task.action_dim}
@@ -18,15 +18,14 @@ n_latency_steps: 0
 past_action_visible: False
 keypoint_visible_rate: 1.0
 obs_as_global_cond: True
-pred_action_steps_only: False
-num_mc_samples: 10
 
 policy:
-  _target_: diffusion_policy.policy.pac_diffusion_unet_lowdim_policy.PacDiffusionUnetLowdimPolicy
+  _target_: diffusion_policy.policy.pac_drift_unet_lowdim_policy.PacDriftUnetLowdimPolicy
 
   model:
-    _target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
-    #_target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
+    #
+    #_target_: diffusion_policy.model.diffusion.conditional_prob1_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN
+    _target_: diffusion_policy.model.diffusion.conditional_prob2_unet1d.BayesianConditionalUnet1D          # Full Bayesian NN except conditioning FiLM layers and time embeding are deterministic
     #_target_: diffusion_policy.model.diffusion.conditional_prob3_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Probabilistic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob4_unet1d.BayesianConditionalUnet1D          # Probabilistic FiLM conditioning + Deterministic timestep encoding
     #_target_: diffusion_policy.model.diffusion.conditional_prob5_unet1d.BayesianConditionalUnet1D          # Determinstic FiLM conditioning  + Probabilistic timestep encoding 
@@ -43,42 +42,39 @@ policy:
     kernel_size: 5
     n_groups: 8
     cond_predict_scale: True
-    use_dropout: False
     # Bayesian parameters
     rho_post: -3.0
-    rho_prior: 0.54
+    rho_prior: -3.0
     prior_dist: 'gaussian'
     init_post: 'random'
-    init_prior: 'zeros'
-    
-  noise_scheduler:
-    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
-    num_train_timesteps: 100
-    beta_start: 0.0001
-    beta_end: 0.02
-    # beta_schedule is important
-    # this is the best we found
-    beta_schedule: squaredcos_cap_v2
-    clip_sample: True
-    set_alpha_to_one: True
-    steps_offset: 0
-    prediction_type: epsilon # or sample
+    init_prior: 'random'
+    # Fan-in-scaled alternative to the absolute rho_post/rho_prior above: when
+    # set, a layer's initial posterior/prior std is post_sigma_scale/
+    # prior_sigma_scale times that layer's own (fan-in-scaled) deterministic
+    # weight-init std, instead of one value shared by every layer regardless
+    # of width - see bayes_conv1d_components.sigma_to_rho(). null (default)
+    # keeps the original absolute-rho behaviour unchanged.
+    post_sigma_scale: null
+    prior_sigma_scale: null
+    # Local reparameterization trick (Kingma, Salimans & Welling, 2015):
+    # sample pre-activations directly instead of sampling a full weight
+    # tensor per forward call - mathematically exact for these layers and
+    # gives lower-variance gradients. True (default) enables it; False falls
+    # back to the original global/Blundell-style weight sampling.
+    local_reparam: True
+
 
   horizon: ${horizon}
   obs_dim: ${obs_dim}
   action_dim: ${action_dim}
   n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
   n_obs_steps: ${n_obs_steps}
-  num_inference_steps: 10
   obs_as_global_cond: ${obs_as_global_cond}
-  pred_action_steps_only: ${pred_action_steps_only}
-  oa_step_convention: True
+  per_timestep_loss: true
+  gen_per_label: 1
+  #temperatures: [0.02]
+  temperatures: [0.02, 0.05, 0.2]
 
-  # scheduler.step params
-  # predict_epsilon: True
-  eta: 0.0
-  use_clipped_model_output: True
-  
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
   update_after_step: 0
@@ -93,7 +89,7 @@ dataloader:
   shuffle: True
   pin_memory: True
   persistent_workers: False
-  
+
 val_dataloader:
   batch_size: 1024
   num_workers: 1
@@ -114,20 +110,17 @@ training:
   debug: False
   resume: False
   desired_ckpt_path: null
+  
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_updates: 1e5
-  gradient_accumulate_every: 1
+  num_updates: 5e5
   use_ema: True
   # training loop control
   # in epochs
-  rollout_every: 1e4
+  rollout_every: 1e3
   checkpoint_every: 1e4
   val_every: 1e3
-  sample_every: 1e3
-  nll_every: 1e3
-  reconst_loss_every: 1e3
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
@@ -136,13 +129,17 @@ training:
   # Bayesian NN
   stochastic: True
   bounded: False
+  bound_transform: "clamp"
   delta: 0.025
   kl_penalty: 1.0e-4
-  pac_objective: "fquad"  # "fquad" or "calssic", "bbb"
-  init_model_path: "data/outputs/2026.05.08/09.37.29_train_pac_diffusion_unet_lowdim_square_lowdim/checkpoints/epoch=6764.ckpt"
+  pac_objective: "friendly"  # "fquad" or "calssic", "bbb"
+  # If True: train with a data-dependent prior.
   data_dependent_prior: False
+  prior_num_updates: 1e3
+  prior_checkpoint_path: "data/outputs/prior_checkpoints/pac_drift_unet_lowdim_prior_{task_name}_demos={n_prior_demos}.ckpt"
 
 eval:
+  # PAC
   stochastic: True
   delta: 0.05
   mc_sampling: 1000
@@ -161,18 +158,18 @@ checkpoint_max_score:
     monitor_key: test_mean_score
     mode: max
     k: 5
-    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+    format_str: 'step={global_step:06d}-test_mean_score={test_mean_score:.3f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
 
 checkpoint_last_N:
   topk:
-    monitor_key: epoch
+    monitor_key: global_step
     k: 10
-    format_str: 'epoch={epoch:04d}.ckpt'
+    format_str: 'step={global_step:06d}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
-
+  
 multi_run:
   run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
   wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}

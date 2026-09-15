@@ -255,7 +255,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 # run rollout (only on global_rank 0)
                 if self.global_rank == 0 and (self.epoch % cfg.training.rollout_every) == 0:
                     env_runner.current_epoch = self.epoch
-                    runner_log = env_runner.run(policy, cfg)
+                    runner_log = env_runner.run(policy)
                     step_log.update(runner_log)
                     if self.epoch>cfg.training.num_epochs-500:
                         last_ten_success_rate.append(step_log["test/mean_score"])
