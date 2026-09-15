@@ -21,6 +21,8 @@ import wandb
 import tqdm
 import dill
 
+from mujoco_py.builder import MujocoException
+
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.policy.pac_drifting_unet_lowdim_policy import PacDriftingUnetLowdimPolicy
@@ -324,6 +326,14 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
             print(f"Warning: env_runner instantiation failed ({e}). Rollouts will be skipped.")
             env_runner = None
 
+        # Carries the last successful rollout's score(s) forward across MuJoCo
+        # instability so wandb's mean_score plot has no gap/jump - starts at 0.0
+        # per prefix (e.g. 'test/') for the case where the very first rollout fails.
+        last_runner_log: dict = {}
+        if env_runner is not None:
+            prefixes = sorted(set(getattr(env_runner, 'env_prefixs', ['test/'])))
+            last_runner_log = {prefix + 'mean_score_deterministic': 0.0 for prefix in prefixes}
+
         # configure logging
         wandb_run = wandb.init(
             dir=str(self.output_dir),
@@ -378,6 +388,7 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
                                 kl_penalty=cfg.training.kl_penalty,
                                 stochastic=cfg.training.stochastic,
                                 bounded=cfg.training.bounded,
+                                bound_transform=cfg.training.bound_transform,
                             )
                         else:
                             raw_loss, metrics = self.model.compute_loss(batch, stochastic=cfg.training.stochastic)
@@ -388,6 +399,16 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
                         loss.backward()
                         raw_loss_cpu = raw_loss.item()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
+
+                        # Diagnostic only: pre-clip global gradient norm (max_norm=inf means
+                        # clip_grad_norm_ never actually rescales anything - the comparison
+                        # total_norm > max_norm is always False - it just returns total_norm).
+                        # Logged so we can look at its typical value/tail over a real run and
+                        # pick a principled max_grad_norm empirically, the same way the
+                        # original drifting repo's train.py logs g_norm, rather than
+                        # copying its max_grad_norm=2.0 default on faith. No clipping is
+                        # actually applied yet.
+                        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=float('inf'))
 
                         # step optimizer and scheduler
                         self.optimizer.step()
@@ -400,12 +421,17 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
 
                         # build step-log (use the upcoming/global step index)
                         current_step = self.global_step + 1
+                        current_lr = lr_scheduler.get_last_lr()[0]
                         step_log = {
                             'train_loss (pac_bayes bound)': raw_loss_cpu,
                             'emp_risk_train': emp_risk_train.item(),
                             'kl_train': kl_train.item(),
+                            'grad_norm': grad_norm.item(),
+                            # Effective parameter-update magnitude this step (grad_norm
+                            # alone doesn't say how far the parameters actually moved).
+                            'grad_step_size': grad_norm.item() * current_lr,
                             'global_step': current_step,
-                            'lr': lr_scheduler.get_last_lr()[0]
+                            'lr': current_lr
                         }
                         step_log.update(metrics)
 
@@ -414,30 +440,71 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
                         policy.eval()
 
                         # run rollout
-                        if env_runner is not None and ((current_step % rollout_every) == 0 or self.global_step==0):
-                            runner_log = env_runner.run(policy, stochastic=False)
+                        if env_runner is not None and ((current_step % rollout_every) == 0): #or self.global_step==0):
+                            try:
+                                runner_log = env_runner.run(policy, stochastic=False)
+                                last_runner_log.update(runner_log)
+                            except MujocoException as e:
+                                print(f"Warning: MuJoCo instability during rollout at step "
+                                      f"{current_step} ({e}). Reporting the previous rollout's "
+                                      f"score(s) instead so wandb has no gap.")
+                                step_log['rollout_mujoco_error'] = str(e)
+                                # The crashed worker's pipe is permanently closed by
+                                # AsyncVectorEnv._raise_if_errors, so env_runner can't be
+                                # reused - rebuild it.
+                                try:
+                                    env_runner.env.close(terminate=True)
+                                except Exception:
+                                    pass
+                                env_runner = hydra.utils.instantiate(
+                                    cfg.task.env_runner,
+                                    output_dir=self.output_dir)
+                                runner_log = dict(last_runner_log)
                             step_log.update(runner_log)
                             # runner_log = env_runner.run(policy, stochastic=True)
                             # step_log.update(runner_log)
 
                         # validation: noise prediction loss
-                        if ((current_step % val_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
-                            with torch.no_grad():
-                                val_losses = []
-                                with tqdm.tqdm(val_dataloader, desc=f"Validation step {current_step}: Noise Prediction Loss on test set", 
-                                        leave=False, mininterval=cfg.training.tqdm_interval_sec) as vepoch:
-                                    n_samples_total=0
-                                    for v_idx, vbatch in enumerate(vepoch):
-                                        n_samples = len(vbatch["obs"])
-                                        n_samples_total = n_samples_total + n_samples
-                                        vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
-                                        val_loss, _ = policy.compute_loss(vbatch, stochastic=cfg.eval.stochastic)
-                                        val_losses.append(val_loss.item() * n_samples)
-                                        if (cfg.training.max_val_steps is not None) and v_idx >= (cfg.training.max_val_steps - 1):
-                                            break
-                                if len(val_losses) > 0:
-                                    noise_loss = np.sum(val_losses) / n_samples_total
-                                    step_log['test_loss'] = noise_loss
+                        if ((current_step % val_every) == 0 or self.global_step==0):
+                            # Diagnostic only, piggybacked on the validation cadence (cheap,
+                            # no need for its own schedule): total parameter norm, and the
+                            # relative update size (grad_step_size / param_norm) - a more
+                            # scale-invariant instability indicator than grad_norm alone.
+                            # Independent of whether a validation set exists (unlike the
+                            # test_* block below), so it isn't gated on len(val_dataloader).
+                            param_norm = torch.sqrt(
+                                sum((p.detach() ** 2).sum() for p in self.model.parameters())
+                            ).item()
+                            step_log['param_norm'] = param_norm
+                            step_log['relative_update_size'] = step_log['grad_step_size'] / (param_norm + 1e-12)
+
+                            if len(val_dataloader) > 0:
+                                with torch.no_grad():
+                                    val_losses = []
+                                    val_metric_sums = {}
+                                    with tqdm.tqdm(val_dataloader, desc=f"Validation step {current_step}: Noise Prediction Loss on test set",
+                                            leave=False, mininterval=cfg.training.tqdm_interval_sec) as vepoch:
+                                        n_samples_total=0
+                                        for v_idx, vbatch in enumerate(vepoch):
+                                            n_samples = len(vbatch["obs"])
+                                            n_samples_total = n_samples_total + n_samples
+                                            vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
+                                            val_loss, val_metrics = policy.compute_loss(vbatch, stochastic=cfg.eval.stochastic)
+                                            val_losses.append(val_loss.item() * n_samples)
+                                            # Same drift_loss diagnostics as train (scale, loss_R,
+                                            # mean_dist_to_pos, diversity, entropy_R, ...) but on
+                                            # held-out data, so train-vs-val divergence in these
+                                            # interpretable quantities is visible directly, not
+                                            # just via the (sometimes uninformative) scalar loss.
+                                            for k, v in val_metrics.items():
+                                                val_metric_sums[k] = val_metric_sums.get(k, 0.0) + v * n_samples
+                                            if (cfg.training.max_val_steps is not None) and v_idx >= (cfg.training.max_val_steps - 1):
+                                                break
+                                    if len(val_losses) > 0:
+                                        noise_loss = np.sum(val_losses) / n_samples_total
+                                        step_log['test_loss'] = noise_loss
+                                        for k, total in val_metric_sums.items():
+                                            step_log[f'test_{k}'] = total / n_samples_total
 
                         policy.train()
                         

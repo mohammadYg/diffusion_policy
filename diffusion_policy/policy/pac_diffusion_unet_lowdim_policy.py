@@ -282,47 +282,46 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
         loss = loss.mean()
         return loss
     
-    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, 
-    kl_penalty = 0.005, stochastic = True, bounded = False, train=True):
-        
+    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025,
+    kl_penalty = 0.005, stochastic = True, bounded = False, bound_transform = "clamp", train=True):
+
         # DM emprical risk
         loss_emp = self.compute_loss(batch, stochastic=stochastic, train=train)
-        scale = 300.0
+        # No rescaling in either case - see BaseLowdimPacPolicy._bound_empirical_risk.
         if bounded:
-            loss_emp_scaled = loss_emp/scale
+            loss_emp_bounded = self._bound_empirical_risk(loss_emp, transform=bound_transform)
         else:
-            loss_emp_scaled = loss_emp
-        
+            loss_emp_bounded = loss_emp
+
         if objective == "fquad":
             # compute kl divergence of the network
             kl = self.model.compute_kl()
             # compute the PAC-Bayes bound
             kl_ratio = torch.div((kl*kl_penalty + np.log((2*np.sqrt(n_bound))/delta)), 2*n_bound)
-            # scale the empirical risk to be inside [0,1]
-            first_term = torch.sqrt(loss_emp_scaled + kl_ratio)
+            first_term = torch.sqrt(loss_emp_bounded + kl_ratio)
             second_term = torch.sqrt(kl_ratio)
             loss_sum = torch.pow(first_term + second_term, 2)
-        
+
         elif objective == "classic":
             # compute kl divergence of the network
             kl = self.model.compute_kl()
             # compute the PAC-Bayes bound
             kl_ratio = torch.div((kl*kl_penalty + np.log((2 * np.sqrt(n_bound)) / delta)), 2*n_bound)
-            loss_sum = loss_emp_scaled + torch.sqrt(kl_ratio)
-        
+            loss_sum = loss_emp_bounded + torch.sqrt(kl_ratio)
+
         elif objective == "friendly":
             # ipdb.set_trace()
             kl = self.model.compute_kl()
             # compute the PAC-Bayes bound
             kl_ratio = torch.div((kl*kl_penalty + np.log((2 * np.sqrt(n_bound)) / delta)), n_bound)
-            first_term = torch.sqrt(2*loss_emp_scaled * kl_ratio)
+            first_term = torch.sqrt(2*loss_emp_bounded * kl_ratio)
             second_term = 2*kl_ratio
-            loss_sum = loss_emp_scaled + first_term + second_term
+            loss_sum = loss_emp_bounded + first_term + second_term
 
         elif objective == "bbb":
             # ipdb.set_trace()
             kl = self.model.compute_kl()
-            loss_sum = loss_emp_scaled + kl_penalty * (kl / n_bound)
+            loss_sum = loss_emp_bounded + kl_penalty * (kl / n_bound)
         else:
             raise RuntimeError(f"Wrong objective {self.objective}")
 
@@ -696,11 +695,27 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
                         # Allow unmatched params (e.g. new Bayesian-only params)
                         pass
     
-    def prior_initialization(
-    self,
-    prior_model,
-    rho_post,
-    ):  
+    def prior_initialization(self, prior_model, init_posterior=True):
+        """
+        Seed this network's (fixed) prior distribution from `prior_model` -
+        another BayesianConditionalUnet1D whose `.weight.mu`/`.weight.rho` (its
+        own posterior) become this network's `.weight_prior.mu`/`.weight_prior.rho`
+        (the new, data-dependent prior). This part always runs.
+
+        If init_posterior=True (default): ALSO copy `prior_model`'s posterior and
+        every other matching param (deterministic layers included) onto this
+        network's own posterior, so posterior training starts exactly at the
+        prior (zero initial KL).
+
+        If init_posterior=False: skip that - leave this network's posterior and
+        any non-Bayesian params untouched. Use this to refresh only the fixed
+        prior buffer (e.g. on resume, where the posterior already reflects
+        partially completed training that must not be discarded, but the
+        PAC-Bayes bound should still measure KL against the trained prior).
+
+        Mirrors PacDriftingUnetLowdimPolicy.prior_initialization - keep them in
+        sync.
+        """
         prior_model.eval()
         with torch.no_grad():
             for name, param in self.model.state_dict().items():
@@ -712,28 +727,31 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
                     b0_name = name.replace(".bias_prior.mu", ".bias.mu")
                     param.copy_(prior_model.state_dict()[b0_name])
 
-                elif name.endswith(".weight.mu"):
-                    param.copy_(prior_model.state_dict()[name])
-                
-                elif name.endswith(".bias.mu"):
-                    param.copy_(prior_model.state_dict()[name])
-                
                 elif name.endswith(".weight_prior.rho"):
                     w0_name = name.replace(".weight_prior.rho", ".weight.rho")
                     param.copy_(prior_model.state_dict()[w0_name])
-                
+
                 elif name.endswith(".bias_prior.rho"):
                     b0_name = name.replace(".bias_prior.rho", ".bias.rho")
                     param.copy_(prior_model.state_dict()[b0_name])
 
-                elif name.endswith(".weight.rho"):
-                    param.copy_(prior_model.state_dict()[name])
-                
-                elif name.endswith(".bias.rho"):
+                elif not init_posterior:
+                    # Prior-only refresh: everything below this point is either
+                    # the posterior (.weight/.bias .mu/.rho) or a non-Bayesian,
+                    # deterministic param - leave it as-is.
+                    continue
+
+                elif name.endswith(".weight.mu"):
                     param.copy_(prior_model.state_dict()[name])
 
-                # elif name.endswith(".bias.rho") or name.endswith(".weight.rho"):
-                #     param.fill_(rho_post)
+                elif name.endswith(".bias.mu"):
+                    param.copy_(prior_model.state_dict()[name])
+
+                elif name.endswith(".weight.rho"):
+                    param.copy_(prior_model.state_dict()[name])
+
+                elif name.endswith(".bias.rho"):
+                    param.copy_(prior_model.state_dict()[name])
 
                 else:
                     if name in prior_model.state_dict():

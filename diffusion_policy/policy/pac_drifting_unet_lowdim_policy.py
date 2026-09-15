@@ -31,6 +31,14 @@ class PacDriftingUnetLowdimPolicy(BaseLowdimPacPolicy):
         self.n_obs_steps = n_obs_steps
         self.obs_as_global_cond = obs_as_global_cond
         self.temperatures = temperatures
+        # Doubles as a mixing probability p in [0,1] (bool True/False already
+        # coerce to 1.0/0.0, so existing configs are unaffected): compute_loss
+        # draws a fresh Bernoulli(p) choice every call, using the per-timestep
+        # branch with probability p and the flattened branch with probability
+        # 1-p. p=1.0 (True) always uses per-timestep; p=0.0 (False) always
+        # uses flattened - identical to the old bool-only behavior in both
+        # cases; any p in between stochastically mixes the two per call.
+        # Mirrors DriftingUnetLowdimPolicy - keep them in sync.
         self.per_timestep_loss = per_timestep_loss
         self.gen_per_label = gen_per_label
         self.kwargs = kwargs
@@ -91,19 +99,35 @@ class PacDriftingUnetLowdimPolicy(BaseLowdimPacPolicy):
 
         R_list = tuple(self.temperatures)
 
-        if self.per_timestep_loss:
+        # Bernoulli(p) draw, fresh every call - see the comment on
+        # self.per_timestep_loss in __init__ for the p=0/p=1 boundary cases.
+        use_per_timestep = torch.rand((), device=nactions.device).item() < float(self.per_timestep_loss)
+
+        if use_per_timestep:
             T_horizon = nactions.shape[1]
             total_loss = 0
-            accumulated_metrics = {}
+            # Collect every timestep's value per metric key instead of only
+            # accumulating their mean, so we can also see how much a metric
+            # varies ACROSS the horizon (e.g. whether error concentrates at a
+            # few late/contact-critical timesteps rather than being uniform) -
+            # that resolution was previously discarded by averaging in-place.
+            # Mirrors DriftingUnetLowdimPolicy.compute_loss - keep them in sync.
+            per_t_values = {}
             for t in range(T_horizon):
                 gen_t = pred_actions[:, :, t, :]           # [B, G, D]
                 pos_t = nactions[:, t, :].unsqueeze(1)     # [B, 1, D]
                 loss_t, info_t = drift_loss(gen_t, pos_t, R_list=R_list)
                 total_loss = total_loss + loss_t.mean()
                 for k, v in info_t.items():
-                    accumulated_metrics[k] = accumulated_metrics.get(k, 0.0) + v.item() / T_horizon
+                    per_t_values.setdefault(k, []).append(v.item())
             loss = total_loss / T_horizon
-            all_metrics = accumulated_metrics
+            all_metrics = {}
+            for k, vals in per_t_values.items():
+                vals_t = torch.tensor(vals)
+                all_metrics[k] = vals_t.mean().item()
+                all_metrics[f"{k}_min_t"] = vals_t.min().item()
+                all_metrics[f"{k}_max_t"] = vals_t.max().item()
+                all_metrics[f"{k}_std_t"] = vals_t.std().item() if len(vals) > 1 else 0.0
         else:
             gen = pred_actions.reshape(batch_size, G, -1)          # [B, G, T*D]
             pos = nactions.reshape(batch_size, 1, -1)              # [B, 1, T*D] one demonstrated action trajectory per observation
@@ -113,47 +137,46 @@ class PacDriftingUnetLowdimPolicy(BaseLowdimPacPolicy):
 
         return loss, all_metrics
 
-    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, 
-                            kl_penalty = 0.005, stochastic = True, bounded = False):
-            
+    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025,
+                            kl_penalty = 0.005, stochastic = True, bounded = False, bound_transform = "clamp"):
+
         # drinfting emprical risk
         loss_emp, metrics = self.compute_loss(batch, stochastic=stochastic)
-        scale = 300.0
+        # No rescaling in either case - see BaseLowdimPacPolicy._bound_empirical_risk.
         if bounded:
-            loss_emp_scaled = loss_emp/scale
+            loss_emp_bounded = self._bound_empirical_risk(loss_emp, transform=bound_transform)
         else:
-            loss_emp_scaled = loss_emp
-        
+            loss_emp_bounded = loss_emp
+
         if objective == "fquad":
             # compute kl divergence of the network
             kl = self.model.compute_kl()
             # compute the PAC-Bayes bound
             kl_ratio = torch.div((kl*kl_penalty + np.log((2*np.sqrt(n_bound))/delta)), 2*n_bound)
-            # scale the empirical risk to be inside [0,1]
-            first_term = torch.sqrt(loss_emp_scaled + kl_ratio)
+            first_term = torch.sqrt(loss_emp_bounded + kl_ratio)
             second_term = torch.sqrt(kl_ratio)
             loss_sum = torch.pow(first_term + second_term, 2)
-        
+
         elif objective == "classic":
             # compute kl divergence of the network
             kl = self.model.compute_kl()
             # compute the PAC-Bayes bound
             kl_ratio = torch.div((kl*kl_penalty + np.log((2 * np.sqrt(n_bound)) / delta)), 2*n_bound)
-            loss_sum = loss_emp_scaled + torch.sqrt(kl_ratio)
-        
+            loss_sum = loss_emp_bounded + torch.sqrt(kl_ratio)
+
         elif objective == "friendly":
             # ipdb.set_trace()
             kl = self.model.compute_kl()
             # compute the PAC-Bayes bound
             kl_ratio = torch.div((kl*kl_penalty + np.log((2 * np.sqrt(n_bound)) / delta)), n_bound)
-            first_term = torch.sqrt(2*loss_emp_scaled * kl_ratio)
+            first_term = torch.sqrt(2*loss_emp_bounded * kl_ratio)
             second_term = 2*kl_ratio
-            loss_sum = loss_emp_scaled + first_term + second_term
+            loss_sum = loss_emp_bounded + first_term + second_term
 
         elif objective == "bbb":
             # ipdb.set_trace()
             kl = self.model.compute_kl()
-            loss_sum = loss_emp_scaled + kl_penalty * (kl / n_bound)
+            loss_sum = loss_emp_bounded + kl_penalty * (kl / n_bound)
         else:
             raise RuntimeError(f"Wrong objective {self.objective}")
 
@@ -177,8 +200,8 @@ class PacDriftingUnetLowdimPolicy(BaseLowdimPacPolicy):
         partially completed training that must not be discarded, but the
         PAC-Bayes bound should still measure KL against the trained prior).
 
-        Mirrors PacDiffusionUnetLowdimPolicy.prior_initialization (which doesn't
-        yet have the init_posterior option) - keep them in sync if you add it there.
+        Mirrors PacDiffusionUnetLowdimPolicy.prior_initialization - keep them in
+        sync.
         """
         prior_model.eval()
         with torch.no_grad():

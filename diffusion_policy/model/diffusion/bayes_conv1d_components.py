@@ -4,7 +4,18 @@ import torch.nn.functional as F
 import math
 import numpy as np
 
-FIXED_RHO=-5.0
+def sigma_to_rho(sigma):
+    """Inverse of softplus: returns rho such that softplus(rho) == sigma.
+
+    Used to initialize a layer's posterior/prior rho from a target std
+    (sigma) instead of an absolute rho value - see `post_sigma_scale` /
+    `prior_sigma_scale` on the Prob* layers below, which set the initial
+    sampling-noise std to a fraction of the layer's own (fan-in-scaled)
+    deterministic weight-init std, rather than one constant shared by every
+    layer regardless of width.
+    """
+    sigma_t = torch.as_tensor(sigma, dtype=torch.float32)
+    return torch.log(torch.expm1(sigma_t))
 
 def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
     # type: (Tensor, float, float, float, float) -> Tensor
@@ -81,18 +92,17 @@ class Gaussian(nn.Module):
 
     """
 
-    def __init__(self, mu, rho, fixed_mu=False, fixed_rho=False):
+    def __init__(self, mu, rho, fixed=False):
         super().__init__()
-        self.mu = nn.Parameter(mu, requires_grad=not fixed_mu)
-        self.rho = nn.Parameter(rho, requires_grad=not fixed_rho)
+        self.mu = nn.Parameter(mu, requires_grad=not fixed)
+        self.rho = nn.Parameter(rho, requires_grad=not fixed)
 
     @property
     def sigma(self):
         # Computation of standard deviation:
         # We use rho instead of sigma so that sigma is always positive during
         # the optimisation. Specifically, we use sigma = log(exp(rho)+1)
-        #return torch.nn.functional.softplus(self.rho)
-        return torch.exp(self.rho)
+        return F.softplus(self.rho)
 
     def sample(self):
         # Return a sample from the Gaussian distribution
@@ -131,10 +141,10 @@ class Laplace(nn.Module):
         or learnt.
 
     """
-    def __init__(self, mu, rho, fixed_mu=False, fixed_rho=False):
+    def __init__(self, mu, rho, fixed=False):
         super().__init__()
-        self.mu = nn.Parameter(mu, requires_grad=not fixed_mu)
-        self.rho = nn.Parameter(rho, requires_grad=not fixed_rho)
+        self.mu = nn.Parameter(mu, requires_grad=not fixed)
+        self.rho = nn.Parameter(rho, requires_grad=not fixed)
 
     @property
     def scale(self):
@@ -146,7 +156,7 @@ class Laplace(nn.Module):
     def sample(self):
         # Return a sample from the Laplace distribution
         # we do scaling due to numerical issues
-        epsilon = (0.999*torch.rand(self.scale.size())-0.49999)
+        epsilon = (0.999*torch.rand(self.scale.size(), device=self.mu.device)-0.49999)
         result = self.mu - torch.mul(torch.mul(self.scale, torch.sign(epsilon)),
                                      torch.log(1-2*torch.abs(epsilon)))
         return result
@@ -198,17 +208,38 @@ class ProbLinear(nn.Module):
         *"random" = initialise with random weights and rho prior
         *""
 
+    post_sigma_scale : float, optional
+        When set, overrides `rho_post` for the (always learnable) posterior
+        rho: its initial sampling-noise std is set
+        to `post_sigma_scale * sigma_weights` (fan-in-scaled, like the mu
+        init) instead of the fixed absolute `softplus(rho_post)` shared by
+        every layer regardless of width. Fixes wide/deep layers ending up
+        proportionally far noisier than narrow ones under a single global
+        rho_post. None (default) preserves the original absolute-rho_post
+        behaviour.
+
+    prior_sigma_scale : float, optional
+        Same idea as `post_sigma_scale`, but for the (fixed) prior's rho_prior.
+
+    local_reparam : bool, optional
+        Default used by `forward()` when its own `local_reparam` argument is
+        not explicitly overridden per-call - see `forward`'s docstring.
+        Config-driven (threaded down from the U-Net's constructor), so a
+        whole model can be switched between local and global (Blundell-
+        style) reparameterization via a single yaml/CLI flag. Default True.
+
     """
 
-    def __init__(self, in_features, out_features, rho_post = -3.0, rho_prior=-3.0, 
-                 prior_dist='gaussian', init_post = 'random', init_prior = 'zeros', 
-                 fixed_mu=False, fixed_rho=False):
-        
+    def __init__(self, in_features, out_features, rho_post = -3.0, rho_prior=-3.0,
+                 prior_dist='gaussian', init_post = 'random', init_prior = 'zeros',
+                 post_sigma_scale=None, prior_sigma_scale=None, local_reparam=True):
+
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.sampled_weight = None
         self.sampled_bias = None
+        self.local_reparam = local_reparam
 
 
         # Set sigma for the truncated gaussian of weights
@@ -222,11 +253,15 @@ class ProbLinear(nn.Module):
         else:
             raise RuntimeError(f'Wrong prior initialization. It should be either "zeros" or "random", but got {init_prior}')
 
-        bias_mu_prior = torch.zeros(out_features) 
-        weights_rho_prior = torch.ones(out_features, in_features) * rho_prior
-        bias_rho_prior = torch.ones(out_features) * rho_prior
-        
-        # Posterior initialization 
+        bias_mu_prior = torch.zeros(out_features)
+        if prior_sigma_scale is not None:
+            rho_prior_value = sigma_to_rho(prior_sigma_scale * sigma_weights).item()
+        else:
+            rho_prior_value = rho_prior
+        weights_rho_prior = torch.ones(out_features, in_features) * rho_prior_value
+        bias_rho_prior = torch.ones(out_features) * rho_prior_value
+
+        # Posterior initialization
         if init_post == 'zeros':
             weights_mu_init = torch.zeros(out_features, in_features)
         elif init_post == 'random':
@@ -238,13 +273,13 @@ class ProbLinear(nn.Module):
             raise RuntimeError(f'Wrong posterior initialization. It should be either "zeros" or "random", but got {init_post}')
 
         bias_mu_init = torch.zeros(out_features)
-        if fixed_rho:
-            bias_rho_post = torch.ones(out_features) * FIXED_RHO
-            weights_rho_post = torch.ones(out_features, in_features) * FIXED_RHO
+        if post_sigma_scale is not None:
+            rho_post_value = sigma_to_rho(post_sigma_scale * sigma_weights).item()
         else:
-            weights_rho_post = torch.ones(out_features, in_features) * rho_post
-            bias_rho_post = torch.ones(out_features) * rho_post
-       
+            rho_post_value = rho_post
+        weights_rho_post = torch.ones(out_features, in_features) * rho_post_value
+        bias_rho_post = torch.ones(out_features) * rho_post_value
+
         if prior_dist == 'gaussian':
             dist = Gaussian
         elif prior_dist == 'laplace':
@@ -253,13 +288,13 @@ class ProbLinear(nn.Module):
             raise RuntimeError(f'Wrong prior_dist {prior_dist}')
 
         self.bias = dist(bias_mu_init.clone(),
-                         bias_rho_post.clone(), fixed_mu=fixed_mu, fixed_rho=fixed_rho)
+                         bias_rho_post.clone(), fixed=False)
         self.weight = dist(weights_mu_init.clone(),
-                           weights_rho_post.clone(), fixed_mu=fixed_mu, fixed_rho=fixed_rho)
+                           weights_rho_post.clone(), fixed=False)
         self.weight_prior = dist(
-            weights_mu_prior.clone(), weights_rho_prior.clone(), fixed_mu=True, fixed_rho=True)
+            weights_mu_prior.clone(), weights_rho_prior.clone(), fixed=True)
         self.bias_prior = dist(
-            bias_mu_prior.clone(), bias_rho_prior.clone(), fixed_mu=True, fixed_rho=True)
+            bias_mu_prior.clone(), bias_rho_prior.clone(), fixed=True)
 
         self.kl_div = 0
 
@@ -268,25 +303,54 @@ class ProbLinear(nn.Module):
         self.sampled_bias = self.bias.sample()
 
     def clear_sample(self):
-        self.sampledrho_post_weight = None
+        self.sampled_weight = None
         self.sampled_bias = None
 
-    def forward(self, input, stochastic=False, local_reparam: bool = True):
-        #if self.training or stochastic:
-        # Use local reparameterization (Kingma et al.) when stochastic and requested.
-        # This samples activations instead of sampling the full weight tensor — much faster.
-        # fallback: sample weights (original behaviour) or use posterior mean
+    def _forward_local_reparam(self, input):
+        """Local reparameterization trick (Kingma, Salimans & Welling, 2015).
+
+        Instead of sampling a full weight tensor W ~ q(W) and computing
+        y = x @ W + b, sample the pre-activation y directly from its
+        induced Gaussian. Since the weight entries are independent
+        (mean-field posterior), y_j = sum_i x_i * w_ij + b_j is itself
+        Gaussian with:
+            mean(y) = x @ mu_W + mu_b
+            var(y)  = x^2 @ sigma_W^2 + sigma_b^2
+        (variance of a sum of independent terms is the sum of variances;
+        squaring x and convolving/matmul-ing with the weight *variance*
+        gives exactly that sum). This is mathematically exact for a linear
+        layer (no approximation) and gives lower-variance gradient
+        estimates than sampling W directly, since the noise is now
+        per-example instead of shared across the whole batch.
+        """
+        mean = F.linear(input, self.weight.mu, self.bias.mu)
+        var = F.linear(input ** 2, self.weight.sigma ** 2, self.bias.sigma ** 2)
+        # Analytically var >= 0 always (sum of nonnegative terms), but clamp
+        # defensively against fp round-off before the sqrt.
+        var = var.clamp(min=1e-8)
+        eps = torch.randn_like(mean)
+        return mean + torch.sqrt(var) * eps
+
+    def forward(self, input, stochastic=False, local_reparam: bool = None):
+        if local_reparam is None:
+            local_reparam = self.local_reparam
         if stochastic:
-            if self.sampled_weight is None:
+            if self.sampled_weight is not None:
+                # A specific weight sample was cached via sample_weights()
+                # (e.g. to hold one coherent network sample fixed across
+                # several forward calls). Local reparam draws fresh
+                # per-call activation noise instead of reusing that exact
+                # sample, so it would silently break that guarantee -
+                # fall back to using the cached sample directly.
+                result = F.linear(input, self.sampled_weight, self.sampled_bias)
+            elif local_reparam:
+                result = self._forward_local_reparam(input)
+            else:
                 weight = self.weight.sample()
                 bias = self.bias.sample()
-            else:
-                weight = self.sampled_weight
-                bias = self.sampled_bias
+                result = F.linear(input, weight, bias)
         else:
-            weight = self.weight.mu
-            bias = self.bias.mu
-        result = F.linear(input, weight, bias)
+            result = F.linear(input, self.weight.mu, self.bias.mu)
 
         if self.training:
             # sum of the KL computed for weights and biases
@@ -335,12 +399,21 @@ class ProbConv1d(nn.Module):
     dilation: int
         Spacing between kernel elements
 
+    post_sigma_scale, prior_sigma_scale : float, optional
+        See ProbLinear - fan-in-scaled alternative to an absolute rho_post/
+        rho_prior. None (default) preserves the original behaviour.
+
+    local_reparam : bool, optional
+        See ProbLinear - default used by `forward()` when its own
+        `local_reparam` argument is not explicitly overridden per-call.
+        Default True.
+
     """
 
     def __init__(self, in_channels, out_channels, kernel_size, rho_post = -3.0, rho_prior=-3.0,
-                 prior_dist='gaussian', init_post = 'random', init_prior = 'zeros', stride=1, 
+                 prior_dist='gaussian', init_post = 'random', init_prior = 'zeros', stride=1,
                  padding=0, dilation=1, groups = 1,
-                 fixed_mu=False, fixed_rho=False):
+                 post_sigma_scale=None, prior_sigma_scale=None, local_reparam=True):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -351,6 +424,7 @@ class ProbConv1d(nn.Module):
         self.groups = groups
         self.sampled_weight = None
         self.sampled_bias = None
+        self.local_reparam = local_reparam
 
         # He-style sigma for initialization
         in_features = self.in_channels
@@ -366,9 +440,13 @@ class ProbConv1d(nn.Module):
         else:
             raise RuntimeError(f'Wrong prior initialization. It should be either "zeros" or "random", but got {init_prior}')
 
-        bias_mu_prior = torch.zeros(out_features) 
-        weights_rho_prior = torch.ones(out_channels, in_channels, kernel_size) * rho_prior
-        bias_rho_prior = torch.ones(out_channels) * rho_prior
+        bias_mu_prior = torch.zeros(out_features)
+        if prior_sigma_scale is not None:
+            rho_prior_value = sigma_to_rho(prior_sigma_scale * sigma_weights).item()
+        else:
+            rho_prior_value = rho_prior
+        weights_rho_prior = torch.ones(out_channels, in_channels, kernel_size) * rho_prior_value
+        bias_rho_prior = torch.ones(out_channels) * rho_prior_value
 
         # Posterior Initialization
         if init_post == 'zeros':
@@ -383,12 +461,12 @@ class ProbConv1d(nn.Module):
             raise RuntimeError(f'Wrong posterior initialization. It should be either "zeros" or "random", but got {init_post}')
         
         bias_mu_init = torch.zeros(out_channels)
-        if fixed_rho:
-            weights_rho_post = torch.ones(out_channels, in_channels, kernel_size) * FIXED_RHO
-            bias_rho_post = torch.ones(out_channels) * FIXED_RHO
+        if post_sigma_scale is not None:
+            rho_post_value = sigma_to_rho(post_sigma_scale * sigma_weights).item()
         else:
-            weights_rho_post = torch.ones(out_channels, in_channels, kernel_size) * rho_post
-            bias_rho_post = torch.ones(out_channels) * rho_post
+            rho_post_value = rho_post
+        weights_rho_post = torch.ones(out_channels, in_channels, kernel_size) * rho_post_value
+        bias_rho_post = torch.ones(out_channels) * rho_post_value
 
         # priors = fixed, posteriors = learnable
         if prior_dist == 'gaussian':
@@ -398,10 +476,10 @@ class ProbConv1d(nn.Module):
         else:
             raise RuntimeError(f'Unknown prior_dist {prior_dist}')
 
-        self.weight = dist(weights_mu_init.clone(), weights_rho_post.clone(), fixed_mu=fixed_mu, fixed_rho=fixed_rho)
-        self.bias = dist(bias_mu_init.clone(), bias_rho_post.clone(), fixed_mu=fixed_mu, fixed_rho=fixed_rho)
-        self.weight_prior = dist(weights_mu_prior.clone(), weights_rho_prior.clone(), fixed_mu=True, fixed_rho=True)
-        self.bias_prior = dist(bias_mu_prior.clone(), bias_rho_prior.clone(), fixed_mu=True, fixed_rho=True)
+        self.weight = dist(weights_mu_init.clone(), weights_rho_post.clone(), fixed=False)
+        self.bias = dist(bias_mu_init.clone(), bias_rho_post.clone(), fixed=False)
+        self.weight_prior = dist(weights_mu_prior.clone(), weights_rho_prior.clone(), fixed=True)
+        self.bias_prior = dist(bias_mu_prior.clone(), bias_rho_prior.clone(), fixed=True)
 
         self.kl_div = 0
 
@@ -413,27 +491,46 @@ class ProbConv1d(nn.Module):
         self.sampled_weight = None
         self.sampled_bias = None
 
-    def forward(self, x, stochastic=False, local_reparam: bool = True):     
-        # fallback to original behaviour (sample weights or use posterior mean)
+    def _forward_local_reparam(self, x):
+        """See ProbLinear._forward_local_reparam for the identity being used
+        here. Applied via conv1d instead of a matmul: each output position
+        is still a sum of independent, weight-scaled input terms, so
+        convolving x^2 with the *weight variance* "kernel" gives exactly
+        the pre-activation variance at every position.
+        """
+        mean = F.conv1d(x, self.weight.mu, self.bias.mu, stride=self.stride, padding=self.padding,
+                         dilation=self.dilation, groups=self.groups)
+        var = F.conv1d(x ** 2, self.weight.sigma ** 2, self.bias.sigma ** 2, stride=self.stride,
+                        padding=self.padding, dilation=self.dilation, groups=self.groups)
+        var = var.clamp(min=1e-8)
+        eps = torch.randn_like(mean)
+        return mean + torch.sqrt(var) * eps
+
+    def forward(self, x, stochastic=False, local_reparam: bool = None):
+        if local_reparam is None:
+            local_reparam = self.local_reparam
         if stochastic:
-            if self.sampled_weight is None:
+            if self.sampled_weight is not None:
+                # See ProbLinear.forward - reuse the cached sample as-is
+                # rather than drawing fresh per-call activation noise.
+                result = F.conv1d(x, self.sampled_weight, self.sampled_bias, stride=self.stride,
+                                   padding=self.padding, dilation=self.dilation, groups=self.groups)
+            elif local_reparam:
+                result = self._forward_local_reparam(x)
+            else:
                 weight = self.weight.sample()
                 bias = self.bias.sample()
-            else:
-                weight = self.sampled_weight
-                bias = self.sampled_bias
+                result = F.conv1d(x, weight, bias, stride=self.stride, padding=self.padding,
+                                    dilation=self.dilation, groups=self.groups)
         else:
-            weight = self.weight.mu
-            bias = self.bias.mu
-
-        result = F.conv1d(x, weight, bias, stride=self.stride, padding=self.padding,
-                            dilation=self.dilation, groups=self.groups)
+            result = F.conv1d(x, self.weight.mu, self.bias.mu, stride=self.stride, padding=self.padding,
+                                dilation=self.dilation, groups=self.groups)
 
         if self.training:
             self.kl_div = self.weight.compute_kl(self.weight_prior) + self.bias.compute_kl(self.bias_prior)
 
         return result
-    
+
 class ProbConvTranspose1d(nn.Module):
     """Probabilistic 1D Transposed Convolutional Layer.
 
@@ -475,12 +572,21 @@ class ProbConvTranspose1d(nn.Module):
     init_prior : string
         How to initialize the prior ('zeros', 'random', 'weights')
 
+    post_sigma_scale, prior_sigma_scale : float, optional
+        See ProbLinear - fan-in-scaled alternative to an absolute rho_post/
+        rho_prior. None (default) preserves the original behaviour.
+
+    local_reparam : bool, optional
+        See ProbLinear - default used by `forward()` when its own
+        `local_reparam` argument is not explicitly overridden per-call.
+        Default True.
+
     """
 
     def __init__(self, in_channels, out_channels, kernel_size, rho_post = -3.0, rho_prior=-3.0,
                  prior_dist='gaussian', init_post = 'random', init_prior = 'zeros', stride=1, padding=0,
                  output_padding=0, dilation=1, groups=1,
-                 fixed_mu=False, fixed_rho=False):
+                 post_sigma_scale=None, prior_sigma_scale=None, local_reparam=True):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -492,6 +598,7 @@ class ProbConvTranspose1d(nn.Module):
         self.groups = groups
         self.sampled_weight = None
         self.sampled_bias = None
+        self.local_reparam = local_reparam
 
         # He-style sigma for initialization
         sigma_weights = 1. / np.sqrt(in_channels * kernel_size)
@@ -506,9 +613,13 @@ class ProbConvTranspose1d(nn.Module):
             raise RuntimeError(f'Wrong prior initialization. It should be either "zeros" or "random", but got {init_prior}')
 
         bias_mu_prior = torch.zeros(out_channels)  # Fixed: out_channels
-        weights_rho_prior = torch.ones(in_channels, out_channels, kernel_size) * rho_prior
-        bias_rho_prior = torch.ones(out_channels) * rho_prior
-        
+        if prior_sigma_scale is not None:
+            rho_prior_value = sigma_to_rho(prior_sigma_scale * sigma_weights).item()
+        else:
+            rho_prior_value = rho_prior
+        weights_rho_prior = torch.ones(in_channels, out_channels, kernel_size) * rho_prior_value
+        bias_rho_prior = torch.ones(out_channels) * rho_prior_value
+
         # posterior init
         if init_post == 'zeros':
             weights_mu_init = torch.zeros(in_channels, out_channels, kernel_size)
@@ -523,12 +634,12 @@ class ProbConvTranspose1d(nn.Module):
 
         bias_mu_init = torch.zeros(out_channels)
 
-        if fixed_rho:
-            weights_rho_post = torch.ones(in_channels, out_channels, kernel_size) * FIXED_RHO
-            bias_rho_post = torch.ones(out_channels) * FIXED_RHO
+        if post_sigma_scale is not None:
+            rho_post_value = sigma_to_rho(post_sigma_scale * sigma_weights).item()
         else:
-            weights_rho_post = torch.ones(in_channels, out_channels, kernel_size) * rho_post
-            bias_rho_post = torch.ones(out_channels) * rho_post
+            rho_post_value = rho_post
+        weights_rho_post = torch.ones(in_channels, out_channels, kernel_size) * rho_post_value
+        bias_rho_post = torch.ones(out_channels) * rho_post_value
 
         # priors = fixed, posteriors = learnable
         if prior_dist == 'gaussian':
@@ -538,10 +649,10 @@ class ProbConvTranspose1d(nn.Module):
         else:
             raise RuntimeError(f'Unknown prior_dist {prior_dist}')
 
-        self.weight = dist(weights_mu_init.clone(), weights_rho_post.clone(), fixed_mu=fixed_mu, fixed_rho=fixed_rho)
-        self.bias = dist(bias_mu_init.clone(), bias_rho_post.clone(), fixed_mu=fixed_mu, fixed_rho=fixed_rho)
-        self.weight_prior = dist(weights_mu_prior.clone(), weights_rho_prior.clone(), fixed_mu=True, fixed_rho=True)
-        self.bias_prior = dist(bias_mu_prior.clone(), bias_rho_prior.clone(), fixed_mu=True, fixed_rho=True)
+        self.weight = dist(weights_mu_init.clone(), weights_rho_post.clone(), fixed=False)
+        self.bias = dist(bias_mu_init.clone(), bias_rho_post.clone(), fixed=False)
+        self.weight_prior = dist(weights_mu_prior.clone(), weights_rho_prior.clone(), fixed=True)
+        self.bias_prior = dist(bias_mu_prior.clone(), bias_rho_prior.clone(), fixed=True)
 
         self.kl_div = 0
 
@@ -553,39 +664,66 @@ class ProbConvTranspose1d(nn.Module):
         self.sampled_weight = None
         self.sampled_bias = None
 
-    def forward(self, x, stochastic=False):
-        #if self.training or stochastic:
+    def _forward_local_reparam(self, x):
+        """See ProbLinear._forward_local_reparam for the identity being used
+        here, applied via conv_transpose1d instead of conv1d/matmul. Each
+        output position is still a sum of independent, weight-scaled input
+        terms (transposed convolution is a linear map like any other), so
+        the same "convolve the squared input with the weight variance"
+        trick gives the exact pre-activation variance.
+        """
+        mean = F.conv_transpose1d(x, self.weight.mu, self.bias.mu, stride=self.stride, padding=self.padding,
+                                   output_padding=self.output_padding, dilation=self.dilation, groups=self.groups)
+        var = F.conv_transpose1d(x ** 2, self.weight.sigma ** 2, self.bias.sigma ** 2, stride=self.stride,
+                                  padding=self.padding, output_padding=self.output_padding,
+                                  dilation=self.dilation, groups=self.groups)
+        var = var.clamp(min=1e-8)
+        eps = torch.randn_like(mean)
+        return mean + torch.sqrt(var) * eps
+
+    def forward(self, x, stochastic=False, local_reparam: bool = None):
+        if local_reparam is None:
+            local_reparam = self.local_reparam
         if stochastic:
-            if self.sampled_weight is None:
+            if self.sampled_weight is not None:
+                # See ProbLinear.forward - reuse the cached sample as-is
+                # rather than drawing fresh per-call activation noise.
+                result = F.conv_transpose1d(x, self.sampled_weight, self.sampled_bias, stride=self.stride,
+                                             padding=self.padding, output_padding=self.output_padding,
+                                             dilation=self.dilation, groups=self.groups)
+            elif local_reparam:
+                result = self._forward_local_reparam(x)
+            else:
                 weight = self.weight.sample()
                 bias = self.bias.sample()
-            else:
-                weight = self.sampled_weight
-                bias = self.sampled_bias
+                result = F.conv_transpose1d(x, weight, bias, stride=self.stride, padding=self.padding,
+                                             output_padding=self.output_padding, dilation=self.dilation,
+                                             groups=self.groups)
         else:
-            weight = self.weight.mu
-            bias = self.bias.mu
+            result = F.conv_transpose1d(x, self.weight.mu, self.bias.mu, stride=self.stride, padding=self.padding,
+                                         output_padding=self.output_padding, dilation=self.dilation,
+                                         groups=self.groups)
 
         if self.training:
             self.kl_div = self.weight.compute_kl(self.weight_prior) + self.bias.compute_kl(self.bias_prior)
 
-        return F.conv_transpose1d(x, weight, bias, stride=self.stride, padding=self.padding,
-                                 output_padding=self.output_padding, dilation=self.dilation, 
-                                 groups=self.groups)
+        return result
 
 class ProbDownsample1d(nn.Module):
     ''' This class is initialized with nn.conv1D layer from a deterministic network
     the init_layer and init_layer_prior must be 'Downsample1d' layer from deterministic network
     '''
-    def __init__(self, dim, rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian', 
+    def __init__(self, dim, rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian',
                  init_post='random', init_prior='zeros',
-                 fixed_mu=False, fixed_rho=False):
+                 post_sigma_scale=None, prior_sigma_scale=None, local_reparam=True):
         super().__init__()
 
         self.conv = ProbConv1d(
             dim, dim, kernel_size=3, stride=2, padding=1, rho_post=rho_post,
-            rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, 
-            init_prior=init_prior, fixed_mu=fixed_mu, fixed_rho=fixed_rho
+            rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post,
+            init_prior=init_prior,
+            post_sigma_scale=post_sigma_scale, prior_sigma_scale=prior_sigma_scale,
+            local_reparam=local_reparam
         )
     def sample_weights(self):
         self.conv.sample_weights()
@@ -597,31 +735,32 @@ class ProbDownsample1d(nn.Module):
         return self.conv(x, stochastic=stochastic)
 
     def compute_kl(self):
-        #! make sure this kl divergence is used only during training 
+        #! make sure this kl divergence is used only during training
         return self.conv.kl_div
 
-    
+
 class ProbUpsample1d(nn.Module):
     def __init__(self, dim, rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian',
                   init_post='random', init_prior='zeros',
-                  fixed_mu=False, fixed_rho=False):
+                  post_sigma_scale=None, prior_sigma_scale=None, local_reparam=True):
         super().__init__()
-        
+
         self.conv = ProbConvTranspose1d(
             dim, dim, kernel_size=4, stride=2, padding=1, rho_post=rho_post,
             rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior,
-            fixed_mu=fixed_mu, fixed_rho=fixed_rho
+            post_sigma_scale=post_sigma_scale, prior_sigma_scale=prior_sigma_scale,
+            local_reparam=local_reparam
         )
 
     def sample_weights(self):
         self.conv.sample_weights()
-        
+
     def clear_sample(self):
         self.conv.clear_sample()
-    
+
     def forward(self, x, stochastic=False):
         return self.conv(x, stochastic=stochastic)
-    
+
     def compute_kl(self):
         return self.conv.kl_div
 
@@ -630,10 +769,10 @@ class ProbConv1dBlock(nn.Module):
     Probabilistic Conv1d --> GroupNorm --> Mish
     """
 
-    def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8, 
-                 rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian', 
+    def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8,
+                 rho_post=-3.0, rho_prior=-3.0, prior_dist='gaussian',
                  init_post='random', init_prior='zeros',
-                 fixed_mu=False, fixed_rho=False):
+                 post_sigma_scale=None, prior_sigma_scale=None, local_reparam=True):
         super().__init__()
 
         self.block = nn.Sequential(
@@ -641,8 +780,8 @@ class ProbConv1dBlock(nn.Module):
             inp_channels, out_channels, kernel_size, rho_post = rho_post,
             rho_prior=rho_prior, prior_dist=prior_dist, init_post=init_post, init_prior=init_prior,
             padding=kernel_size // 2,                        # Maintain same padding,
-            fixed_mu=fixed_mu,
-            fixed_rho=fixed_rho
+            post_sigma_scale=post_sigma_scale, prior_sigma_scale=prior_sigma_scale,
+            local_reparam=local_reparam
         ),
             # Rearrange('batch channels horizon -> batch channels 1 horizon'),
             nn.GroupNorm(n_groups, out_channels),

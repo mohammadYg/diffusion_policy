@@ -256,51 +256,50 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
         loss = loss.mean()
         return loss
 
-    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025, 
-                        kl_penalty = 0.005, stochastic = True, bounded = False, 
+    def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025,
+                        kl_penalty = 0.005, stochastic = True, bounded = False, bound_transform = "clamp",
                         x1_vf_batch=None, skewed_timesteps=False, debug=False):
-        
+
         # DM emprical risk
-        loss_emp = self.compute_loss(batch, stochastic=stochastic, 
-                                     x1_vf_batch=x1_vf_batch, 
+        loss_emp = self.compute_loss(batch, stochastic=stochastic,
+                                     x1_vf_batch=x1_vf_batch,
                                      skewed_timesteps = skewed_timesteps,
                                      debug=debug )
-        scale = 300.0
+        # No rescaling in either case - see BaseLowdimPacPolicy._bound_empirical_risk.
         if bounded:
-            loss_emp_scaled = loss_emp/scale
+            loss_emp_bounded = self._bound_empirical_risk(loss_emp, transform=bound_transform)
         else:
-            loss_emp_scaled = loss_emp
-        
+            loss_emp_bounded = loss_emp
+
         if objective == "fquad":
             # compute kl divergence of the network
             kl = self.model.compute_kl()
             # compute the PAC-Bayes bound
             kl_ratio = torch.div((kl*kl_penalty + np.log((2*np.sqrt(n_bound))/delta)), 2*n_bound)
-            # scale the empirical risk to be inside [0,1]
-            first_term = torch.sqrt(loss_emp_scaled + kl_ratio)
+            first_term = torch.sqrt(loss_emp_bounded + kl_ratio)
             second_term = torch.sqrt(kl_ratio)
             loss_sum = torch.pow(first_term + second_term, 2)
-        
+
         elif objective == "classic":
             # compute kl divergence of the network
             kl = self.model.compute_kl()
             # compute the PAC-Bayes bound
             kl_ratio = torch.div((kl*kl_penalty + np.log((2 * np.sqrt(n_bound)) / delta)), 2*n_bound)
-            loss_sum = loss_emp_scaled + torch.sqrt(kl_ratio)
-        
+            loss_sum = loss_emp_bounded + torch.sqrt(kl_ratio)
+
         elif objective == "friendly":
             # ipdb.set_trace()
             kl = self.model.compute_kl()
             # compute the PAC-Bayes bound
             kl_ratio = torch.div((kl*kl_penalty + np.log((2 * np.sqrt(n_bound)) / delta)), n_bound)
-            first_term = torch.sqrt(2*loss_emp_scaled * kl_ratio)
+            first_term = torch.sqrt(2*loss_emp_bounded * kl_ratio)
             second_term = 2*kl_ratio
-            loss_sum = loss_emp_scaled + first_term + second_term
+            loss_sum = loss_emp_bounded + first_term + second_term
 
         elif objective == "bbb":
             # ipdb.set_trace()
             kl = self.model.compute_kl()
-            loss_sum = loss_emp_scaled + kl_penalty * (kl / n_bound)
+            loss_sum = loss_emp_bounded + kl_penalty * (kl / n_bound)
         else:
             raise RuntimeError(f"Wrong objective {self.objective}")
 

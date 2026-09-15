@@ -49,6 +49,12 @@ policy:
     prior_dist: 'gaussian'
     init_post: 'random'
     init_prior: 'random'
+    # Local reparameterization trick (Kingma, Salimans & Welling, 2015):
+    # sample pre-activations directly instead of sampling a full weight
+    # tensor per forward call - mathematically exact for these layers and
+    # gives lower-variance gradients. True (default) enables it; False falls
+    # back to the original global/Blundell-style weight sampling.
+    local_reparam: True
 
   FM:
     _target_: diffusion_policy.CFM.path.affine.CondOTProbPath
@@ -125,10 +131,22 @@ training:
   tqdm_interval_sec: 1.0
   # Bayesian NN
   stochastic: True
+  # Whether to bound loss_emp into [0,1] (via bound_transform below) before it
+  # enters the fquad/classic/friendly bound formulas, which are only valid
+  # for a risk bounded in [0,1] - see BaseLowdimPacPolicy._bound_empirical_risk.
+  # Optional: False uses the raw, unbounded loss_emp.
   bounded: False
+  # "clamp" (default): min(loss_emp, 1) - exactly bounded, but zero gradient
+  #   once loss_emp > 1 (safe once you've confirmed, as here, that it drops
+  #   below 1 early in training).
+  # "exp"/"tanh": smooth saturating alternatives (1-exp(-x) / tanh(x)) that
+  #   are also exactly bounded in [0,1) but never have zero gradient, so they
+  #   don't stall training even if loss_emp is briefly > 1. None of these
+  #   rescale loss_emp - they operate on the raw value.
+  bound_transform: "clamp"
   delta: 0.025
   kl_penalty: 1.0e-4
-  pac_objective: "fquad"  # "fquad" or "calssic", "bbb"
+  pac_objective: "friendly"  # "fquad" or "calssic", "bbb"
   init_model_path: "data/outputs/2026.05.08/22.12.26_train_pac_diffusion_unet_lowdim_square_lowdim/checkpoints/epoch=8750.ckpt"
   data_dependent_prior: False
   # Flow

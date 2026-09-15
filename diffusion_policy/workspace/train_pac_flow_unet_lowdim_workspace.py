@@ -188,7 +188,8 @@ class TrainPacFlowUnetLowdimWorkspace(BaseWorkspace):
                                 delta=cfg.training.delta,
                                 kl_penalty=cfg.training.kl_penalty,
                                 stochastic=cfg.training.stochastic,
-                                bounded=cfg.training.bounded
+                                bounded=cfg.training.bounded,
+                                bound_transform=cfg.training.bound_transform,
                             )
                         else:
                             raw_loss = self.model.compute_loss(batch, stochastic=cfg.training.stochastic)

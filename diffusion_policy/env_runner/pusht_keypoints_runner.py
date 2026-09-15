@@ -157,7 +157,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
         self.max_steps = max_steps
         self.tqdm_interval_sec = tqdm_interval_sec
     
-    def run(self, policy, cfg):
+    def run(self, policy, stochastic=False):
         device = policy.device
         dtype = policy.dtype
 
@@ -216,12 +216,10 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                         device=device))
 
                 # run policy
-                with torch.no_grad():      
-                    if isinstance(policy, BaseLowdimPacPolicy):   
-                        policy.model.sample_weights()
-                        action_dict = policy.predict_action(obs_dict, stochastic=cfg.eval.stochastic)
-                        policy.model.clear_sampled_weights()
-                    else:                 
+                with torch.no_grad():
+                    if isinstance(policy, BaseLowdimPacPolicy):
+                        action_dict = policy.predict_action(obs_dict, stochastic=stochastic)
+                    else:
                         action_dict = policy.predict_action(obs_dict)
 
                 # device_transfer
@@ -271,9 +269,21 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 log_data[prefix+f'sim_video_{seed}'] = sim_video
 
         # log aggregate metrics
-        for prefix, value in max_rewards.items():
-            name = prefix+'mean_score'
-            value = np.mean(value)
-            log_data[name] = value
+        if isinstance(policy, BaseLowdimPacPolicy):
+            if stochastic == False:
+                for prefix, value in max_rewards.items():
+                    name = prefix+'mean_score_deterministic'
+                    value = np.mean(value)
+                    log_data[name] = value
+            else:
+                for prefix, value in max_rewards.items():
+                    name = prefix+'mean_score_stochastic'
+                    value = np.mean(value)
+                    log_data[name] = value
+        else:
+            for prefix, value in max_rewards.items():
+                name = prefix+'mean_score'
+                value = np.mean(value)
+                log_data[name] = value
 
         return log_data

@@ -232,7 +232,8 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             raw_loss, emp_risk_train, kl_train = self.model.compute_bound(batch, n_bound=len(post_dataloader.dataset), objective=cfg.training.pac_objective,
                                                         delta=cfg.training.delta, 
                                                         kl_penalty=cfg.training.kl_penalty, 
-                                                        mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.training.stochastic, bounded=cfg.training.bounded, train=True)
+                                                        mc_sampling=cfg.eval.mc_sampling, stochastic=cfg.training.stochastic,
+                                                        bounded=cfg.training.bounded, bound_transform=cfg.training.bound_transform, train=True)
                             
                         else:
                             raw_loss = self.model.compute_loss(batch, stochastic=cfg.training.stochastic, train=True)

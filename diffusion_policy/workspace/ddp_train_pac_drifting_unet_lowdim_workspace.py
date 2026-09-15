@@ -61,6 +61,7 @@ class PacLossWrapper(nn.Module):
                 kl_penalty=self.cfg.training.kl_penalty,
                 stochastic=self.cfg.training.stochastic,
                 bounded=self.cfg.training.bounded,
+                bound_transform=self.cfg.training.bound_transform,
             )
             return raw_loss, emp_risk_train.detach(), kl_train.detach(), metrics
         else:
