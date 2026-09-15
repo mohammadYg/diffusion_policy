@@ -7,11 +7,6 @@ channels:
 dependencies:
   - python=3.9
   - pip=23.3.1
-  - pytorch==2.4.1
-  - torchvision==0.19.1
-  - torchaudio==2.4.1
-  - pytorch-cuda=12.1
-  - pytorch3d=0.7.8
   - numpy=1.23.3
   - numba==0.56.4
   - scipy==1.9.1
@@ -55,8 +50,12 @@ dependencies:
   - dm-control=1.0.9
   #- gxx_linux-64=13.3.0
   - pip:
+    # Blackwell GPUs (sm_120) need torch>=2.7/cu128: pip install torch==2.8.0+cu128 torchvision==0.23.0+cu128 torchaudio==2.8.0+cu128 --index-url https://download.pytorch.org/whl/cu128
+    # pytorch3d has no prebuilt build past torch 2.4.1, so build from source: CC=gcc-12 CXX=g++-12 CUDA_HOME=/usr/local/cuda-12.8 pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable"
     - ray[default,tune]==2.2.0
     # requires mujoco py dependencies libosmesa6-dev libgl1-mesa-glx libglfw3 patchelf
+    # gcc-14 fails to build mujoco_py's cymj.c; use gcc-12: conda env config vars set CC=gcc-12 CXX=g++-12 -n DP
+    # OSMesa backend also needs: conda install -c conda-forge mesalib glew; conda env config vars set CPATH=$CONDA_PREFIX/include -n DP; pip install patchelf
     - free-mujoco-py==2.1.6
     - pygame==2.1.2
     - pybullet-svl==3.1.6.4
