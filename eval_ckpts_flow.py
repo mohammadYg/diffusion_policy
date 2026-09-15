@@ -2,7 +2,7 @@
 Evaluate Flow Matching checkpoints.
 
 Usage:
-    python eval_ckpts.py --ckpts_dir data/outputs/.../checkpoints -o data/outputs/.../eval
+    python eval_ckpts_flow.py --ckpts_dir data/outputs/.../checkpoints -o data/outputs/.../eval
 """
 
 import json
@@ -19,18 +19,13 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
- 
+
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
+from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 
-# Attempt to import probabilistic policy if available (optional feature)
-try:
-    from diffusion_policy.policy.base_lowdim_prob_policy import BaseLowdimProbPolicy
-except ImportError:
-    BaseLowdimProbPolicy = None
-
-logger = logging.getLogger("eval_refactor")
+logger = logging.getLogger("eval_ckpts_flow")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 # -----------------------------------------------------------------------------
@@ -71,7 +66,16 @@ def instantiate_workspace(cfg: OmegaConf, output_dir: Path) -> BaseWorkspace:
     cls = hydra.utils.get_class(cfg._target_)
     return cls(cfg, output_dir=str(output_dir))
 
-    
+
+def _is_stochastic_policy(policy) -> bool:
+    """True for policy families that take a `stochastic=` kwarg on
+    compute_loss/compute_nll/predict_action: BaseLowdimPacPolicy subclasses
+    (e.g. PacFlowUnetLowdimPolicy) - there's no separate "prob" policy base
+    class in this codebase; the IVON-optimizer-based Bayesian policy also
+    subclasses BaseLowdimPacPolicy directly.
+    """
+    return isinstance(policy, BaseLowdimPacPolicy)
+
 
 def evaluate_loss(policy, dataloader: DataLoader, cfg, device: torch.device) -> float:
     """Evaluate average Flow matching loss over a dataset."""
@@ -90,75 +94,97 @@ def evaluate_loss(policy, dataloader: DataLoader, cfg, device: torch.device) -> 
             # Sample x1_vf_batch if x1_vf_bs > 0
             if cfg.training.x1_vf_bs > 0:
                 x1_vf_batch = policy.sample_x1_vf_batch(dataloader.dataset, cfg.training.x1_vf_bs, device=device)
-                                       
-            if BaseLowdimProbPolicy is not None and isinstance(policy, BaseLowdimProbPolicy):
-                loss = policy.compute_loss(batch, stochastic=cfg.eval.stochastic, 
-                                            x1_vf_batch=x1_vf_batch, 
+
+            if _is_stochastic_policy(policy):
+                loss = policy.compute_loss(batch, stochastic=cfg.eval.stochastic,
+                                            x1_vf_batch=x1_vf_batch,
                                             skewed_timesteps=cfg.training.skewed_timesteps,
                                             debug=False)
             else:
                 loss = policy.compute_loss(batch,
-                                            x1_vf_batch=x1_vf_batch, 
+                                            x1_vf_batch=x1_vf_batch,
                                             skewed_timesteps=cfg.training.skewed_timesteps,
                                             debug=False)
             total_loss += loss.item() * n
 
     return total_loss / total_samples if total_samples > 0 else 99999
 
+
 def evaluate_nll(policy, dataloader: DataLoader, cfg, device: torch.device) -> float:
     """Compute the negative log‑likelihood if the policy supports it."""
     if not hasattr(policy, "compute_nll"):
         return 0.0
-    
+
     policy.eval()
-    total_nll  = 0.0
+    total_nll = 0.0
     total_samples = 0
     pbar = tqdm(dataloader, desc="NLL Computation", leave=False, mininterval=cfg.training.tqdm_interval_sec)
     for batch in pbar:
         n = len(batch["obs"])
         total_samples += n
         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-        if BaseLowdimProbPolicy is not None and isinstance(policy, BaseLowdimProbPolicy):
+        if _is_stochastic_policy(policy):
             nll = policy.compute_nll(batch, stochastic=cfg.eval.stochastic,
-                                    exact_divergence=cfg.eval.exact_divergence,
-                                                            )
+                                    exact_divergence=cfg.eval.exact_divergence)
         else:
-             nll = policy.compute_nll(batch, 
-                                    exact_divergence=cfg.eval.exact_divergence,
-                                                                        )
-        total_nll  += nll.item() * n
+            nll = policy.compute_nll(batch, exact_divergence=cfg.eval.exact_divergence)
+        total_nll += nll.item() * n
 
     return total_nll / total_samples if total_samples > 0 else 99999
 
 
+def score_key_for(policy, stochastic: bool) -> str:
+    """Env runners log 'test/mean_score' for plain policies, or
+    'test/mean_score_deterministic' / 'test/mean_score_stochastic' for
+    BaseLowdimPacPolicy subclasses - see e.g. pusht_keypoints_runner.py /
+    robomimic_lowdim_runner.py's run().
+    """
+    if _is_stochastic_policy(policy):
+        return "test/mean_score_stochastic" if stochastic else "test/mean_score_deterministic"
+    return "test/mean_score"
+
+
 def run_env_runner(env_runner, policy, cfg) -> Tuple[dict, float]:
-    """Run the environment runner and return the log dict and mean score."""
-    runner_log = env_runner.run(policy, cfg)
-    score = runner_log["test/mean_score"]
-    return runner_log, score.item()
+    """Run the environment runner and return the log dict and mean score.
+
+    env_runner.run()'s actual signature is run(self, policy, stochastic=False)
+    (see pusht_keypoints_runner.py / robomimic_lowdim_runner.py) - it does NOT
+    take cfg positionally. Passing cfg there (as this function used to)
+    silently mis-binds it to `stochastic`, which is harmless for plain
+    policies (env runners ignore `stochastic` for them) but breaks PAC
+    policies (BaseLowdimPacPolicy, e.g. PacFlowUnetLowdimPolicy): the env
+    runner logs 'test/mean_score_deterministic'/'_stochastic' for those
+    instead of 'test/mean_score', so runner_log["test/mean_score"] raised
+    KeyError.
+    """
+    is_pac = _is_stochastic_policy(policy)
+    stochastic = bool(getattr(cfg.eval, "stochastic", False)) if is_pac else False
+    runner_log = env_runner.run(policy, stochastic=stochastic)
+    key = score_key_for(policy, stochastic)
+    score = runner_log[key]
+    return runner_log, score.item() if torch.is_tensor(score) else score
+
 
 def save_json_log(out_path: Path, data: Dict) -> None:
     """Write JSON data to file."""
     with out_path.open("w") as f:
         json.dump(data, f, indent=2, sort_keys=True)
 
+
 def free_cuda_memory():
     """Clear CUDA cache if available."""
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-def delete_checkpoint(ckpt_path: Path) -> None:
-    """Delete a checkpoint file safely, except latest.ckpt."""
-    
-    # if ckpt_path.name == "latest.ckpt":
-    #     logger.info("Skipping deletion of %s", ckpt_path.name)
-    #     return
 
+def delete_checkpoint(ckpt_path: Path) -> None:
+    """Delete a checkpoint file safely."""
     try:
         ckpt_path.unlink(missing_ok=True)
         logger.info("Deleted checkpoint: %s", ckpt_path.name)
     except Exception as e:
         logger.warning("Failed to delete checkpoint %s: %s", ckpt_path.name, e)
+
 
 # -----------------------------------------------------------------------------
 # Main CLI
@@ -185,6 +211,10 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
     # List and filter checkpoints
     all_ckpt_files = list_ckpt_files(ckpts_dir)
+    if not all_ckpt_files:
+        logger.warning("No .ckpt files found in %s", ckpts_dir)
+        return
+
     # Load config from the LAST checkpoint (assumes all have same config)
     cfg = load_checkpoint_payload(all_ckpt_files[-1])["cfg"]
     if override:
@@ -218,8 +248,8 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
     sum_success_rates = 0.0
     num_evaluated = 0
 
-    loss_val=[]
-    nll_val=[]
+    loss_val = []
+    nll_val = []
 
     # Iterate over checkpoints
     for ckpt_path in all_ckpt_files:
@@ -253,7 +283,7 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
         else:
             loss = evaluate_loss(policy, val_dataloader, cfg, device_obj)
             loss_val.append(loss)
-            
+
             nll = evaluate_nll(policy, val_dataloader, cfg, device_obj)
             nll_val.append(nll)
 
@@ -297,6 +327,7 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
         for ckpt_path in all_ckpt_files:
             delete_checkpoint(ckpt_path)
+
 
 if __name__ == "__main__":
     main()
