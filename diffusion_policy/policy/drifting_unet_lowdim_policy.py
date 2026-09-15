@@ -29,6 +29,13 @@ class DriftingUnetLowdimPolicy(BaseLowdimPolicy):
         self.n_obs_steps = n_obs_steps
         self.obs_as_global_cond = obs_as_global_cond
         self.temperatures = temperatures
+        # Doubles as a mixing probability p in [0,1] (bool True/False already
+        # coerce to 1.0/0.0, so existing configs are unaffected): compute_loss
+        # draws a fresh Bernoulli(p) choice every call, using the per-timestep
+        # branch with probability p and the flattened branch with probability
+        # 1-p. p=1.0 (True) always uses per-timestep; p=0.0 (False) always
+        # uses flattened - identical to the old bool-only behavior in both
+        # cases; any p in between stochastically mixes the two per call.
         self.per_timestep_loss = per_timestep_loss
         self.gen_per_label = gen_per_label
         self.kwargs = kwargs
@@ -82,19 +89,34 @@ class DriftingUnetLowdimPolicy(BaseLowdimPolicy):
 
         R_list = tuple(self.temperatures)
 
-        if self.per_timestep_loss:
+        # Bernoulli(p) draw, fresh every call - see the comment on
+        # self.per_timestep_loss in __init__ for the p=0/p=1 boundary cases.
+        use_per_timestep = torch.rand((), device=nactions.device).item() < float(self.per_timestep_loss)
+
+        if use_per_timestep:
             T_horizon = nactions.shape[1]
             total_loss = 0
-            accumulated_metrics = {}
+            # Collect every timestep's value per metric key instead of only
+            # accumulating their mean, so we can also see how much a metric
+            # varies ACROSS the horizon (e.g. whether error concentrates at a
+            # few late/contact-critical timesteps rather than being uniform) -
+            # that resolution was previously discarded by averaging in-place.
+            per_t_values = {}
             for t in range(T_horizon):
                 gen_t = pred_actions[:, :, t, :]           # [B, G, D]
                 pos_t = nactions[:, t, :].unsqueeze(1)     # [B, 1, D]
                 loss_t, info_t = drift_loss(gen_t, pos_t, R_list=R_list)
                 total_loss = total_loss + loss_t.mean()
                 for k, v in info_t.items():
-                    accumulated_metrics[k] = accumulated_metrics.get(k, 0.0) + v.item() / T_horizon
+                    per_t_values.setdefault(k, []).append(v.item())
             loss = total_loss / T_horizon
-            all_metrics = accumulated_metrics
+            all_metrics = {}
+            for k, vals in per_t_values.items():
+                vals_t = torch.tensor(vals)
+                all_metrics[k] = vals_t.mean().item()
+                all_metrics[f"{k}_min_t"] = vals_t.min().item()
+                all_metrics[f"{k}_max_t"] = vals_t.max().item()
+                all_metrics[f"{k}_std_t"] = vals_t.std().item() if len(vals) > 1 else 0.0
         else:
             gen = pred_actions.reshape(batch_size, G, -1)          # [B, G, T*D]
             pos = nactions.reshape(batch_size, 1, -1)              # [B, 1, T*D] //pne demonstrated action trajectory per observation
