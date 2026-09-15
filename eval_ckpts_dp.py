@@ -16,6 +16,7 @@ import dill
 import hydra
 import numpy as np
 import torch
+from mujoco_py.builder import MujocoException
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -149,6 +150,12 @@ def save_json_log(out_path: Path, data: Dict) -> None:
         json.dump(data, f, indent=2, sort_keys=True)
 
 
+def build_env_runner(cfg, output_dir: Path):
+    """(Re)instantiate the task's env_runner - needed after a MujocoException,
+    since AsyncVectorEnv._raise_if_errors permanently kills the crashed worker's pipe."""
+    return hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir))
+
+
 def free_cuda_memory():
     """Clear CUDA cache if available."""
     if torch.cuda.is_available():
@@ -237,6 +244,9 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
     loss_val = []
     nll_val = []
+    failed_checkpoints: List[Dict] = []
+    last_success_rate: Optional[float] = None
+    last_success_step: Optional[int] = None
 
     # Iterate over checkpoints
     for ckpt_path in all_ckpt_files:
@@ -259,8 +269,43 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
         policy.to(device_obj)
         policy.eval()
 
-        # Run environment evaluation
-        _, success_rate = run_env_runner(env_runner, policy, cfg)
+        try:
+            # Run environment evaluation
+            _, success_rate = run_env_runner(env_runner, policy, cfg)
+        except MujocoException as e:
+            logger.warning(
+                "MuJoCo instability (NaN/Inf) evaluating checkpoint %s (step %d): %s. "
+                "Reporting the previous checkpoint's success_rate instead.",
+                ckpt_path.name, step, e,
+            )
+            failed_checkpoints.append({"step": step, "ckpt": ckpt_path.name, "error": str(e)})
+
+            # Carry the previous checkpoint's success_rate forward (0.0 if there is none yet) so mean_scores has no gap/NaN.
+            reported_success_rate = last_success_rate if last_success_rate is not None else 0.0
+            json_log[f"model_at_step_{step:06d}"] = {
+                "error": str(e),
+                "success_rate": reported_success_rate,
+                "success_rate_carried_over_from_step": last_success_step,
+            }
+
+            step_results["steps"].append(step)
+            step_results["success_rates"].append(reported_success_rate)
+            sum_success_rates += reported_success_rate
+            num_evaluated += 1
+
+            save_json_log(out_path, json_log)
+
+            del policy, workspace, payload
+            free_cuda_memory()
+
+            # env_runner's crashed worker pipe is permanently dead - rebuild it.
+            try:
+                if hasattr(env_runner, "env"):
+                    env_runner.env.close(terminate=True)
+            except Exception:
+                logger.warning("Failed to cleanly close env_runner after MuJoCo error", exc_info=True)
+            env_runner = build_env_runner(cfg, output_dir)
+            continue
 
         # Compute Validation metrics (if dataloader is not empty)
         if len(val_dataloader) == 0:
@@ -288,6 +333,8 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
         sum_success_rates += success_rate
         num_evaluated += 1
+        last_success_rate = success_rate
+        last_success_step = step
 
         # Save partial log
         save_json_log(out_path, json_log)
@@ -305,6 +352,13 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
         json_log[f"mean_success_rate_last_{num_evaluated}_checkpoints"] = sum_success_rates / num_evaluated
     else:
         logger.warning("No valid checkpoints found.")
+
+    if failed_checkpoints:
+        json_log["failed_checkpoints"] = failed_checkpoints
+        logger.warning(
+            "%d checkpoint(s) skipped due to MuJoCo instability: %s",
+            len(failed_checkpoints), [f["ckpt"] for f in failed_checkpoints],
+        )
 
     save_json_log(out_path, json_log)
     logger.info("Evaluation complete. Log written to %s", out_path)
