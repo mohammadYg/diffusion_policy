@@ -399,7 +399,71 @@ class AsyncVectorEnv(VectorEnv):
 
         logger.error("Raising the last exception back to the main process.")
         raise exctype(value)
-    
+
+    def _raise_if_errors_at(self, indices, successes):
+        # Like _raise_if_errors, but for a call that only targeted `indices`
+        # (not all num_envs pipes) - can't reuse _raise_if_errors, since its
+        # num_errors = num_envs - sum(successes) assumes a full-vector call.
+        if all(successes):
+            return
+        for i, success in zip(indices, successes):
+            if not success:
+                index, exctype, value = self.error_queue.get()
+                logger.error(
+                    "Received the following error from Worker-{0}: "
+                    "{1}: {2}".format(index, exctype.__name__, value)
+                )
+                logger.error("Shutting down Worker-{0}.".format(index))
+                self.parent_pipes[index].close()
+                self.parent_pipes[index] = None
+                raise exctype(value)
+
+    def reset_at(self, indices):
+        """Reset only the sub-environments at `indices`, leaving all others
+        untouched - unlike reset()/reset_async(), which always reset the
+        whole vector. Synchronous; must not be called while a step_async()/
+        call_async() is pending. Returns the fresh observations for
+        `indices`, in that order.
+        """
+        self._assert_is_running()
+        if self._state != AsyncState.DEFAULT:
+            raise AlreadyPendingCallError(
+                "Calling `reset_at` while waiting "
+                f"for a pending call to `{self._state.value}` to complete.",
+                self._state.value,
+            )
+        for i in indices:
+            self.parent_pipes[i].send(("reset", None))
+        results, successes = zip(*[self.parent_pipes[i].recv() for i in indices]) \
+            if indices else ((), ())
+        self._raise_if_errors_at(indices, successes)
+
+        if self.shared_memory:
+            # workers already wrote straight into the shared observation
+            # buffer at their own index - just read those rows back.
+            obs = deepcopy(self.observations) if self.copy else self.observations
+            return [obs[i] for i in indices]
+        return list(results)
+
+    def call_at(self, indices, name: str, *args, **kwargs):
+        """Call a method / get a property from only the sub-environments at
+        `indices`, without touching or waiting on any other environment -
+        unlike call()/call_each(), which always address the whole vector.
+        """
+        self._assert_is_running()
+        if self._state != AsyncState.DEFAULT:
+            raise AlreadyPendingCallError(
+                "Calling `call_at` while waiting "
+                f"for a pending call to `{self._state.value}` to complete.",
+                self._state.value,
+            )
+        for i in indices:
+            self.parent_pipes[i].send(("_call", (name, args, kwargs)))
+        results, successes = zip(*[self.parent_pipes[i].recv() for i in indices]) \
+            if indices else ((), ())
+        self._raise_if_errors_at(indices, successes)
+        return list(results)
+
     def call_async(self, name: str, *args, **kwargs):
         """Calls the method with name asynchronously and apply args and kwargs to the method.
 

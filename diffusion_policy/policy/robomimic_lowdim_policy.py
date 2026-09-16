@@ -9,7 +9,13 @@ import robomimic.utils.obs_utils as ObsUtils
 from diffusion_policy.common.robomimic_config_util import get_robomimic_config
 
 class RobomimicLowdimPolicy(BaseLowdimPolicy):
-    def __init__(self, 
+    # reset() clears self.model's whole-batch RNN hidden state (see reset()
+    # below) - env_runners must not reassign individual vector slots to a
+    # new rollout mid-batch for this policy, since that state is not
+    # per-row-resettable. See RobomimicLowdimRunner.run().
+    is_stateful = True
+
+    def __init__(self,
             action_dim, 
             obs_dim,
             algo_name='bc_rnn',
