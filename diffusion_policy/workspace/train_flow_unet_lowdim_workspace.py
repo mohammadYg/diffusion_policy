@@ -19,6 +19,8 @@ import random
 import wandb
 import tqdm
 
+from mujoco_py.builder import MujocoException
+
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.policy.flow_unet_lowdim_policy import FlowUnetLowdimPolicy
@@ -123,6 +125,11 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
             output_dir=self.output_dir)
         assert isinstance(env_runner, BaseLowdimRunner)
 
+        # Carries the last successful rollout's score(s) forward across MuJoCo
+        # instability so wandb's mean_score plot has no gap/jump.
+        prefixes = sorted(set(getattr(env_runner, 'env_prefixs', ['test/'])))
+        last_runner_log: dict = {p + 'mean_score': 0.0 for p in prefixes}
+
         # configure logging
         wandb_run = wandb.init(
             dir=str(self.output_dir),
@@ -224,7 +231,25 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
 
                         # run rollout
                         if (current_step % rollout_every) == 0 or self.global_step==0:
-                            runner_log = env_runner.run(policy)
+                            try:
+                                runner_log = env_runner.run(policy)
+                                last_runner_log.update(runner_log)
+                            except MujocoException as e:
+                                print(f"Warning: MuJoCo instability during rollout at step "
+                                      f"{current_step} ({e}). Reporting the previous rollout's "
+                                      f"score(s) instead so wandb has no gap.")
+                                step_log['rollout_mujoco_error'] = str(e)
+                                # The crashed worker's pipe is permanently closed by
+                                # AsyncVectorEnv._raise_if_errors, so env_runner can't be
+                                # reused - rebuild it.
+                                try:
+                                    env_runner.env.close(terminate=True)
+                                except Exception:
+                                    pass
+                                env_runner = hydra.utils.instantiate(
+                                    cfg.task.env_runner,
+                                    output_dir=self.output_dir)
+                                runner_log = dict(last_runner_log)
                             step_log.update(runner_log)
 
                         # validation: nll computation

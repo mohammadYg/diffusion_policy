@@ -2,8 +2,8 @@
 Evaluate Drifting-model checkpoints (plain or PAC-Bayes variant).
 
 Works with checkpoints produced by either:
-  - train_drifting_unet_lowdim_workspace.py      (DriftingUnetLowdimPolicy)
-  - train_pac_drifting_unet_lowdim_workspace.py  (PacDriftingUnetLowdimPolicy)
+  - train_drift_unet_lowdim_workspace.py      (DriftUnetLowdimPolicy)
+  - train_pac_drift_unet_lowdim_workspace.py  (PacDriftUnetLowdimPolicy)
 which of the two a checkpoint came from is auto-detected per-checkpoint from
 the loaded policy's type (isinstance(..., BaseLowdimPacPolicy)), so a single
 --ckpts_dir of either kind works with this one script.
@@ -12,7 +12,7 @@ Note on NLL: unlike the diffusion/flow-matching eval scripts (eval_ckpts_dp.py,
 eval_ckpts_flow.py), this script does NOT compute a negative log-likelihood.
 The drifting generative process is a single deterministic forward pass
 (noise -> action via one U-Net call at timesteps=0, see
-drifting_unet_lowdim_policy.py/pac_drifting_unet_lowdim_policy.py) trained
+drift_unet_lowdim_policy.py/pac_drift_unet_lowdim_policy.py) trained
 with drift_loss's particle-attraction/repulsion objective - there is no
 log-det-Jacobian, no invertibility, and no noise-level-indexed denoising
 channel to integrate over, so neither the flow-matching ODE likelihood nor
@@ -90,7 +90,7 @@ def instantiate_workspace(cfg: OmegaConf, output_dir: Path) -> BaseWorkspace:
 def _is_stochastic_policy(policy) -> bool:
     """True for policy families that take a `stochastic=` kwarg on
     compute_loss/predict_action: BaseLowdimPacPolicy subclasses (here,
-    PacDriftingUnetLowdimPolicy) - there's no separate "prob" policy base
+    PacDriftUnetLowdimPolicy) - there's no separate "prob" policy base
     class in this codebase.
     """
     return isinstance(policy, BaseLowdimPacPolicy)
@@ -100,7 +100,7 @@ def compute_policy_loss(policy, batch, is_pac: bool, cfg) -> Tuple[torch.Tensor,
     """Call compute_loss with the right signature for plain vs. PAC drifting
     policies. Both return (loss, metrics) where metrics is drift_loss's own
     info dict (scale, loss_{R} for each configured temperature - see
-    drifting_util.py's drift_loss()).
+    drift_util.py's drift_loss()).
     """
     if is_pac:
         stochastic = bool(OmegaConf.select(cfg, "eval.stochastic", default=False))

@@ -713,7 +713,7 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
         partially completed training that must not be discarded, but the
         PAC-Bayes bound should still measure KL against the trained prior).
 
-        Mirrors PacDriftingUnetLowdimPolicy.prior_initialization - keep them in
+        Mirrors PacDriftUnetLowdimPolicy.prior_initialization - keep them in
         sync.
         """
         prior_model.eval()

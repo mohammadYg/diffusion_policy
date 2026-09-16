@@ -19,9 +19,11 @@ import random
 import wandb
 import tqdm
 
+from mujoco_py.builder import MujocoException
+
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from diffusion_policy.policy.drifting_unet_lowdim_policy import DriftingUnetLowdimPolicy
+from diffusion_policy.policy.drift_unet_lowdim_policy import DriftUnetLowdimPolicy
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager, LastNCheckpointManager
@@ -32,7 +34,7 @@ from diffusers.training_utils import EMAModel
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 # %%
-class TrainDriftingUnetLowdimWorkspace(BaseWorkspace):
+class TrainDriftUnetLowdimWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
@@ -45,10 +47,10 @@ class TrainDriftingUnetLowdimWorkspace(BaseWorkspace):
         random.seed(seed)
 
         # configure model
-        self.model: DriftingUnetLowdimPolicy
+        self.model: DriftUnetLowdimPolicy
         self.model = hydra.utils.instantiate(cfg.policy)
 
-        self.ema_model: DriftingUnetLowdimPolicy = None
+        self.ema_model: DriftUnetLowdimPolicy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
 
@@ -125,6 +127,13 @@ class TrainDriftingUnetLowdimWorkspace(BaseWorkspace):
         # except Exception as e:
         #     print(f"Warning: env_runner instantiation failed ({e}). Rollouts will be skipped.")
         #     env_runner = None
+        #
+        # # Carries the last successful rollout's score(s) forward across MuJoCo
+        # # instability so wandb's mean_score plot has no gap/jump.
+        # last_runner_log: dict = {}
+        # if env_runner is not None:
+        #     prefixes = sorted(set(getattr(env_runner, 'env_prefixs', ['test/'])))
+        #     last_runner_log = {p + 'mean_score': 0.0 for p in prefixes}
 
         # configure logging
         wandb_run = wandb.init(
@@ -230,8 +239,26 @@ class TrainDriftingUnetLowdimWorkspace(BaseWorkspace):
                         policy.eval()
 
                         # # run rollout
-                        # if (current_step % rollout_every) == 0: #or self.global_step==0:
-                        #     runner_log = env_runner.run(policy)
+                        # if env_runner is not None and ((current_step % rollout_every) == 0): #or self.global_step==0:
+                        #     try:
+                        #         runner_log = env_runner.run(policy)
+                        #         last_runner_log.update(runner_log)
+                        #     except MujocoException as e:
+                        #         print(f"Warning: MuJoCo instability during rollout at step "
+                        #               f"{current_step} ({e}). Reporting the previous rollout's "
+                        #               f"score(s) instead so wandb has no gap.")
+                        #         step_log['rollout_mujoco_error'] = str(e)
+                        #         # The crashed worker's pipe is permanently closed by
+                        #         # AsyncVectorEnv._raise_if_errors, so env_runner can't be
+                        #         # reused - rebuild it.
+                        #         try:
+                        #             env_runner.env.close(terminate=True)
+                        #         except Exception:
+                        #             pass
+                        #         env_runner = hydra.utils.instantiate(
+                        #             cfg.task.env_runner,
+                        #             output_dir=self.output_dir)
+                        #         runner_log = dict(last_runner_log)
                         #     step_log.update(runner_log)
 
                         # validation: noise prediction loss
@@ -328,7 +355,7 @@ class TrainDriftingUnetLowdimWorkspace(BaseWorkspace):
     config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")), 
     config_name=pathlib.Path(__file__).stem)
 def main(cfg):
-    workspace = TrainDriftingUnetLowdimWorkspace(cfg)
+    workspace = TrainDriftUnetLowdimWorkspace(cfg)
     workspace.run()
 
 if __name__ == "__main__":

@@ -3,9 +3,9 @@ import torch
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.policy.base_lowdim_policy import BaseLowdimPolicy
 from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
-from diffusion_policy.model.drifting.drifting_util import drift_loss
+from diffusion_policy.model.drift.drift_util import drift_loss
 
-class DriftingUnetLowdimPolicy(BaseLowdimPolicy):
+class DriftUnetLowdimPolicy(BaseLowdimPolicy):
     def __init__(self,
             model: ConditionalUnet1D,
             horizon,

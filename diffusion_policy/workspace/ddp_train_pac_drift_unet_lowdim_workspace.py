@@ -30,7 +30,7 @@ from diffusers.training_utils import EMAModel
 
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from diffusion_policy.policy.pac_drifting_unet_lowdim_policy import PacDriftingUnetLowdimPolicy
+from diffusion_policy.policy.pac_drift_unet_lowdim_policy import PacDriftUnetLowdimPolicy
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.common.checkpoint_util import LastNCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
@@ -135,7 +135,7 @@ def reduce_scalars(scalars: dict, world_size: int, device: torch.device) -> dict
     return dict(zip(keys, values.tolist()))
 
 
-class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
+class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
@@ -148,10 +148,10 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
         random.seed(seed)
 
         # Underlying policy model
-        self.model: PacDriftingUnetLowdimPolicy = hydra.utils.instantiate(cfg.policy)
+        self.model: PacDriftUnetLowdimPolicy = hydra.utils.instantiate(cfg.policy)
 
         # Underlying EMA policy model
-        self.ema_model: PacDriftingUnetLowdimPolicy = None
+        self.ema_model: PacDriftUnetLowdimPolicy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
 
@@ -483,7 +483,7 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
 )
 def main(cfg):
     output_dir = os.environ.get("OUTPUT_DIR", None)
-    workspace = TrainPacDriftingUnetLowdimWorkspace(cfg, output_dir=output_dir)
+    workspace = TrainPacDriftUnetLowdimWorkspace(cfg, output_dir=output_dir)
     workspace.run()
 
 

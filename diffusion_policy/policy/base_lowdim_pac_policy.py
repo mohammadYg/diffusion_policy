@@ -36,7 +36,7 @@ class BaseLowdimPacPolicy(ModuleAttrMixin):
         raise NotImplementedError()
 
     # ========== PAC-Bayes bound support ===========
-    # Shared by PacDiffusionUnetLowdimPolicy/PacDriftingUnetLowdimPolicy/
+    # Shared by PacDiffusionUnetLowdimPolicy/PacDriftUnetLowdimPolicy/
     # PacFlowUnetLowdimPolicy's compute_bound(): the fquad/classic/friendly
     # bound formulas are only mathematically valid for an empirical risk
     # bounded in [0,1] (they're derived from concentration bounds for

@@ -5,9 +5,9 @@ import numpy as np
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.model.diffusion.conditional_prob1_unet1d import BayesianConditionalUnet1D
-from diffusion_policy.model.drifting.drifting_util import drift_loss
+from diffusion_policy.model.drift.drift_util import drift_loss
 
-class PacDriftingUnetLowdimPolicy(BaseLowdimPacPolicy):
+class PacDriftUnetLowdimPolicy(BaseLowdimPacPolicy):
     def __init__(self,
             model: BayesianConditionalUnet1D,
             horizon,
@@ -38,7 +38,7 @@ class PacDriftingUnetLowdimPolicy(BaseLowdimPacPolicy):
         # 1-p. p=1.0 (True) always uses per-timestep; p=0.0 (False) always
         # uses flattened - identical to the old bool-only behavior in both
         # cases; any p in between stochastically mixes the two per call.
-        # Mirrors DriftingUnetLowdimPolicy - keep them in sync.
+        # Mirrors DriftUnetLowdimPolicy - keep them in sync.
         self.per_timestep_loss = per_timestep_loss
         self.gen_per_label = gen_per_label
         self.kwargs = kwargs
@@ -111,7 +111,7 @@ class PacDriftingUnetLowdimPolicy(BaseLowdimPacPolicy):
             # varies ACROSS the horizon (e.g. whether error concentrates at a
             # few late/contact-critical timesteps rather than being uniform) -
             # that resolution was previously discarded by averaging in-place.
-            # Mirrors DriftingUnetLowdimPolicy.compute_loss - keep them in sync.
+            # Mirrors DriftUnetLowdimPolicy.compute_loss - keep them in sync.
             per_t_values = {}
             for t in range(T_horizon):
                 gen_t = pred_actions[:, :, t, :]           # [B, G, D]

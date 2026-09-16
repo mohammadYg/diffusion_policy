@@ -25,7 +25,7 @@ from mujoco_py.builder import MujocoException
 
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from diffusion_policy.policy.pac_drifting_unet_lowdim_policy import PacDriftingUnetLowdimPolicy
+from diffusion_policy.policy.pac_drift_unet_lowdim_policy import PacDriftUnetLowdimPolicy
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager, LastNCheckpointManager
@@ -36,7 +36,7 @@ from diffusers.training_utils import EMAModel
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 # %%
-class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
+class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
@@ -48,10 +48,10 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
         np.random.seed(seed)
         random.seed(seed)
 
-        self.model: PacDriftingUnetLowdimPolicy
+        self.model: PacDriftUnetLowdimPolicy
         self.model = hydra.utils.instantiate(cfg.policy)
 
-        self.ema_model: PacDriftingUnetLowdimPolicy = None
+        self.ema_model: PacDriftUnetLowdimPolicy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
 
@@ -61,7 +61,7 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
 
         self.global_step = 0
 
-    def _train_prior(self, cfg, prior_policy: PacDriftingUnetLowdimPolicy, prior_dataset, device):
+    def _train_prior(self, cfg, prior_policy: PacDriftUnetLowdimPolicy, prior_dataset, device):
         """
         Phase 1 of the data-dependent-prior recipe: train `prior_policy`'s Bayesian
         network on the prior-only demos with the plain stochastic (Bayes-by-backprop)
@@ -122,7 +122,7 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
             return None
         return template.format(task_name=cfg.task_name, n_prior_demos=n_prior_demos)
 
-    def _load_cached_prior(self, cfg, prior_ckpt_path, normalizer, device) -> Optional[PacDriftingUnetLowdimPolicy]:
+    def _load_cached_prior(self, cfg, prior_ckpt_path, normalizer, device) -> Optional[PacDriftUnetLowdimPolicy]:
         """
         Returns a policy loaded from `prior_ckpt_path`, or None if that path is
         None or the file doesn't exist yet (nothing cached).
@@ -130,14 +130,14 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
         if prior_ckpt_path is None or not os.path.isfile(prior_ckpt_path):
             return None
         print("Found trained prior, loading from:", prior_ckpt_path)
-        prior_policy: PacDriftingUnetLowdimPolicy = hydra.utils.instantiate(cfg.policy)
+        prior_policy: PacDriftUnetLowdimPolicy = hydra.utils.instantiate(cfg.policy)
         prior_policy.set_normalizer(normalizer)
         prior_policy.to(device)
         prior_state = torch.load(prior_ckpt_path, pickle_module=dill, map_location=device)
         prior_policy.model.load_state_dict(prior_state['model_state_dict'])
         return prior_policy
 
-    def _get_trained_prior(self, cfg, prior_ckpt_path, prior_dataset, n_prior_demos, normalizer, device) -> PacDriftingUnetLowdimPolicy:
+    def _get_trained_prior(self, cfg, prior_ckpt_path, prior_dataset, n_prior_demos, normalizer, device) -> PacDriftUnetLowdimPolicy:
         """
         Returns a policy holding the data-dependent prior network: loaded from
         `prior_ckpt_path` if that file already exists (via _load_cached_prior),
@@ -147,7 +147,7 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
         if prior_policy is not None:
             return prior_policy
 
-        prior_policy: PacDriftingUnetLowdimPolicy = hydra.utils.instantiate(cfg.policy)
+        prior_policy: PacDriftUnetLowdimPolicy = hydra.utils.instantiate(cfg.policy)
         prior_policy.set_normalizer(normalizer)
         prior_policy.to(device)
         print(
@@ -558,7 +558,7 @@ class TrainPacDriftingUnetLowdimWorkspace(BaseWorkspace):
     config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")), 
     config_name=pathlib.Path(__file__).stem)
 def main(cfg):
-    workspace = TrainPacDriftingUnetLowdimWorkspace(cfg)
+    workspace = TrainPacDriftUnetLowdimWorkspace(cfg)
     workspace.run()
 
 if __name__ == "__main__":
