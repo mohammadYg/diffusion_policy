@@ -19,7 +19,6 @@ past_action_visible: False
 keypoint_visible_rate: 1.0
 obs_as_global_cond: True
 pred_action_steps_only: False
-num_mc_samples: 1
 
 policy:
   _target_: diffusion_policy.policy.flow_unet_lowdim_policy.FlowUnetLowdimPolicy
@@ -33,10 +32,6 @@ policy:
     kernel_size: 5
     n_groups: 8
     cond_predict_scale: True
-
-  # FM:
-  #   _target_: diffusion_policy.CFM.conditional_flow_matching.ExactOptimalTransportConditionalFlowMatcher
-  #   sigma: 0.0
 
   FM:
     _target_: diffusion_policy.CFM.path.affine.CondOTProbPath 
@@ -52,13 +47,21 @@ policy:
   oa_step_convention: True
   prior_std: ${training.prior_std}
   
-  # ODE solver parameters
-  method: "dopri5"
-  step_size: null
-  atol: 1e-5
-  rtol: 1e-5
-  return_intermediates: False
-  enable_grad: False
+  # ODE solver parameters - sampling (fixed-step Euler, used for predict_action/rollout)
+  sample_method: "euler"
+  sample_step_size: 0.1  # 10 steps over [0,1]
+  sample_atol: 1e-5
+  sample_rtol: 1e-5
+  sample_return_intermediates: False
+  sample_enable_grad: False
+
+  # ODE solver parameters - likelihood (adaptive, used for compute_nll)
+  likelihood_method: "dopri5"
+  likelihood_step_size: null
+  likelihood_atol: 1e-5
+  likelihood_rtol: 1e-5
+  likelihood_return_intermediates: False
+  likelihood_enable_grad: False
 
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
@@ -113,8 +116,6 @@ training:
   tqdm_interval_sec: 1.0
   #flow
   prior_std: 1.0
-  x1_vf_bs: 0
-  skewed_timesteps: False
 
 eval:
   prior_std: ${training.prior_std}

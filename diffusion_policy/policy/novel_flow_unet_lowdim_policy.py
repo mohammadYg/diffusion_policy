@@ -17,7 +17,7 @@ from diffusion_policy.CFM.cfm_model import CFMVectorField
 from diffusion_policy.CFM.utils import skewed_timestep_sample
 
 
-class FlowUnetLowdimPolicy(BaseLowdimPolicy):
+class NovelFlowUnetLowdimPolicy(BaseLowdimPolicy):
     def __init__(self, 
             model: ConditionalUnet1D,
             FM: CondOTProbPath,
@@ -31,18 +31,6 @@ class FlowUnetLowdimPolicy(BaseLowdimPolicy):
             pred_action_steps_only=False,
             oa_step_convention=False,
             prior_std = 1.0,
-            sample_method="euler",
-            sample_step_size=0.1,
-            sample_atol=1e-5,
-            sample_rtol=1e-5,
-            sample_return_intermediates=False,
-            sample_enable_grad=False,
-            likelihood_method="dopri5",
-            likelihood_step_size=None,
-            likelihood_atol=1e-5,
-            likelihood_rtol=1e-5,
-            likelihood_return_intermediates=False,
-            likelihood_enable_grad=False,
             **kwargs
             ):
         
@@ -78,27 +66,20 @@ class FlowUnetLowdimPolicy(BaseLowdimPolicy):
         self.pred_action_steps_only = pred_action_steps_only
         self.oa_step_convention = oa_step_convention
         self.prior_std = prior_std
-
-        # fast fixed-step solver for action sampling (predict_action/rollout)
-        self.sample_kwargs = dict(
-            method=sample_method,
-            step_size=sample_step_size,
-            atol=sample_atol,
-            rtol=sample_rtol,
-            return_intermediates=sample_return_intermediates,
-            enable_grad=sample_enable_grad,
-        )
-        # accurate adaptive solver for exact/Hutchinson likelihood (compute_nll)
-        self.likelihood_kwargs = dict(
-            method=likelihood_method,
-            step_size=likelihood_step_size,
-            atol=likelihood_atol,
-            rtol=likelihood_rtol,
-            return_intermediates=likelihood_return_intermediates,
-            enable_grad=likelihood_enable_grad,
-        )
         self.kwargs = kwargs
 
+    def sample_x1_vf_batch(self, dataset, batch_size: int, device)-> torch.Tensor:
+        total_samples = len(dataset)
+        if total_samples == 0:
+            return torch.empty(0, device=device)
+
+
+        random_indices = torch.randint(0, total_samples, (batch_size,))
+        batch_data = torch.stack(
+            [dataset[idx.item()]['action'] for idx in random_indices]
+        )
+        return batch_data.to(device)
+    
     # ========= inference  ============
     def conditional_sample(self, 
             condition_data,
@@ -168,9 +149,9 @@ class FlowUnetLowdimPolicy(BaseLowdimPolicy):
 
         # run sampling
         nsample = self.conditional_sample(
-            cond_data,
+            cond_data, 
             global_cond=global_cond,
-            **self.sample_kwargs)
+            **self.kwargs)
         
         # unnormalize prediction
         naction_pred = nsample[...,:Da]
@@ -204,12 +185,17 @@ class FlowUnetLowdimPolicy(BaseLowdimPolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def compute_loss(self, batch, debug=False):
+    def compute_loss(self, batch, x1_vf_batch=None, skewed_timesteps=False, 
+                     debug=False):
         # normalize input
         assert 'valid_mask' not in batch
         nbatch = self.normalizer.normalize(batch)
         obs = nbatch['obs']
         action = nbatch['action']
+
+        if x1_vf_batch is not None:
+            # normalize x1_vf_batch
+            x1_vf_batch = self.normalizer['action'].normalize(x1_vf_batch)
 
         # handle different ways of passing observation
         global_cond = None
@@ -235,12 +221,15 @@ class FlowUnetLowdimPolicy(BaseLowdimPolicy):
 
         # Sample noise that we'll add to the images
         x_0 = torch.randn(x_1.shape, device=x_1.device)*self.prior_std
-        t = torch.rand(x_1.shape[0], device=x_1.device)
+        if skewed_timesteps:
+            t = skewed_timestep_sample(x_1.shape[0], device=x_1.device)
+        else:
+            t = torch.rand(x_1.shape[0], device=x_1.device)
 
         if debug:
-            out, first_element_prob, norm_score, norm_prob_max = self.FM.sample(x_0, x_1, t, x1_vf_batch=None, prior_std = self.prior_std, debug=debug)
+            out, first_element_prob, norm_score = self.FM.sample(x_0, x_1, t, x1_vf_batch, prior_std = self.prior_std, debug=debug) 
         else:
-            out = self.FM.sample(x_0, x_1, t, x1_vf_batch=None, prior_std = self.prior_std, debug=debug)
+            out = self.FM.sample(x_0, x_1, t, x1_vf_batch, prior_std = self.prior_std, debug=debug) 
         x_t = out.x_t
         x_1 = out.x_1
         u_t = out.dx_t
@@ -288,7 +277,7 @@ class FlowUnetLowdimPolicy(BaseLowdimPolicy):
             log_p0=partial(normal_log_prob, std=self.prior_std),
             global_cond=global_cond,
             exact_divergence = exact_divergence,
-            **self.likelihood_kwargs,
+            **self.kwargs,
         )
 
         # action_normalizer = self.normalizer['action']

@@ -119,17 +119,17 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 cfg.ema,
                 model=self.ema_model)
 
-        # configure env runner
-        env_runner: BaseLowdimRunner
-        env_runner = hydra.utils.instantiate(
-            cfg.task.env_runner,
-            output_dir=self.output_dir)
-        assert isinstance(env_runner, BaseLowdimRunner)
+        # # configure env runner
+        # env_runner: BaseLowdimRunner
+        # env_runner = hydra.utils.instantiate(
+        #     cfg.task.env_runner,
+        #     output_dir=self.output_dir)
+        # assert isinstance(env_runner, BaseLowdimRunner)
 
-        # Carries the last successful rollout's score(s) forward across MuJoCo
-        # instability so wandb's mean_score plot has no gap/jump.
-        prefixes = sorted(set(getattr(env_runner, 'env_prefixs', ['test/'])))
-        last_runner_log: dict = {p + 'mean_score': 0.0 for p in prefixes}
+        # # Carries the last successful rollout's score(s) forward across MuJoCo
+        # # instability so wandb's mean_score plot has no gap/jump.
+        # prefixes = sorted(set(getattr(env_runner, 'env_prefixs', ['test/'])))
+        # last_runner_log: dict = {p + 'mean_score': 0.0 for p in prefixes}
 
         # configure logging
         wandb_run = wandb.init(
@@ -225,28 +225,28 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         policy = self.ema_model if cfg.training.use_ema else self.model
                         policy.eval()
 
-                        # run rollout
-                        if (current_step % rollout_every) == 0 or self.global_step==0:
-                            try:
-                                runner_log = env_runner.run(policy)
-                                last_runner_log.update(runner_log)
-                            except MujocoException as e:
-                                print(f"Warning: MuJoCo instability during rollout at step "
-                                      f"{current_step} ({e}). Reporting the previous rollout's "
-                                      f"score(s) instead so wandb has no gap.")
-                                step_log['rollout_mujoco_error'] = str(e)
-                                # The crashed worker's pipe is permanently closed by
-                                # AsyncVectorEnv._raise_if_errors, so env_runner can't be
-                                # reused - rebuild it.
-                                try:
-                                    env_runner.env.close(terminate=True)
-                                except Exception:
-                                    pass
-                                env_runner = hydra.utils.instantiate(
-                                    cfg.task.env_runner,
-                                    output_dir=self.output_dir)
-                                runner_log = dict(last_runner_log)
-                            step_log.update(runner_log)
+                        # # run rollout
+                        # if (current_step % rollout_every) == 0 or self.global_step==0:
+                        #     try:
+                        #         runner_log = env_runner.run(policy)
+                        #         last_runner_log.update(runner_log)
+                        #     except MujocoException as e:
+                        #         print(f"Warning: MuJoCo instability during rollout at step "
+                        #               f"{current_step} ({e}). Reporting the previous rollout's "
+                        #               f"score(s) instead so wandb has no gap.")
+                        #         step_log['rollout_mujoco_error'] = str(e)
+                        #         # The crashed worker's pipe is permanently closed by
+                        #         # AsyncVectorEnv._raise_if_errors, so env_runner can't be
+                        #         # reused - rebuild it.
+                        #         try:
+                        #             env_runner.env.close(terminate=True)
+                        #         except Exception:
+                        #             pass
+                        #         env_runner = hydra.utils.instantiate(
+                        #             cfg.task.env_runner,
+                        #             output_dir=self.output_dir)
+                        #         runner_log = dict(last_runner_log)
+                        #     step_log.update(runner_log)
 
                         # validation: noise prediction loss
                         if ((current_step % val_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
@@ -270,7 +270,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         # NLL bound
                         if ((current_step % nll_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
                             NLL_test = policy.nll_bound(val_dataloader, current_step, npoints=100)
-                            step_log['test_nll_bpd'] = NLL_test
+                            step_log['test_nll_bpd'] = NLL_test.item()
 
                         # reconstruction loss
                         if ((current_step % reconst_loss_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
@@ -303,9 +303,9 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 self.save_checkpoint()
                             if cfg.checkpoint_last_N.save_last_snapshot:
                                 self.save_snapshot()
-                            # lastN_ckpt_path = lastN_manager.get_ckpt_path(step_log)
-                            # if lastN_ckpt_path is not None:
-                            #     self.save_checkpoint(path=lastN_ckpt_path)
+                            lastN_ckpt_path = lastN_manager.get_ckpt_path(step_log)
+                            if lastN_ckpt_path is not None:
+                                self.save_checkpoint(path=lastN_ckpt_path)
 
                         # log & step
                         wandb_run.log(step_log, step=current_step)

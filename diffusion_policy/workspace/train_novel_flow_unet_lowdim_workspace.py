@@ -19,6 +19,8 @@ import random
 import wandb
 import tqdm
 
+from mujoco_py.builder import MujocoException
+
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.policy.flow_unet_lowdim_policy import FlowUnetLowdimPolicy
@@ -32,7 +34,7 @@ from diffusers.training_utils import EMAModel
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 # %%
-class TrainNovelFlowUnetLowdimWorkspace(BaseWorkspace):
+class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
@@ -57,17 +59,6 @@ class TrainNovelFlowUnetLowdimWorkspace(BaseWorkspace):
             cfg.optimizer, params=self.model.parameters())
 
         self.global_step = 0
-
-    def sample_x1_vf_batch(self, dataset, batch_size: int)-> torch.Tensor:
-        total_samples = len(dataset)
-        if total_samples == 0:
-            return torch.empty(0)
-
-        random_indices = torch.randint(0, total_samples, (batch_size,))
-        batch_data = torch.stack(
-            [dataset[idx.item()]['action'] for idx in random_indices]
-        )
-        return batch_data
     
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -97,11 +88,13 @@ class TrainNovelFlowUnetLowdimWorkspace(BaseWorkspace):
         assert isinstance(dataset, BaseLowdimDataset)
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         normalizer = dataset.get_normalizer()
+        print ("training dataset size: ", len(dataset))
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
         print ("validation dataset size: ", len(val_dataset))
+
         
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
@@ -132,6 +125,11 @@ class TrainNovelFlowUnetLowdimWorkspace(BaseWorkspace):
             output_dir=self.output_dir)
         assert isinstance(env_runner, BaseLowdimRunner)
 
+        # Carries the last successful rollout's score(s) forward across MuJoCo
+        # instability so wandb's mean_score plot has no gap/jump.
+        prefixes = sorted(set(getattr(env_runner, 'env_prefixs', ['test/'])))
+        last_runner_log: dict = {p + 'mean_score': 0.0 for p in prefixes}
+
         # configure logging
         wandb_run = wandb.init(
             dir=str(self.output_dir),
@@ -155,6 +153,12 @@ class TrainNovelFlowUnetLowdimWorkspace(BaseWorkspace):
             save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint_last_N.topk
         )
 
+        # configure checkpoint for nll
+        topk_manager_nll = TopKCheckpointManager(
+            save_dir=os.path.join(self.output_dir, 'checkpoints'),
+            **cfg.checkpoint_nll.topk
+        )
+        
         # device transfer
         device = torch.device(cfg.training.device)
         self.model.to(device)
@@ -177,27 +181,27 @@ class TrainNovelFlowUnetLowdimWorkspace(BaseWorkspace):
             num_updates = int(cfg.training.num_updates)
             rollout_every = int(cfg.training.rollout_every)
             val_every = int(cfg.training.val_every)
-            nll_every = int(cfg.training.nll_every)
-            reconst_loss_every = int(cfg.training.reconst_loss_every)
             checkpoint_every = int(cfg.training.checkpoint_every)
 
-            # trainidiffusion_policy/workspace/train_flow_unet_lowdim_workspace.pyng: run until we hit num_updates
+            # training: run until we hit num_updates
+            flag=False
             while self.global_step < num_updates:
                 step_log = dict()
-
+                x1_vf_batch = None
                 with tqdm.tqdm(train_dataloader, desc=f"Training step {self.global_step}", 
                     leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
 
                     for batch_idx, batch in enumerate(tepoch):
                         # device transfer
+                        #batch['obs'] = torch.zeros_like(batch['obs'])
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-
                         # sample x1_vf_batch for conditional flow matching
-                        x1_vf_batch = self.sample_x1_vf_batch(dataset, cfg.training.x1_vf_bs)
+                        if cfg.training.x1_vf_bs > 0:
+                            x1_vf_batch = self.model.sample_x1_vf_batch(dataset, cfg.training.x1_vf_bs, device=device)
+
                         # compute objective
-                        raw_loss = self.model.compute_loss_novel(batch,
-                                                                x1_vf_batch=x1_vf_batch,
-                            skewed_timesteps=cfg.training.skewed_timesteps)
+                        raw_loss = self.model.compute_loss(batch, x1_vf_batch=x1_vf_batch, 
+                                                           skewed_timesteps=cfg.training.skewed_timesteps)
                             
                         loss = raw_loss
                         loss.backward()
@@ -227,8 +231,70 @@ class TrainNovelFlowUnetLowdimWorkspace(BaseWorkspace):
 
                         # run rollout
                         if (current_step % rollout_every) == 0 or self.global_step==0:
-                            runner_log = env_runner.run(policy)
+                            try:
+                                runner_log = env_runner.run(policy)
+                                last_runner_log.update(runner_log)
+                            except MujocoException as e:
+                                print(f"Warning: MuJoCo instability during rollout at step "
+                                      f"{current_step} ({e}). Reporting the previous rollout's "
+                                      f"score(s) instead so wandb has no gap.")
+                                step_log['rollout_mujoco_error'] = str(e)
+                                # The crashed worker's pipe is permanently closed by
+                                # AsyncVectorEnv._raise_if_errors, so env_runner can't be
+                                # reused - rebuild it.
+                                try:
+                                    env_runner.env.close(terminate=True)
+                                except Exception:
+                                    pass
+                                env_runner = hydra.utils.instantiate(
+                                    cfg.task.env_runner,
+                                    output_dir=self.output_dir)
+                                runner_log = dict(last_runner_log)
                             step_log.update(runner_log)
+
+                        # validation: nll computation
+                        if ((current_step % val_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
+                            nlls = []
+                            val_losses = []
+                            x1_vf_batch = None
+                            with tqdm.tqdm(val_dataloader, desc=f"Validation step {current_step}: NLL computation on the test set", 
+                                    leave=False, mininterval=cfg.training.tqdm_interval_sec) as vepoch:
+                                n_samples_total=0
+                                for v_idx, vbatch in enumerate(vepoch):
+                                    n_samples = len(vbatch["obs"])
+                                    n_samples_total = n_samples_total + n_samples
+                                    #vbatch['obs'] = torch.zeros_like(vbatch['obs'])
+                                    vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
+                                    if cfg.training.x1_vf_bs > 0:
+                                        x1_vf_batch = policy.sample_x1_vf_batch(val_dataset, cfg.training.x1_vf_bs, device=device)
+                                       
+                                    val_loss = policy.compute_loss(vbatch, x1_vf_batch=x1_vf_batch, 
+                                                                   skewed_timesteps=cfg.training.skewed_timesteps)
+                                    
+                                    nll = policy.compute_nll(vbatch, exact_divergence=cfg.eval.exact_divergence,
+                                                            )
+                                    
+                                    nlls.append(nll.item() * n_samples)
+                                    val_losses.append(val_loss.item() * n_samples)
+                                    if (cfg.training.max_val_steps is not None) and v_idx >= (cfg.training.max_val_steps - 1):
+                                        break
+                            if len(nlls) > 0:
+                                nll = np.sum(nlls) / n_samples_total
+                                step_log['test_nll_bpd'] = nll
+                                if cfg.training.x1_vf_bs > 0:
+                                    if (nll)<=-2.454:
+                                        flag=True
+                                        topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
+                                        if topk_ckpt_path_nll is not None:
+                                            self.save_checkpoint(path=topk_ckpt_path_nll)
+                                else:
+                                    topk_ckpt_path_nll = topk_manager_nll.get_ckpt_path(step_log)
+                                    if topk_ckpt_path_nll is not None:
+                                        self.save_checkpoint(path=topk_ckpt_path_nll)
+                                        
+                            if len(val_losses) > 0:
+                                val_loss = np.sum(val_losses) / n_samples_total
+                                step_log['test_loss'] = val_loss
 
                         policy.train()
                         
@@ -273,6 +339,12 @@ class TrainNovelFlowUnetLowdimWorkspace(BaseWorkspace):
                         if self.global_step >= num_updates:
                             break
 
+                        if flag:
+                            break
+                    if flag:
+                        break
+                if flag:
+                    break
                     # end for batches in dataloader
                 # end tepoch
             # end while self.global_step < num_updates

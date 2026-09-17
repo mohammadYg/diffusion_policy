@@ -543,6 +543,7 @@ class DiffusionUnetLowdimPolicy(BaseLowdimPolicy):
 
                     if self.pred_action_steps_only:
                         pred_action = result['action']
+                        To = self.n_obs_steps
                         start = To
                         if self.oa_step_convention:
                             start = To - 1

@@ -86,6 +86,10 @@ def vectorized_computation(xt, t, x1, x1_vf_batch, prior_std, sigma=0.0):
     # Normalize probabilities for each batch item across all its candidates
     norm_prob_batch = prob_batch / torch.sum(prob_batch, dim=1, keepdim=True)  # Shape: [B, N]
 
+    prob_max, _ = torch.max(prob_batch, dim=1, keepdim=True)
+    norm_prob_max = prob_max / torch.sum(prob_batch, dim=1, keepdim=True)
+
+
     # --- 7. Batch computation of the vector field estimate `ut` ---
     # First, calculate the vector field `v` for all candidates
     # Shape: [B, N, D]
@@ -113,7 +117,7 @@ def vectorized_computation(xt, t, x1, x1_vf_batch, prior_std, sigma=0.0):
     # print ( norm_prob_batch[:, 1])
     # print (norm_score)
 
-    return ut, norm_prob_batch[:, 0], norm_score
+    return ut, norm_prob_batch[:, 0], norm_score,  norm_prob_max
 
 
 class AffineProbPath(ProbPath):
@@ -194,14 +198,15 @@ class AffineProbPath(ProbPath):
 
         if x1_vf_batch is not None:
             dx_t = torch.zeros_like(x_t)
-            dx_t, first_element_prob, norm_score = vectorized_computation(x_t, t, x_1, x1_vf_batch, prior_std, sigma=self.scheduler.sigma)
+            dx_t, first_element_prob, norm_score, norm_prob_max = vectorized_computation(x_t, t, x_1, x1_vf_batch, prior_std, sigma=self.scheduler.sigma)
         else:
             dx_t = d_sigma_t * x_0 + d_alpha_t * x_1
             first_element_prob = None
             norm_score = None
+            norm_prob_max = None
 
         if debug:
-            return PathSample(x_t=x_t, dx_t=dx_t, x_1=x_1, x_0=x_0, t=t), first_element_prob, norm_score
+            return PathSample(x_t=x_t, dx_t=dx_t, x_1=x_1, x_0=x_0, t=t), first_element_prob, norm_score, norm_prob_max
         else:
             return PathSample(x_t=x_t, dx_t=dx_t, x_1=x_1, x_0=x_0, t=t)
 

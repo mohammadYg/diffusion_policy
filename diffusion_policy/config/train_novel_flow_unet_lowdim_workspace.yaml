@@ -2,8 +2,8 @@ defaults:
   - _self_
   - task: pusht_lowdim
 
-name: train_flow_unet_lowdim
-_target_: diffusion_policy.workspace.train_flow_unet_lowdim_workspace.TrainFlowUnetLowdimWorkspace
+name: train_novel_flow_unet_lowdim
+_target_: diffusion_policy.workspace.train_novel_flow_unet_lowdim_workspace.TrainNovelFlowUnetLowdimWorkspace
 
 obs_dim: ${task.obs_dim}
 action_dim: ${task.action_dim}
@@ -19,10 +19,9 @@ past_action_visible: False
 keypoint_visible_rate: 1.0
 obs_as_global_cond: True
 pred_action_steps_only: False
-num_mc_samples: 1
 
 policy:
-  _target_: diffusion_policy.policy.flow_unet_lowdim_policy.FlowUnetLowdimPolicy
+  _target_: diffusion_policy.policy.novel_flow_unet_lowdim_policy.NovelFlowUnetLowdimPolicy
   
   model:
     _target_: diffusion_policy.model.diffusion.conditional_unet1d.ConditionalUnet1D
