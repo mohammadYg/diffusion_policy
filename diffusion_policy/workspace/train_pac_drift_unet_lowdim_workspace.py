@@ -380,7 +380,7 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
 
                         # compute objective
                         if cfg.training.kl_penalty > 0.0:
-                            raw_loss, emp_risk_train, kl_train, metrics = self.model.compute_bound(
+                            raw_loss, emp_risk_train, kl_train, metrics, loss_emp_bounded = self.model.compute_bound(
                                 batch,
                                 n_bound=n_bound,
                                 objective=cfg.training.pac_objective,
@@ -389,13 +389,46 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                                 stochastic=cfg.training.stochastic,
                                 bounded=cfg.training.bounded,
                                 bound_transform=cfg.training.bound_transform,
+                                loss_scale=cfg.training.loss_scale,
                             )
                         else:
                             raw_loss, metrics = self.model.compute_loss(batch, stochastic=cfg.training.stochastic)
                             emp_risk_train = raw_loss
                             kl_train = torch.tensor([0.0])
+                            loss_emp_bounded = None
 
                         loss = raw_loss
+
+                        # Diagnostic only: gradient-norm split between the empirical-risk
+                        # path (loss_emp_bounded) and the KL path (kl_train), computed
+                        # BEFORE the real backward via two isolated autograd.grad calls
+                        # (retain_graph=True keeps the graph alive for them, and for the
+                        # real backward() right after). Neither call writes to .grad, so
+                        # they don't affect the actual optimizer step - this only tells
+                        # us how much gradient signal each path contributes, e.g. to spot
+                        # bound_transform saturating the empirical-risk path to ~0 (see
+                        # the tanh-saturation issue this was added to diagnose). Adds two
+                        # extra backward-equivalent passes per step - non-trivial overhead,
+                        # kept anyway since this is what's currently being debugged.
+                        if loss_emp_bounded is not None:
+                            # requires_grad filter: the Bayesian layers' prior mu/rho are
+                            # registered as frozen params (requires_grad=False) - autograd.grad
+                            # errors if any `inputs` tensor doesn't require grad, unlike
+                            # backward()/allow_unused (which only covers "unused", not "frozen").
+                            params = [p for p in self.model.parameters() if p.requires_grad]
+                            zero = torch.zeros((), device=device)
+                            emp_grads = torch.autograd.grad(
+                                loss_emp_bounded, params, retain_graph=True, allow_unused=True)
+                            kl_grads = torch.autograd.grad(
+                                kl_train, params, retain_graph=True, allow_unused=True)
+                            emp_risk_grad_norm = torch.sqrt(sum(
+                                (g.detach().pow(2).sum() for g in emp_grads if g is not None), zero))
+                            kl_grad_norm = torch.sqrt(sum(
+                                (g.detach().pow(2).sum() for g in kl_grads if g is not None), zero))
+                        else:
+                            emp_risk_grad_norm = None
+                            kl_grad_norm = None
+
                         loss.backward()
                         raw_loss_cpu = raw_loss.item()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
@@ -430,6 +463,11 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                             # Effective parameter-update magnitude this step (grad_norm
                             # alone doesn't say how far the parameters actually moved).
                             'grad_step_size': grad_norm.item() * current_lr,
+                            # How much of the total gradient (grad_norm above) comes from
+                            # the empirical-risk path vs. the KL path - see the diagnostic
+                            # computed above. 0.0 when kl_penalty<=0 (no PAC bound, no split).
+                            'emp_risk_grad_norm': emp_risk_grad_norm.item() if emp_risk_grad_norm is not None else 0.0,
+                            'kl_grad_norm': kl_grad_norm.item() if kl_grad_norm is not None else 0.0,
                             'global_step': current_step,
                             'lr': current_lr
                         }
@@ -527,14 +565,14 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
 
 
                         # checkpointing (last N)
-                        # if (current_step % checkpoint_every) == 0:
-                        #     if cfg.checkpoint_last_N.save_last_ckpt:
-                        #         self.save_checkpoint()
-                        #     if cfg.checkpoint_last_N.save_last_snapshot:
-                        #         self.save_snapshot()
-                            # lastN_ckpt_path = lastN_manager.get_ckpt_path(step_log)
-                            # if lastN_ckpt_path is not None:
-                            #     self.save_checkpoint(path=lastN_ckpt_path)
+                        if (current_step % checkpoint_every) == 0:
+                            if cfg.checkpoint_last_N.save_last_ckpt:
+                                self.save_checkpoint()
+                            if cfg.checkpoint_last_N.save_last_snapshot:
+                                self.save_snapshot()
+                            lastN_ckpt_path = lastN_manager.get_ckpt_path(step_log)
+                            if lastN_ckpt_path is not None:
+                                self.save_checkpoint(path=lastN_ckpt_path)
 
                         # log & step
                         wandb_run.log(step_log, step=current_step)

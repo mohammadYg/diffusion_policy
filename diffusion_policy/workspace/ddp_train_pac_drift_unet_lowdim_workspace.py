@@ -53,7 +53,7 @@ class PacLossWrapper(nn.Module):
 
     def forward(self, batch):
         if self.cfg.training.kl_penalty > 0.0:
-            raw_loss, emp_risk_train, kl_train, metrics = self.model.compute_bound(
+            raw_loss, emp_risk_train, kl_train, metrics, _loss_emp_bounded = self.model.compute_bound(
                 batch,
                 n_bound=self.n_bound,
                 objective=self.cfg.training.pac_objective,
@@ -62,6 +62,7 @@ class PacLossWrapper(nn.Module):
                 stochastic=self.cfg.training.stochastic,
                 bounded=self.cfg.training.bounded,
                 bound_transform=self.cfg.training.bound_transform,
+                loss_scale=self.cfg.training.loss_scale,
             )
             return raw_loss, emp_risk_train.detach(), kl_train.detach(), metrics
         else:

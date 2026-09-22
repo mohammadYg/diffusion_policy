@@ -129,9 +129,13 @@ training:
   #   below 1 early in training).
   # "exp"/"tanh": smooth saturating alternatives (1-exp(-x) / tanh(x)) that
   #   are also exactly bounded in [0,1) but never have zero gradient, so they
-  #   don't stall training even if loss_emp is briefly > 1. None of these
-  #   rescale loss_emp - they operate on the raw value.
+  #   don't stall training even if loss_emp is briefly > 1.
   bound_transform: "clamp"
+  # M: divides loss_emp before bound_transform above (see
+  # BaseLowdimPacPolicy._bound_empirical_risk) so it lands near the
+  # transform's near-linear region instead of its saturating tail - see the
+  # same setting in train_pac_drift_unet_lowdim_workspace.yaml.
+  loss_scale: 10.0
   delta: 0.025
   kl_penalty: 1.0e-4
   pac_objective: "fquad"  # "fquad" or "calssic", "bbb"

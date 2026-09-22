@@ -401,7 +401,7 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
                         # compute objective
                         if cfg.training.kl_penalty > 0.0:
-                            raw_loss, emp_risk_train, kl_train = self.model.compute_bound(
+                            raw_loss, emp_risk_train, kl_train, loss_emp_bounded = self.model.compute_bound(
                                 batch,
                                 n_bound=n_bound,
                                 objective=cfg.training.pac_objective,
@@ -410,17 +410,57 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 stochastic=cfg.training.stochastic,
                                 bounded=cfg.training.bounded,
                                 bound_transform=cfg.training.bound_transform,
+                                loss_scale=cfg.training.loss_scale,
                                 train=True,
                             )
                         else:
                             raw_loss = self.model.compute_loss(batch, stochastic=cfg.training.stochastic, train=True)
                             emp_risk_train = raw_loss
                             kl_train = torch.tensor([0.0])
+                            loss_emp_bounded = None
 
                         loss = raw_loss
+
+                        # Diagnostic only: gradient-norm split between the empirical-risk
+                        # path (loss_emp_bounded) and the KL path (kl_train), computed
+                        # BEFORE the real backward via two isolated autograd.grad calls
+                        # (retain_graph=True keeps the graph alive for them, and for the
+                        # real backward() right after). Neither call writes to .grad, so
+                        # they don't affect the actual optimizer step - this only tells
+                        # us how much gradient signal each path contributes, e.g. to spot
+                        # bound_transform saturating the empirical-risk path to ~0. Adds
+                        # two extra backward-equivalent passes per step - non-trivial
+                        # overhead. Mirrors TrainPacDriftUnetLowdimWorkspace.run().
+                        if loss_emp_bounded is not None:
+                            # requires_grad filter: the Bayesian layers' prior mu/rho are
+                            # registered as frozen params (requires_grad=False) - autograd.grad
+                            # errors if any `inputs` tensor doesn't require grad, unlike
+                            # backward()/allow_unused (which only covers "unused", not "frozen").
+                            params = [p for p in self.model.parameters() if p.requires_grad]
+                            zero = torch.zeros((), device=device)
+                            emp_grads = torch.autograd.grad(
+                                loss_emp_bounded, params, retain_graph=True, allow_unused=True)
+                            kl_grads = torch.autograd.grad(
+                                kl_train, params, retain_graph=True, allow_unused=True)
+                            emp_risk_grad_norm = torch.sqrt(sum(
+                                (g.detach().pow(2).sum() for g in emp_grads if g is not None), zero))
+                            kl_grad_norm = torch.sqrt(sum(
+                                (g.detach().pow(2).sum() for g in kl_grads if g is not None), zero))
+                        else:
+                            emp_risk_grad_norm = None
+                            kl_grad_norm = None
+
                         loss.backward()
                         raw_loss_cpu = raw_loss.item()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
+
+                        # Diagnostic only: pre-clip global gradient norm (max_norm=inf means
+                        # clip_grad_norm_ never actually rescales anything - the comparison
+                        # total_norm > max_norm is always False - it just returns total_norm).
+                        # This is the norm of the REAL, total gradient (loss_sum's) that the
+                        # optimizer step below actually uses - unlike emp_risk_grad_norm/
+                        # kl_grad_norm above, which isolate the two paths BEFORE they combine.
+                        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=float('inf'))
 
                         # step optimizer and scheduler
                         self.optimizer.step()
@@ -433,12 +473,22 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
                         # build step-log (use the upcoming/global step index)
                         current_step = self.global_step + 1
+                        current_lr = lr_scheduler.get_last_lr()[0]
                         step_log = {
                             'train_loss (pac_bayes bound)': raw_loss_cpu,
                             'emp_risk_train': emp_risk_train.item(),
                             'kl_train': kl_train.item(),
+                            'grad_norm': grad_norm.item(),
+                            # Effective parameter-update magnitude this step (grad_norm
+                            # alone doesn't say how far the parameters actually moved).
+                            'grad_step_size': grad_norm.item() * current_lr,
+                            # How much of the total gradient (grad_norm above) comes from
+                            # the empirical-risk path vs. the KL path - see the diagnostic
+                            # computed above. 0.0 when kl_penalty<=0 (no PAC bound, no split).
+                            'emp_risk_grad_norm': emp_risk_grad_norm.item() if emp_risk_grad_norm is not None else 0.0,
+                            'kl_grad_norm': kl_grad_norm.item() if kl_grad_norm is not None else 0.0,
                             'global_step': current_step,
-                            'lr': lr_scheduler.get_last_lr()[0]
+                            'lr': current_lr
                         }
 
                         # evaluation runs after optimizer step
@@ -446,7 +496,7 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         policy.eval()
 
                         # run rollout
-                        if (current_step % rollout_every) == 0: #or self.global_step==0:
+                        if (current_step % rollout_every) == 0 or self.global_step==0:
                             try:
                                 runner_log = env_runner.run(policy, stochastic=False)
                                 last_runner_log.update(runner_log)
@@ -469,6 +519,19 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             step_log.update(runner_log)
                             # runner_log = env_runner.run(policy, stochastic=True)
                             # step_log.update(runner_log)
+
+                        if ((current_step % val_every) == 0 or self.global_step==0):
+                            # Diagnostic only, piggybacked on the validation cadence (cheap,
+                            # no need for its own schedule): total parameter norm, and the
+                            # relative update size (grad_step_size / param_norm) - a more
+                            # scale-invariant instability indicator than grad_norm alone.
+                            # Independent of whether a validation set exists (unlike the
+                            # test_* block below), so it isn't gated on len(val_dataloader).
+                            param_norm = torch.sqrt(
+                                sum((p.detach() ** 2).sum() for p in self.model.parameters())
+                            ).item()
+                            step_log['param_norm'] = param_norm
+                            step_log['relative_update_size'] = step_log['grad_step_size'] / (param_norm + 1e-12)
 
                         # validation: noise prediction loss
                         if ((current_step % val_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):

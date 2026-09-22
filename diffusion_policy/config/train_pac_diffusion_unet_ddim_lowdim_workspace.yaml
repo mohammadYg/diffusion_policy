@@ -153,14 +153,23 @@ training:
   # for a risk bounded in [0,1] - see BaseLowdimPacPolicy._bound_empirical_risk.
   # Optional: False uses the raw, unbounded loss_emp.
   bounded: False
-  # "clamp" (default): min(loss_emp, 1) - exactly bounded, but zero gradient
-  #   once loss_emp > 1 (safe once you've confirmed, as here, that it drops
-  #   below 1 early in training).
-  # "exp"/"tanh": smooth saturating alternatives (1-exp(-x) / tanh(x)) that
-  #   are also exactly bounded in [0,1) but never have zero gradient, so they
-  #   don't stall training even if loss_emp is briefly > 1. None of these
-  #   rescale loss_emp - they operate on the raw value.
+  # "clamp" (default): min(loss_emp/loss_scale, 1) - exactly bounded, but zero
+  #   gradient once loss_emp/loss_scale > 1 (with loss_scale below giving it
+  #   headroom, this should only bite on rare outlier batches).
+  # "exp"/"tanh": smooth saturating alternatives (1-exp(-x) / tanh(x), where
+  #   x=loss_emp/loss_scale) that are also exactly bounded in [0,1) but never
+  #   have zero gradient, so they don't stall training even if loss_emp is
+  #   briefly > loss_scale.
   bound_transform: "clamp"
+  # M: divides loss_emp before bound_transform above (see
+  # BaseLowdimPacPolicy._bound_empirical_risk) so it lands near the
+  # transform's near-linear region instead of its saturating tail - with
+  # loss_scale=1.0 (the old implicit default), "clamp" saturates loss_emp to
+  # a constant 1.0 (zero gradient, every step) whenever loss_emp > 1, which
+  # is the case here early in training (empirically ~1.7 for this task/model
+  # config) - killing the empirical-risk gradient entirely if bounded=True.
+  # Re-tune if the model/task config changes loss_emp's scale.
+  loss_scale: 2.0
   delta: 0.025
   kl_penalty: 1.0e-4
   pac_objective: "friendly"  # "fquad" or "calssic", "bbb"

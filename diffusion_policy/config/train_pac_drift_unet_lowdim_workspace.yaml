@@ -71,7 +71,7 @@ policy:
   n_obs_steps: ${n_obs_steps}
   obs_as_global_cond: ${obs_as_global_cond}
   per_timestep_loss: true
-  gen_per_label: 1
+  gen_per_label: 3
   #temperatures: [0.02]
   temperatures: [0.02, 0.05, 0.2]
 
@@ -130,6 +130,13 @@ training:
   stochastic: True
   bounded: False
   bound_transform: "clamp"
+  # M: divides loss_emp before bound_transform (see
+  # BaseLowdimPacPolicy._bound_empirical_risk) so it lands near the
+  # transform's near-linear region instead of its saturating tail - drift_loss
+  # has no fixed analytic ceiling (sum over len(policy.temperatures) terms),
+  # empirically ~7 for the default 3-temperature config, so 10.0 leaves some
+  # headroom. Re-tune if temperatures/model config changes loss_emp's scale.
+  loss_scale: 7.5
   delta: 0.025
   kl_penalty: 1.0e-4
   pac_objective: "friendly"  # "fquad" or "calssic", "bbb"
@@ -140,7 +147,7 @@ training:
 
 eval:
   # PAC
-  stochastic: True
+  stochastic: False
   delta: 0.05
   mc_sampling: 1000
   

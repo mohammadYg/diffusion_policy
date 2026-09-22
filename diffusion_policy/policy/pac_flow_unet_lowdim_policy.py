@@ -258,16 +258,18 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
 
     def compute_bound(self, batch, n_bound, objective = "fquad", delta = 0.025,
                         kl_penalty = 0.005, stochastic = True, bounded = False, bound_transform = "clamp",
-                        x1_vf_batch=None, skewed_timesteps=False, debug=False):
+                        loss_scale = 1.0, x1_vf_batch=None, skewed_timesteps=False, debug=False):
 
         # DM emprical risk
         loss_emp = self.compute_loss(batch, stochastic=stochastic,
                                      x1_vf_batch=x1_vf_batch,
                                      skewed_timesteps = skewed_timesteps,
                                      debug=debug )
-        # No rescaling in either case - see BaseLowdimPacPolicy._bound_empirical_risk.
+        # loss_scale (M): see BaseLowdimPacPolicy._bound_empirical_risk - rescales
+        # loss_emp before the transform so it isn't saturated deep in the
+        # transform's flat tail (which would otherwise kill its gradient).
         if bounded:
-            loss_emp_bounded = self._bound_empirical_risk(loss_emp, transform=bound_transform)
+            loss_emp_bounded = self._bound_empirical_risk(loss_emp, transform=bound_transform, scale=loss_scale)
         else:
             loss_emp_bounded = loss_emp
 
@@ -303,7 +305,12 @@ class PacFlowUnetLowdimPolicy(BaseLowdimPacPolicy):
         else:
             raise RuntimeError(f"Wrong objective {self.objective}")
 
-        return loss_sum, loss_emp, kl
+        # loss_emp_bounded (the differentiable, post-transform tensor that
+        # actually feeds loss_sum) is returned alongside loss_emp (raw,
+        # unbounded, for logging only) so callers can isolate the empirical-
+        # risk path's own gradient (via autograd.grad) separately from the
+        # KL path's - see PacDriftUnetLowdimPolicy.compute_bound (kept in sync).
+        return loss_sum, loss_emp, kl, loss_emp_bounded
 
     def compute_nll(self, batch, stochastic=False, exact_divergence=True):
         # normalize input

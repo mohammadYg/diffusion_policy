@@ -46,35 +46,51 @@ class BaseLowdimPacPolicy(ModuleAttrMixin):
     # noise/velocity target) - only *how* the raw loss_emp is mapped into
     # [0,1] is a choice, made via `transform`. compute_bound's own `bounded`
     # flag makes calling this at all optional.
-    def _bound_empirical_risk(self, loss_emp: torch.Tensor, transform: str = "clamp") -> torch.Tensor:
+    def _bound_empirical_risk(self, loss_emp: torch.Tensor, transform: str = "clamp", scale: float = 1.0) -> torch.Tensor:
         """
-        transform (no scaling in any of these - operates on the raw loss_emp):
-          - "clamp" (default): min(loss_emp, 1) via torch.clamp(loss_emp,
+        scale (M): loss_emp is divided by this BEFORE the transform below.
+        The fquad/classic/friendly bounds need loss in [0,1], but the raw
+        loss (e.g. drift_loss, summed over several temperatures) is often
+        O(few) rather than O(1) - with scale=1.0 (the old default), every
+        transform below ends up deep in its saturating tail, where its
+        gradient is ~0 (tanh'(7) ~ 3e-6), silently killing the empirical-risk
+        gradient while the (untouched) KL gradient keeps dominating. Pick
+        `scale` as a calibrated estimate of loss_emp's typical scale so
+        loss_emp/scale sits near the transform's near-linear region.
+        `scale` is only an empirical estimate, not a provable ceiling on
+        loss_emp - the transform is still required (not optional) even with
+        a well-chosen scale, since it's the only part that GUARANTEES the
+        [0,1] bound holds on every batch, including rare ones where
+        loss_emp/scale > 1.
+
+        transform (operates on loss_emp/scale):
+          - "clamp" (default): min(loss_emp/scale, 1) via torch.clamp(...,
             max=1.0) (a lower clamp at 0 isn't needed since MSE is already
             >= 0). Exactly bounded, so the PAC-Bayes bound computed from it
-            is valid. Caveat: torch.clamp has ZERO gradient once loss_emp > 1
-            - backprop gets no gradient from the empirical-risk term at all
-            on a step where that happens (only the KL term still gets one),
-            which can stall training exactly when the network most needs to
-            reduce the loss. Safe to use once you've empirically confirmed
-            (as here) that loss_emp reliably drops below 1 early on.
-          - "exp": 1 - exp(-loss_emp). Smooth, monotonic, exactly bounded in
-            [0, 1), with gradient exp(-loss_emp) that is strictly positive
-            everywhere - it never stalls, no matter how large loss_emp is,
-            though the gradient shrinks (like a Huber-style robust loss) the
-            larger loss_emp gets. Standard "soft-clip"/saturating-loss
-            construction used to keep an a-priori-unbounded loss provably
-            bounded without a training-time gradient cliff.
-          - "tanh": tanh(loss_emp). Same guarantees/shape as "exp" (smooth,
-            strictly positive gradient, bounded in [0,1)) with a slightly
-            different saturation curve (approaches 1 faster).
+            is valid, and - unlike "exp"/"tanh" - exactly linear (gradient
+            1/scale, undiminished) whenever loss_emp/scale < 1. Caveat:
+            torch.clamp has ZERO gradient once loss_emp/scale > 1 - backprop
+            gets no gradient from the empirical-risk term at all on a step
+            where that happens (only the KL term still gets one). With a
+            well-chosen `scale` this should only bite on rare outlier
+            batches instead of being the typical case.
+          - "exp": 1 - exp(-loss_emp/scale). Smooth, monotonic, exactly
+            bounded in [0, 1), with gradient exp(-loss_emp/scale) that is
+            strictly positive everywhere - it never stalls, though the
+            gradient shrinks (like a Huber-style robust loss) the larger
+            loss_emp/scale gets.
+          - "tanh": tanh(loss_emp/scale). Same guarantees/shape as "exp"
+            with a slightly different saturation curve (approaches 1
+            faster) - meaning it needs a larger `scale` than "exp"/"clamp"
+            to avoid saturating at the same raw loss_emp value.
         """
+        x = loss_emp / scale
         if transform == "clamp":
-            return torch.clamp(loss_emp, max=1.0)
+            return torch.clamp(x, max=1.0)
         elif transform == "exp":
-            return 1.0 - torch.exp(-loss_emp)
+            return 1.0 - torch.exp(-x)
         elif transform == "tanh":
-            return torch.tanh(loss_emp)
+            return torch.tanh(x)
         else:
             raise ValueError(f"Unknown bound transform {transform!r} (expected 'clamp', 'exp', or 'tanh')")
 
