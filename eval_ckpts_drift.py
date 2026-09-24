@@ -102,19 +102,7 @@ def _is_stochastic_policy(policy) -> bool:
     return isinstance(policy, BaseLowdimPacPolicy)
 
 
-def compute_policy_loss(policy, batch, is_pac: bool, cfg) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """Call compute_loss with the right signature for plain vs. PAC drifting
-    policies. Both return (loss, metrics) where metrics is drift_loss's own
-    info dict (scale, loss_{R} for each configured temperature - see
-    drift_util.py's drift_loss()).
-    """
-    if is_pac:
-        stochastic = bool(OmegaConf.select(cfg, "eval.stochastic", default=False))
-        return policy.compute_loss(batch, stochastic=stochastic)
-    return policy.compute_loss(batch)
-
-
-def evaluate_drift_loss(policy, dataloader: DataLoader, cfg, device: torch.device, is_pac: bool) -> Tuple[float, Dict[str, float]]:
+def evaluate_drift_loss(policy, dataloader: DataLoader, cfg, device: torch.device) -> Tuple[float, Dict[str, float]]:
     """Evaluate average drift_loss (+ its diagnostic metrics: scale, loss_{R})
     over a dataset, sample-weighted.
     """
@@ -124,16 +112,17 @@ def evaluate_drift_loss(policy, dataloader: DataLoader, cfg, device: torch.devic
     metric_sums: Dict[str, float] = {}
 
     with torch.inference_mode():
-        pbar = tqdm(dataloader, desc="Validation drift_loss", leave=False,
-                    mininterval=cfg.training.tqdm_interval_sec)
+        pbar = tqdm(dataloader, desc="Validation loss", leave=False, mininterval=cfg.training.tqdm_interval_sec)
         for batch in pbar:
             n = len(batch["obs"])
             total_samples += n
             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-            loss, metrics = compute_policy_loss(policy, batch, is_pac, cfg)
+            if _is_stochastic_policy(policy):
+                loss, metrics = policy.compute_loss(batch, stochastic=cfg.eval.stochastic)
+            else:
+                loss, metrics = policy.compute_loss(batch)
             total_loss += loss.item() * n
             for k, v in metrics.items():
-                v = v.item() if torch.is_tensor(v) else v
                 metric_sums[k] = metric_sums.get(k, 0.0) + v * n
 
     if total_samples == 0:
@@ -154,17 +143,17 @@ def score_key_for(policy, stochastic: bool) -> str:
     return "test/mean_score"
 
 
-def run_env_runner(env_runner, policy, stochastic: bool) -> Tuple[dict, float]:
+def run_env_runner(env_runner, policy, cfg) -> Tuple[dict, float]:
     """Run the environment runner and return the log dict and mean score.
-    NOTE: env_runner.run()'s actual signature is run(self, policy,
-    stochastic=False) (see pusht_keypoints_runner.py / robomimic_lowdim_runner.py) -
-    NOT run(policy, cfg). Passing cfg positionally there (as the two sibling
-    eval scripts eval_ckpts_dp.py/eval_ckpts_flow.py do) would silently bind
-    to the `stochastic` parameter instead.
+    `stochastic` comes from cfg.eval.stochastic for PAC policies, as in
+    eval_ckpts_dp.py / eval_ckpts_flow.py.
     """
+    is_pac = _is_stochastic_policy(policy)
+    stochastic = bool(getattr(cfg.eval, "stochastic", False)) if is_pac else False
     runner_log = env_runner.run(policy, stochastic=stochastic)
     key = score_key_for(policy, stochastic)
-    return runner_log, runner_log[key].item() if torch.is_tensor(runner_log[key]) else runner_log[key]
+    score = runner_log[key]
+    return runner_log, score.item() if torch.is_tensor(score) else score
 
 
 def save_json_log(out_path: Path, data: Dict) -> None:
@@ -203,12 +192,9 @@ def delete_checkpoint(ckpt_path: Path) -> None:
 @click.option("-o", "--output_dir", required=False, default=None, type=click.Path(path_type=Path),
               help="Where to write evaluation outputs")
 @click.option("-d", "--device", default="cuda:0", help="Torch device string")
-@click.option("--stochastic", is_flag=True, default=False,
-              help="For PAC checkpoints: sample Bayesian weights during rollout instead of using the posterior mean. Ignored for plain drifting checkpoints.")
 @click.option("--override", multiple=True, help="Hydra-style overrides e.g. task.env_runner.n_test=300")
 @click.option("--delete_ckpts", is_flag=True, help="Whether to delete checkpoints after evaluation")
-def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, stochastic: bool,
-         override: Tuple[str, ...], delete_ckpts: bool = False):
+def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tuple[str, ...], delete_ckpts: bool = False):
     """Evaluate all checkpoints in ckpts_dir and log results."""
     parent_dir = ckpts_dir.parent
     if output_dir is None:
@@ -275,13 +261,10 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, stochastic: b
         policy.to(device_obj)
         policy.eval()
 
-        is_pac = _is_stochastic_policy(policy)
-        use_stochastic = stochastic and is_pac
-
         try:
             # Run environment evaluation
             eval_start = time.perf_counter()
-            _, success_rate = run_env_runner(env_runner, policy, use_stochastic)
+            _, success_rate = run_env_runner(env_runner, policy, cfg)
             eval_time = time.perf_counter() - eval_start
         except MujocoException as e:
             logger.warning(
@@ -293,19 +276,11 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, stochastic: b
 
             # Carry the previous checkpoint's success_rate forward (0.0 if there is none yet) so mean_scores has no gap/NaN.
             reported_success_rate = last_success_rate if last_success_rate is not None else 0.0
-            entry = {
+            json_log[f"model_at_step_{step:06d}"] = {
                 "error": str(e),
-                "is_pac": is_pac,
                 "success_rate": reported_success_rate,
                 "success_rate_carried_over_from_step": last_success_step,
             }
-            json_log[f"model_at_step_{step:06d}"] = entry
-
-            if last_success_rate is None:
-                logger.warning(
-                    "No previous successful checkpoint to carry a success_rate over from "
-                    "for %s (step %d); reporting 0.0.", ckpt_path.name, step,
-                )
 
             step_results["steps"].append(step)
             step_results["success_rates"].append(reported_success_rate)
@@ -331,7 +306,7 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, stochastic: b
             loss_val.append(0.0)
             logger.warning("Validation dataloader is empty, skipping loss evaluation.")
         else:
-            loss, metrics = evaluate_drift_loss(policy, val_dataloader, cfg, device_obj, is_pac)
+            loss, metrics = evaluate_drift_loss(policy, val_dataloader, cfg, device_obj)
             loss_val.append(loss)
             for k, v in metrics.items():
                 metric_val.setdefault(k, []).append(v)
@@ -339,7 +314,6 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, stochastic: b
         key = f"model_at_step_{step:06d}"
         json_log[key] = {
             "success_rate": success_rate,
-            "is_pac": is_pac,
             "eval_time_sec": eval_time,
         }
         step_results["steps"].append(step)
