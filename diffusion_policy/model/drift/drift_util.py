@@ -3,16 +3,9 @@ import torch
 import torch.nn.functional as F
 
 
-def _cdist(x, y, eps=1e-8):
-    """Pairwise L2 distance: [B, N, D] x [B, M, D] -> [B, N, M].
-
-    Exact port of official JAX cdist (dot-product formula + eps clamp).
-    """
-    xydot = torch.einsum("bnd,bmd->bnm", x, y)
-    xnorms = torch.einsum("bnd,bnd->bn", x, x)
-    ynorms = torch.einsum("bmd,bmd->bm", y, y)
-    sq_dist = xnorms[:, :, None] + ynorms[:, None, :] - 2 * xydot
-    return torch.sqrt(torch.clamp(sq_dist, min=eps))
+def _cdist(x, y):
+    """Pairwise L2 distance: [B, N, D] x [B, M, D] -> [B, N, M]."""
+    return torch.cdist(x, y)
 
 
 def drift_loss(gen, fixed_pos, fixed_neg=None, weight_gen=None, weight_pos=None,

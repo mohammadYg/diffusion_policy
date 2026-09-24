@@ -95,28 +95,29 @@ class DriftUnetLowdimPolicy(BaseLowdimPolicy):
 
         if use_per_timestep:
             T_horizon = nactions.shape[1]
-            total_loss = 0
-            # Collect every timestep's value per metric key instead of only
-            # accumulating their mean, so we can also see how much a metric
-            # varies ACROSS the horizon (e.g. whether error concentrates at a
-            # few late/contact-critical timesteps rather than being uniform) -
-            # that resolution was previously discarded by averaging in-place.
-            per_t_values = {}
-            for t in range(T_horizon):
-                gen_t = pred_actions[:, :, t, :]           # [B, G, D]
-                pos_t = nactions[:, t, :].unsqueeze(1)     # [B, 1, D]
-                loss_t, info_t = drift_loss(gen_t, pos_t, R_list=R_list)
-                total_loss = total_loss + loss_t.mean()
-                for k, v in info_t.items():
-                    per_t_values.setdefault(k, []).append(v.item())
-            loss = total_loss / T_horizon
+            batched_drift_loss = torch.vmap(
+                lambda gen_t, pos_t: drift_loss(gen_t, pos_t, R_list=R_list),
+                in_dims=(2, 1), out_dims=0,
+            )
+            loss_per_t, info_per_t = batched_drift_loss(pred_actions, nactions.unsqueeze(2))
+            loss = loss_per_t.mean()
+
+            keys_order = list(info_per_t.keys())
+            stacked_stats = []
+            for k in keys_order:
+                v = info_per_t[k]
+                std_v = v.std() if T_horizon > 1 else torch.zeros((), device=v.device, dtype=v.dtype)
+                stacked_stats.extend([v.mean(), v.min(), v.max(), std_v])
+
             all_metrics = {}
-            for k, vals in per_t_values.items():
-                vals_t = torch.tensor(vals)
-                all_metrics[k] = vals_t.mean().item()
-                all_metrics[f"{k}_min_t"] = vals_t.min().item()
-                all_metrics[f"{k}_max_t"] = vals_t.max().item()
-                all_metrics[f"{k}_std_t"] = vals_t.std().item() if len(vals) > 1 else 0.0
+            if stacked_stats:
+                flat = torch.stack(stacked_stats).tolist()
+                for i, k in enumerate(keys_order):
+                    m, mn, mx, sd = flat[4 * i:4 * i + 4]
+                    all_metrics[k] = m
+                    all_metrics[f"{k}_min_t"] = mn
+                    all_metrics[f"{k}_max_t"] = mx
+                    all_metrics[f"{k}_std_t"] = sd
         else:
             gen = pred_actions.reshape(batch_size, G, -1)          # [B, G, T*D]
             pos = nactions.reshape(batch_size, 1, -1)              # [B, 1, T*D] //pne demonstrated action trajectory per observation
