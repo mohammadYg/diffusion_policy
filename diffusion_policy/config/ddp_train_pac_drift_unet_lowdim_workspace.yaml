@@ -2,7 +2,7 @@ defaults:
   - _self_
   - task: pusht_lowdim
 
-name: train_pac_flow_unet_lowdim
+name: ddp_train_pac_drift_unet_lowdim
 _target_: diffusion_policy.workspace.ddp_train_pac_drift_unet_lowdim_workspace.TrainPacDriftUnetLowdimWorkspace
 
 obs_dim: ${task.obs_dim}
@@ -107,6 +107,12 @@ training:
   lr_warmup_steps: 500
   num_updates: 5e5
   use_ema: True
+  # DDP scaling: batch_size/num_updates/lr_warmup_steps/checkpoint_every above are
+  # all single-GPU-equivalent values; under world_size>1 they are auto-scaled (see
+  # the DDP scaling comment in ddp_train_pac_drift_unet_lowdim_workspace.py's
+  # run()). optimizer.lr is scaled by world_size**ddp_lr_scale_power (1.0 = linear
+  # scaling rule; try 0.5 for sqrt scaling if linear proves unstable).
+  ddp_lr_scale_power: 1.0
   # training loop control
   # in epochs
   rollout_every: 1e3

@@ -7,6 +7,7 @@ Usage:
 
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -18,6 +19,11 @@ import numpy as np
 import torch
 from mujoco_py.builder import MujocoException
 from omegaconf import OmegaConf
+# Must be registered before any cfg saved by a training workspace (all of which
+# use "${eval: ...}" interpolations, e.g. dataset pad_before/pad_after) is
+# resolved - hydra.utils.instantiate()/OmegaConf.resolve() need this custom
+# resolver, and nothing else in this script's import chain registers it.
+OmegaConf.register_new_resolver("eval", eval, replace=True)
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -241,6 +247,7 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
     }
     sum_success_rates = 0.0
     num_evaluated = 0
+    eval_times: List[float] = []
 
     loss_val = []
     nll_val = []
@@ -271,7 +278,9 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
         try:
             # Run environment evaluation
+            eval_start = time.perf_counter()
             _, success_rate = run_env_runner(env_runner, policy, cfg)
+            eval_time = time.perf_counter() - eval_start
         except MujocoException as e:
             logger.warning(
                 "MuJoCo instability (NaN/Inf) evaluating checkpoint %s (step %d): %s. "
@@ -324,6 +333,7 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
         key = f"model_at_step_{step:06d}"
         json_log[key] = {
             "success_rate": success_rate,
+            "eval_time_sec": eval_time,
             #"test": {"loss_val": loss_val, "nll": nll_val},
         }
         step_results["steps"].append(step)
@@ -333,6 +343,7 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
         sum_success_rates += success_rate
         num_evaluated += 1
+        eval_times.append(eval_time)
         last_success_rate = success_rate
         last_success_step = step
 
@@ -350,6 +361,9 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
         json_log["mean_scores"] = step_results["success_rates"]
         json_log["num_steps"] = step_results["steps"]
         json_log[f"mean_success_rate_last_{num_evaluated}_checkpoints"] = sum_success_rates / num_evaluated
+        if eval_times:
+            json_log["eval_times_sec"] = eval_times
+            json_log[f"mean_eval_time_sec_last_{len(eval_times)}_checkpoints"] = float(np.mean(eval_times))
     else:
         logger.warning("No valid checkpoints found.")
 

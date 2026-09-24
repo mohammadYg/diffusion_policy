@@ -11,11 +11,9 @@ import os
 import copy
 import random
 import pathlib
-import dill
 from contextlib import nullcontext
 
 import hydra
-from hydra.utils import get_class, instantiate
 import numpy as np
 import torch
 import torch.nn as nn
@@ -30,7 +28,7 @@ from diffusers.training_utils import EMAModel
 
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from diffusion_policy.policy.pac_drift_unet_lowdim_policy import PacDriftUnetLowdimPolicy
+from diffusion_policy.policy.drift_unet_lowdim_policy import DriftUnetLowdimPolicy
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.common.checkpoint_util import LastNCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
@@ -39,37 +37,28 @@ from diffusion_policy.model.common.lr_scheduler import get_scheduler
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
-class PacLossWrapper(nn.Module):
+class DriftLossWrapper(nn.Module):
     """
-    Standard PyTorch Module wrapper routing forward() to model.compute_bound() 
-    or model.compute_loss(). Ensures DDP autograd hooks and gradient synchronization 
-    buckets execute properly.
+    Standard PyTorch Module wrapper routing forward() to model.compute_loss().
+    Ensures DDP autograd hooks and gradient synchronization buckets execute
+    properly (mirrors PacLossWrapper in ddp_train_pac_drift_unet_lowdim_workspace.py).
+
+    DDP is still constructed with find_unused_parameters=True below, even though
+    every one of self.model's parameters is genuinely exercised in every forward
+    call (no prior/posterior routing like the PAC variant): empirically, without
+    it, DDP raises "Expected to have finished reduction in the prior iteration
+    before starting a new one" on this ConditionalUnet1D (down/mid/up modules
+    iterated via nn.ModuleList in a Python loop) - DDP's default (fast) usage
+    detection relies on autograd-graph reachability analysis at trace time and
+    can apparently mis-detect reachability for this architecture shape even when
+    everything is in fact used, rather than there being an actual dead branch.
     """
-    def __init__(self, model: nn.Module, cfg: OmegaConf, n_bound: int):
+    def __init__(self, model: nn.Module):
         super().__init__()
         self.model = model
-        self.cfg = cfg
-        self.n_bound = n_bound
 
     def forward(self, batch):
-        if self.cfg.training.kl_penalty > 0.0:
-            raw_loss, emp_risk_train, kl_train, metrics, _loss_emp_bounded = self.model.compute_bound(
-                batch,
-                n_bound=self.n_bound,
-                objective=self.cfg.training.pac_objective,
-                delta=self.cfg.training.delta,
-                kl_penalty=self.cfg.training.kl_penalty,
-                stochastic=self.cfg.training.stochastic,
-                bounded=self.cfg.training.bounded,
-                bound_transform=self.cfg.training.bound_transform,
-                loss_scale=self.cfg.training.loss_scale,
-            )
-            return raw_loss, emp_risk_train.detach(), kl_train.detach(), metrics
-        else:
-            raw_loss, metrics = self.model.compute_loss(batch, stochastic=self.cfg.training.stochastic)
-            emp_risk_train = raw_loss.detach()
-            kl_train = torch.zeros(1, device=raw_loss.device, dtype=raw_loss.dtype)
-            return raw_loss, emp_risk_train, kl_train, metrics
+        return self.model.compute_loss(batch)
 
 
 def setup_ddp():
@@ -112,9 +101,9 @@ def reduce_scalars(scalars: dict, world_size: int, device: torch.device) -> dict
     """Averages a dict of scalar tensors/floats across all workers in deterministic key
     order, using a single collective call (all values stacked into one tensor) instead
     of one all_reduce per entry - this keeps the per-step communication cost constant
-    regardless of how many scalars are logged (loss/emp_risk/kl plus whatever metrics
-    the policy returns), which matters once world_size grows or ranks span multiple
-    nodes."""
+    regardless of how many scalars are logged (train_loss plus whatever drift_loss
+    diagnostics the policy returns), which matters once world_size grows or ranks span
+    multiple nodes."""
     if not scalars:
         return {}
 
@@ -136,7 +125,7 @@ def reduce_scalars(scalars: dict, world_size: int, device: torch.device) -> dict
     return dict(zip(keys, values.tolist()))
 
 
-class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
+class TrainDriftUnetLowdimWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
@@ -149,36 +138,12 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
         random.seed(seed)
 
         # Underlying policy model
-        self.model: PacDriftUnetLowdimPolicy = hydra.utils.instantiate(cfg.policy)
+        self.model: DriftUnetLowdimPolicy = hydra.utils.instantiate(cfg.policy)
 
         # Underlying EMA policy model
-        self.ema_model: PacDriftUnetLowdimPolicy = None
+        self.ema_model: DriftUnetLowdimPolicy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
-
-        # Initialize data-dependent prior deterministically on all ranks
-        if cfg.training.data_dependent_prior:
-            checkpoint = cfg.training.init_model_path
-            with open(checkpoint, 'rb') as f:
-                # map_location='cpu': this runs in __init__, before setup_ddp()/
-                # torch.cuda.set_device() has assigned this process its GPU. An
-                # unmapped load would deserialize CUDA tensors onto whatever the
-                # default device is (typically GPU 0) for every rank, causing
-                # redundant allocations / OOM risk on GPU 0 as world_size grows.
-                init_payload = torch.load(f, pickle_module=dill, map_location='cpu')
-            init_cfg = init_payload['cfg']
-            cls = hydra.utils.get_class(init_cfg._target_)
-            init_workspace = cls(init_cfg, output_dir=output_dir)
-            init_workspace.load_payload(init_payload, exclude_keys=['optimizer'], include_keys=None)
-
-            init_model = init_workspace.model.model
-            if cfg.training.use_ema:
-                init_ema_model = init_workspace.ema_model.model
-
-            self.model.prior_initialization(init_model, cfg.policy.model.rho_post)
-            if cfg.training.use_ema:
-                self.ema_model.prior_initialization(init_ema_model, cfg.policy.model.rho_post)
-            del init_workspace
 
         # Optimizer references unwrapped model parameters directly
         self.optimizer = hydra.utils.instantiate(
@@ -197,23 +162,24 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
             # `dataloader.batch_size`, `training.num_updates`, `training.lr_warmup_steps`,
             # `training.checkpoint_every`, and `optimizer.lr` in the config are all
             # specified as their SINGLE-GPU-equivalent values. Under DDP:
-            #   - per-GPU batch size is kept EQUAL to the configured value (unlike an
-            #     earlier version of this script, which divided it by world_size to
-            #     hold the *global* batch fixed). At this workload's batch size, per-step
-            #     wall-clock time is already overhead- rather than compute-bound (see the
-            #     Diffusion-vs-Flow training-time analysis elsewhere in this project), so
-            #     shrinking the per-GPU batch gives diminishing/near-zero speedup while
-            #     still paying gradient all-reduce cost. Keeping per-GPU batch size fixed
-            #     instead reproduces single-GPU per-step wall-clock time exactly, and the
-            #     speedup comes entirely from needing fewer total steps (below).
+            #   - per-GPU batch size is kept EQUAL to the configured value. At this
+            #     workload's batch size, per-step wall-clock time is already overhead-
+            #     rather than compute-bound (see the Diffusion-vs-Flow training-time
+            #     analysis elsewhere in this project), so shrinking the per-GPU batch
+            #     gives diminishing/near-zero speedup while still paying gradient
+            #     all-reduce cost. Keeping per-GPU batch size fixed instead reproduces
+            #     single-GPU per-step wall-clock time exactly, and the speedup comes
+            #     entirely from needing fewer total steps (below).
             #   - num_updates is divided by world_size, so total data throughput
             #     (num_updates * batch_size * world_size) matches the single-GPU
             #     baseline - this is what actually gives the near-linear wall-clock
             #     speedup.
-            #   - lr_warmup_steps and checkpoint_every are divided by world_size too, so
-            #     warmup stays the same FRACTION of (now-shorter) training and the
-            #     checkpoint_last_N retention window covers the same fraction of
-            #     training, rather than a shrunk one.
+            #   - lr_warmup_steps and checkpoint_every are divided by world_size too,
+            #     so warmup and checkpoint-retention coverage both stay the same
+            #     FRACTION of (now-shorter) training, rather than a shrunk one.
+            # No validation/evaluation is performed during DDP training at all (see
+            # ddp_train_pac_drift_unet_lowdim_workspace.py for the same design) -
+            # checkpoints are evaluated after training completes instead.
             #   - optimizer.lr is multiplied by world_size**ddp_lr_scale_power (linear
             #     scaling rule at the default power=1.0) to compensate for the larger
             #     effective global batch (batch_size * world_size) and preserve
@@ -273,12 +239,12 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
             # Model weights stay synchronized regardless (identical seed at
             # construction, plus checkpoint loading above / DDP's parameter broadcast
             # at wrap time below), so offsetting the seed here only affects stochastic
-            # sampling during training (Bayesian posterior weight sampling,
-            # reparameterization noise in compute_loss/compute_bound). Without this,
-            # every rank starts from the same RNG state and consumes it in lockstep
-            # (equal per-GPU batch sizes), so all ranks draw the exact same "random"
-            # samples each step - just applied to different data - which quietly
-            # throws away the Monte-Carlo diversity extra GPUs should buy you.
+            # sampling during training (the G generated-candidate noise draws in
+            # DriftUnetLowdimPolicy.compute_loss). Without this, every rank starts
+            # from the same RNG state and consumes it in lockstep, so all ranks draw
+            # the exact same "random" candidates each step - just applied to
+            # different data - which quietly throws away the Monte-Carlo diversity
+            # extra GPUs should buy you.
             rank_seed = cfg.training.seed + rank
             torch.manual_seed(rank_seed)
             torch.cuda.manual_seed_all(rank_seed)
@@ -327,14 +293,14 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                     **cfg.dataloader
                 )
 
-            # Normalizer configuration (deterministic across ranks)
-            normalizer = dataset.get_normalizer()
             if rank == 0:
                 print("Training dataset size: ", len(dataset))
                 if is_distributed:
                     print(f"Per-GPU batch size: {dataloader_cfg['batch_size']} "
                           f"(effective global batch size: {dataloader_cfg['batch_size'] * world_size})")
 
+            # Normalizer configuration (deterministic across ranks)
+            normalizer = dataset.get_normalizer()
             self.model.set_normalizer(normalizer)
             if cfg.training.use_ema and self.ema_model is not None:
                 self.ema_model.set_normalizer(normalizer)
@@ -415,14 +381,16 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                 self.ema_model.to(device)
             optimizer_to(self.optimizer, device)
 
-            # Wrap in LossWrapper (with find_unused_parameters=True to support PAC prior/posterior parameter routing)
-            loss_module = PacLossWrapper(self.model, cfg, n_bound=len(dataset))
+            # Wrap in LossWrapper. find_unused_parameters=True is required here in
+            # practice (see the DriftLossWrapper docstring) even though every
+            # parameter is genuinely used every forward call.
+            loss_module = DriftLossWrapper(self.model)
             if is_distributed:
                 ddp_loss_model = DDP(
                     loss_module,
                     device_ids=[local_rank] if device.type == "cuda" else None,
                     output_device=local_rank if device.type == "cuda" else None,
-                    find_unused_parameters=True
+                    find_unused_parameters=True,
                 )
             else:
                 ddp_loss_model = loss_module
@@ -447,11 +415,20 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                         for batch_idx, batch in enumerate(tepoch):
                             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
-                            # Forward through DDP wrapper invokes PAC loss / bound computation
-                            raw_loss, emp_risk_train, kl_train, metrics = ddp_loss_model(batch)
+                            # Forward through DDP wrapper invokes drift_loss computation
+                            raw_loss, metrics = ddp_loss_model(batch)
 
                             # Backward on local loss initiates gradient all-reduce across all GPUs
                             raw_loss.backward()
+
+                            # Diagnostic only (see train_drift_unet_lowdim_workspace.py for
+                            # the max_norm=inf rationale: no clipping is actually applied
+                            # yet). Gradients are already all-reduced/averaged by DDP's
+                            # backward hooks by the time backward() returns, so this is
+                            # naturally identical across ranks without needing
+                            # reduce_scalars.
+                            grad_norm = torch.nn.utils.clip_grad_norm_(
+                                self.model.parameters(), max_norm=float('inf'))
 
                             self.optimizer.step()
                             self.optimizer.zero_grad()
@@ -464,26 +441,28 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                             # Increment global step before checkpointing
                             self.global_step += 1
                             current_step = self.global_step
+                            current_lr = lr_scheduler.get_last_lr()[0]
 
-                            # Reduce loss, empirical risk, KL, and metrics across all ranks
-                            # for logging in a single collective call (see reduce_scalars)
-                            scalars_to_reduce = {
-                                'train_loss (pac_bayes bound)': raw_loss,
-                                'emp_risk_train': emp_risk_train,
-                                'kl_train': kl_train,
-                                **metrics,
-                            }
-                            reduced_scalars = reduce_scalars(scalars_to_reduce, world_size, device)
+                            # raw_loss/metrics are per-rank local-batch quantities (unlike
+                            # grad_norm/param_norm, which DDP already makes rank-invariant)
+                            # - reduce them across ranks for a meaningful global signal, in
+                            # a single collective call (see reduce_scalars).
+                            reduced_scalars = reduce_scalars(
+                                {'train_loss': raw_loss, **metrics}, world_size, device)
 
                             step_log = {
                                 **reduced_scalars,
+                                'grad_norm': grad_norm.item(),
+                                # Effective parameter-update magnitude this step (grad_norm
+                                # alone doesn't say how far the parameters actually moved).
+                                'grad_step_size': grad_norm.item() * current_lr,
                                 'global_step': current_step,
-                                'lr': lr_scheduler.get_last_lr()[0],
+                                'lr': current_lr,
                                 'epoch': self.epoch,
                             }
 
                             if rank == 0:
-                                tepoch.set_postfix(loss=reduced_scalars['train_loss (pac_bayes bound)'], refresh=False)
+                                tepoch.set_postfix(loss=reduced_scalars['train_loss'], refresh=False)
 
                             # Checkpointing (Last-N)
                             if (current_step % checkpoint_every) == 0:
@@ -529,7 +508,7 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
 )
 def main(cfg):
     output_dir = os.environ.get("OUTPUT_DIR", None)
-    workspace = TrainPacDriftUnetLowdimWorkspace(cfg, output_dir=output_dir)
+    workspace = TrainDriftUnetLowdimWorkspace(cfg, output_dir=output_dir)
     workspace.run()
 
 
