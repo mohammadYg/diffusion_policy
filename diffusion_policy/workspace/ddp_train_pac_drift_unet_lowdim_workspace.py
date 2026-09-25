@@ -23,7 +23,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 import wandb
 import tqdm
 from diffusers.training_utils import EMAModel
@@ -45,7 +45,7 @@ class PacLossWrapper(nn.Module):
     or model.compute_loss(). Ensures DDP autograd hooks and gradient synchronization 
     buckets execute properly.
     """
-    def __init__(self, model: nn.Module, cfg: OmegaConf, n_bound: int):
+    def __init__(self, model: nn.Module, cfg: DictConfig, n_bound: int):
         super().__init__()
         self.model = model
         self.cfg = cfg
@@ -139,7 +139,7 @@ def reduce_scalars(scalars: dict, world_size: int, device: torch.device) -> dict
 class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
-    def __init__(self, cfg: OmegaConf, output_dir=None):
+    def __init__(self, cfg: DictConfig, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
 
         # Global base seed for deterministic initial model parameters across ranks

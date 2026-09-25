@@ -10,7 +10,7 @@ if __name__ == "__main__":
 import os
 import hydra
 import torch
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 import pathlib
 from torch.utils.data import DataLoader
 import copy
@@ -40,7 +40,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
-    def __init__(self, cfg: OmegaConf, prior_model_path= None, output_dir=None):
+    def __init__(self, cfg: DictConfig, prior_model_path= None, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
 
         # set seed

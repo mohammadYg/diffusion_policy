@@ -139,7 +139,7 @@ class DiffusionModel_IT(nn.Module):
         results = {}  # Return multiple forms of results in a dictionary
         clip = self.clip
         loc, scale = self.loc_scale
-        logsnr, w = logistic_integrate(npoints, loc=loc, scale=scale, clip=clip, device=self.device, deterministic=True)
+        logsnr, w = self.logistic_integrate(npoints, loc=loc, scale=scale, clip=clip, device=self.device, deterministic=True)
         left_logsnr, right_logsnr = loc - clip * scale, loc + clip * scale
 
         # sort logsnrs along with weights

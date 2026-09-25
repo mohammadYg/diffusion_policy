@@ -56,12 +56,9 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             fps=10,
             crf=22,
             abs_action=False,
-            n_envs=None,
+            n_envs=1,
         ):
         super().__init__(output_dir)
-
-        if n_envs is None:
-            n_envs = n_test
 
         # handle latency step
         # to mimic latency, we request n_latency_steps additional steps 

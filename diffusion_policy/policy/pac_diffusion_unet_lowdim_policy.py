@@ -620,7 +620,7 @@ class PacDiffusionUnetLowdimPolicy(BaseLowdimPacPolicy):
         model.set_normalizer(normalizer)
 
         # configure number of epochs based on the number of updates and dataloader size
-        num_updates = int(cfg.prior_training.num_updates) // len(train_dataloader)
+        num_epochs = int(cfg.prior_training.num_updates) // len(train_dataloader)
 
         # configure lr scheduler
         lr_scheduler = get_scheduler(
