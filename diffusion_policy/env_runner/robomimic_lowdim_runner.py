@@ -1,6 +1,7 @@
 import os
 import wandb
 import gym
+from gym import logger
 import numpy as np
 import torch
 import collections
@@ -274,7 +275,14 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             env_prefixs.append('test/')
             env_init_fn_dills.append(dill.dumps(init_fn))
         
-        env = AsyncVectorEnv(env_fns)
+        # tolerate_step_errors=True: _run_streaming() checks
+        # infos[i]['crashed'] and excludes that slot's episode itself,
+        # instead of the whole batch aborting on one worker's MuJoCo
+        # NaN/Inf - see AsyncVectorEnv.__init__'s docstring for that flag.
+        # (_run_chunked, used only by stateful policies which this project
+        # doesn't evaluate, does NOT check infos[i]['crashed'] - if it ever
+        # is used, this flag would need _run_chunked fixed to match first.)
+        env = AsyncVectorEnv(env_fns, tolerate_step_errors=True)
         # env = SyncVectorEnv(env_fns)
 
         self.env_meta = env_meta
@@ -354,13 +362,26 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         if self.abs_action:
             env_action = self.undo_transform_action(action)
 
+        # info[i]['crashed'] is set by AsyncVectorEnv.step_wait() for any
+        # slot whose worker died this step (e.g. MuJoCo NaN/Inf) - see
+        # _run_streaming(), which excludes just that slot's in-progress
+        # episode instead of aborting the whole rollout.
         obs, reward, done, info = self.env.step(env_action)
-        return obs, reward, done, action
+        return obs, reward, done, action, info
 
     def _run_chunked(self, policy, stochastic):
         """Original synchronized rollout: n_inits processed in fixed-size
         chunks of n_envs, each chunk running until every slot in it is done.
         Required for stateful policies - see run()'s docstring.
+
+        NOTE: unlike _run_streaming(), this path does not gracefully exclude
+        a single crashed env from the batch (its env.call(...)/get_attr calls
+        below still address every slot unconditionally, which raises if any
+        slot's worker has died) - a MuJoCo NaN/Inf here still aborts the
+        whole chunk. None of this project's policies are stateful
+        (is_stateful is only set on RNN-based baselines this report doesn't
+        evaluate), so this path is not exercised by any of the report's
+        results; fixing it the same way as _run_streaming is future work.
         """
         env = self.env
         n_envs = len(self.env_fns)
@@ -398,7 +419,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
 
             done = False
             while not done:
-                obs, reward, done_arr, action = self._predict_and_step(
+                obs, reward, done_arr, action, _info = self._predict_and_step(
                     policy, obs, past_action, stochastic)
                 done = np.all(done_arr)
                 past_action = action
@@ -415,15 +436,29 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         """Continuous rollout for stateless policies: every vector slot is
         kept busy on a new init the moment its previous one finishes,
         instead of only refilling at fixed chunk boundaries.
+
+        A slot whose worker crashes mid-episode (info[i]['crashed'], set by
+        AsyncVectorEnv.step_wait() on a MuJoCo NaN/Inf or similar) has its
+        in-progress episode excluded entirely - not counted as success or
+        failure - and is permanently retired for the rest of this call (its
+        subprocess is dead; see step_wait()'s docstring). The remaining
+        active slots keep streaming through whatever inits haven't been
+        assigned yet, so a crash costs one slot's worth of parallelism, not
+        the whole rollout. `all_rewards[g]` stays `None` for a lost init's
+        global index; `_aggregate_log` skips those, so the reported success
+        rate is the mean over the survivors (1000-N successful envs, if N
+        crashed), not a whole-checkpoint failure.
         """
         env = self.env
         n_envs = len(self.env_fns)
         n_inits = len(self.env_init_fn_dills)
 
         all_rewards = [None] * n_inits
+        n_lost = 0
 
         # slot_init[i] = global init index currently assigned to vector-slot
-        # i, or None once that slot has no more work left to do.
+        # i, or None once that slot has no more work left to do (either it
+        # ran out of pending inits, or its worker crashed).
         n_start = min(n_envs, n_inits)
         slot_init = list(range(n_start)) + [None] * (n_envs - n_start)
         active = [g is not None for g in slot_init]
@@ -445,8 +480,8 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             leave=False, mininterval=self.tqdm_interval_sec)
 
         harvested = 0
-        while harvested < n_inits:
-            obs, reward, done_arr, action = self._predict_and_step(
+        while harvested + n_lost < n_inits:
+            obs, reward, done_arr, action, info = self._predict_and_step(
                 policy, obs, past_action, stochastic)
             past_action = action
 
@@ -455,6 +490,22 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             for i in range(n_envs):
                 if active[i] and done_arr[i]:
                     g = slot_init[i]
+
+                    if info[i].get('crashed'):
+                        # Worker is dead (AsyncVectorEnv already closed its
+                        # pipe) - don't call_at/render/get_attr on it, don't
+                        # count this init, and never reinit this slot again.
+                        logger.warn(
+                            f"Eval {env_name}Lowdim: excluding init {g} "
+                            f"(vector slot {i}) - worker crashed: "
+                            f"{info[i].get('error')}"
+                        )
+                        n_lost += 1
+                        pbar.update(1)
+                        slot_init[i] = None
+                        active[i] = False
+                        continue
+
                     # stops/flushes that slot's video recorder (if enabled)
                     # and reads back its total episode reward.
                     env.call_at([i], 'render')
@@ -483,13 +534,36 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
                     # freshly reset one's near-term obs['past_action'].
                     if past_action is not None:
                         past_action[i] = 0
+
+            if not any(active) and next_init_idx < n_inits:
+                # Every slot is dead or spent, but inits remain that were
+                # never even assigned to a slot - with no one left to pick
+                # them up, count them as lost too instead of looping forever.
+                n_unstarted = n_inits - next_init_idx
+                logger.warn(
+                    f"Eval {env_name}Lowdim: all vector slots crashed or "
+                    f"finished with {n_unstarted} init(s) never started; "
+                    "counting them as lost too rather than hanging."
+                )
+                n_lost += n_unstarted
+                pbar.update(n_unstarted)
+                next_init_idx = n_inits
         pbar.close()
+        if n_lost:
+            logger.warn(
+                f"Eval {env_name}Lowdim: {n_lost}/{n_inits} episode(s) "
+                "excluded due to worker crashes; success rate below is "
+                f"averaged over the remaining {n_inits - n_lost}."
+            )
+        self._last_n_crashed = n_lost
         return all_rewards
 
     def _aggregate_log(self, policy, stochastic, all_rewards):
         max_rewards = collections.defaultdict(list)
         log_data = dict()
+        log_data['n_crashed_episodes'] = getattr(self, '_last_n_crashed', 0)
         n_inits = len(self.env_init_fn_dills)
+        log_data['n_total_episodes'] = n_inits
         # results reported in the paper are generated using the commented out line below
         # which will only report and average metrics from first n_envs initial condition and seeds
         # fortunately this won't invalidate our conclusion since
@@ -499,6 +573,11 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         # for i in range(len(self.env_fns)):
         # and comment out this line
         for i in range(n_inits):
+            if all_rewards[i] is None:
+                # Excluded by _run_streaming due to a worker crash - not a
+                # success and not a failure, just not counted at all, so
+                # the mean below is over the surviving episodes only.
+                continue
             prefix = self.env_prefixs[i]
             max_reward = np.max(all_rewards[i])
             max_rewards[prefix].append(max_reward)

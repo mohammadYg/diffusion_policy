@@ -88,11 +88,32 @@ class AsyncVectorEnv(VectorEnv):
         context=None,
         daemon=True,
         worker=None,
+        tolerate_step_errors=False,
     ):
+        """
+        tolerate_step_errors : bool (default: `False`)
+            If `False` (the default, and the only behavior available before
+            this flag existed), a worker raising during `step()` (e.g. a
+            MuJoCo NaN/Inf instability) still raises back to the caller and
+            discards the whole batch's results for that step, exactly like
+            upstream gym.vector - the safe default for any caller that
+            doesn't inspect `infos[i]['crashed']`.
+            If `True`, `step_wait()` instead isolates the crashed worker
+            (closes its pipe, retires it permanently) and returns real
+            results for every other worker plus a `done=True,
+            infos[i]={'crashed': True, 'error': ...}` placeholder for the
+            dead slot - see `step_wait()`'s docstring. Only pass `True` if
+            the caller actually checks `infos[i]['crashed']` and excludes
+            that slot's in-progress episode itself (e.g.
+            `RobomimicLowdimRunner._run_streaming`); otherwise a crash will
+            be silently miscounted as a normal episode that scored 0
+            instead of being excluded or raised.
+        """
         ctx = mp.get_context(context)
         self.env_fns = env_fns
         self.shared_memory = shared_memory
         self.copy = copy
+        self.tolerate_step_errors = tolerate_step_errors
 
         # Added dummy_env_fn to fix OpenGL error in Mujoco
         # disable any OpenGL rendering in dummy_env_fn, since it
@@ -165,6 +186,13 @@ class AsyncVectorEnv(VectorEnv):
 
         self._state = AsyncState.DEFAULT
         self._check_observation_spaces()
+
+        # Indices whose worker has permanently died (e.g. a MuJoCo NaN/Inf
+        # crash during step_wait - see step_wait()/step_async() below). Once
+        # True, that pipe is closed and set to None in self.parent_pipes;
+        # callers must never target a dead index with step/reset/call again.
+        self._failed = [False] * self.num_envs
+        self._last_error = [None] * self.num_envs
 
     def seed(self, seeds=None):
         self._assert_is_running()
@@ -251,8 +279,11 @@ class AsyncVectorEnv(VectorEnv):
                 self._state.value,
             )
 
+        # Dead pipes (self._failed[i]) never receive a command again - the
+        # worker process behind them has already exited (see step_wait()).
         for pipe, action in zip(self.parent_pipes, actions):
-            pipe.send(("step", action))
+            if pipe is not None:
+                pipe.send(("step", action))
         self._state = AsyncState.WAITING_STEP
 
     def step_wait(self, timeout=None):
@@ -265,13 +296,33 @@ class AsyncVectorEnv(VectorEnv):
         Returns
         -------
         observations : sample from `observation_space`
-            A batch of observations from the vectorized environment.
+            A batch of observations from the vectorized environment. A
+            slot whose worker has died (this call or a previous one) holds
+            stale data from its last successful step - callers must ignore
+            it (see `infos[i]['crashed']`).
         rewards : `np.ndarray` instance (dtype `np.float_`)
-            A vector of rewards from the vectorized environment.
+            A vector of rewards from the vectorized environment. `0.0` for
+            a crashed slot.
         dones : `np.ndarray` instance (dtype `np.bool_`)
             A vector whose entries indicate whether the episode has ended.
+            Always `True` for a crashed slot, so callers that harvest on
+            `done` still see it - they must check `infos[i]['crashed']`
+            to tell a real episode end from a lost one.
         infos : list of dict
-            A list of auxiliary diagnostic information.
+            A list of auxiliary diagnostic information. A crashed slot's
+            entry is `{'crashed': True, 'error': <str>}` instead of the
+            env's own info dict.
+
+        Unlike the upstream gym.vector implementation, a single worker
+        crashing (e.g. a MuJoCo NaN/Inf instability) does NOT raise and does
+        NOT discard the other workers' already-received results for this
+        step: that worker's pipe is closed and permanently retired
+        (`self._failed[i] = True`), its slot reports `done=True` with
+        `infos[i]['crashed']=True` from here on, and every other slot's
+        real result for this step is still returned normally. Callers are
+        responsible for excluding crashed slots from whatever they're
+        aggregating (see `RobomimicLowdimRunner._run_streaming`) rather
+        than treating the whole batch as failed.
         """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_STEP:
@@ -287,10 +338,70 @@ class AsyncVectorEnv(VectorEnv):
                 "{0} second{1}.".format(timeout, "s" if timeout > 1 else "")
             )
 
-        results, successes = zip(*[pipe.recv() for pipe in self.parent_pipes])
-        self._raise_if_errors(successes)
+        if not self.tolerate_step_errors:
+            # Default, backward-compatible path: identical to upstream
+            # gym.vector - any single worker's error raises and discards
+            # the whole batch's results for this step. Safe for any caller
+            # that doesn't inspect infos[i]['crashed'].
+            results, successes = zip(*[pipe.recv() for pipe in self.parent_pipes])
+            self._raise_if_errors(successes)
+            self._state = AsyncState.DEFAULT
+            observations_list, rewards, dones, infos = zip(*results)
+
+            if not self.shared_memory:
+                self.observations = concatenate(
+                    observations_list, self.observations, self.single_observation_space
+                )
+
+            return (
+                deepcopy(self.observations) if self.copy else self.observations,
+                np.array(rewards),
+                np.array(dones, dtype=np.bool_),
+                infos,
+            )
+
+        raw = [
+            pipe.recv() if pipe is not None else (None, True)
+            for pipe in self.parent_pipes
+        ]
+        results, successes = zip(*raw)
         self._state = AsyncState.DEFAULT
-        observations_list, rewards, dones, infos = zip(*results)
+
+        newly_failed = [
+            i for i, (pipe, ok) in enumerate(zip(self.parent_pipes, successes))
+            if pipe is not None and not ok
+        ]
+        for i in newly_failed:
+            index, exctype, value = self.error_queue.get()
+            assert index == i
+            logger.warn(
+                "Worker-{0} crashed during step ({1}: {2}); excluding its "
+                "in-progress episode and retiring that slot for the rest "
+                "of this rollout.".format(i, exctype.__name__, value)
+            )
+            self.parent_pipes[i].close()
+            self.parent_pipes[i] = None
+            self._failed[i] = True
+            self._last_error[i] = "{0}: {1}".format(exctype.__name__, value)
+
+        placeholder_info = lambda i: {"crashed": True, "error": self._last_error[i]}
+        observations_list, rewards, dones, infos = [], [], [], []
+        for i, (pipe, result) in enumerate(zip(self.parent_pipes, results)):
+            if pipe is None:
+                # Either just failed above, or was already dead from an
+                # earlier step_wait() call - its shared-memory observation
+                # slot (if shared_memory=True) is simply stale and unused
+                # by callers that check infos[i]['crashed'] first.
+                observations_list.append(self.observations[i] if not self.shared_memory else None)
+                rewards.append(0.0)
+                dones.append(True)
+                infos.append(placeholder_info(i))
+            else:
+                obs_i, reward_i, done_i, info_i = result
+                observations_list.append(obs_i)
+                rewards.append(reward_i)
+                dones.append(done_i)
+                infos.append(info_i)
 
         if not self.shared_memory:
             self.observations = concatenate(
@@ -352,10 +463,12 @@ class AsyncVectorEnv(VectorEnv):
             return True
         end_time = time.perf_counter() + timeout
         delta = None
-        for pipe in self.parent_pipes:
-            delta = max(end_time - time.perf_counter(), 0)
+        for i, pipe in enumerate(self.parent_pipes):
             if pipe is None:
-                return False
+                # Permanently dead from an earlier crash (self._failed[i]) -
+                # nothing to wait on for this slot, not a reason to time out.
+                continue
+            delta = max(end_time - time.perf_counter(), 0)
             if pipe.closed or (not pipe.poll(delta)):
                 return False
         return True

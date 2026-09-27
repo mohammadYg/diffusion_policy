@@ -35,6 +35,15 @@ from diffusion_policy.workspace.base_workspace import BaseWorkspace
 logger = logging.getLogger("eval_ckpts_flow")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
+# A checkpoint whose rollout lost more than this fraction of its episodes to
+# a MuJoCo NaN/Inf crash (RobomimicLowdimRunner._run_streaming excludes them
+# rather than aborting - see async_vector_env.py's tolerate_step_errors) gets
+# flagged in json_log["partial_crash_checkpoints"], not just the per-checkpoint
+# "n_crashed_episodes" field, so a reader (or the report) doesn't have to
+# reconstruct which checkpoints' success rates rest on fewer than the nominal
+# n_test episodes by grepping the raw log.
+PARTIAL_CRASH_WARN_FRACTION = 0.01
+
 # -----------------------------------------------------------------------------
 # Helper functions
 # -----------------------------------------------------------------------------
@@ -267,6 +276,7 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
     loss_val = []
     nll_val = []
     failed_checkpoints: List[Dict] = []
+    partial_crash_checkpoints: List[Dict] = []
     last_success_rate: Optional[float] = None
     last_success_step: Optional[int] = None
 
@@ -294,7 +304,7 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
         try:
             # Run environment evaluation
             eval_start = time.perf_counter()
-            _, success_rate = run_env_runner(env_runner, policy, cfg)
+            runner_log, success_rate = run_env_runner(env_runner, policy, cfg)
             eval_time = time.perf_counter() - eval_start
         except MujocoException as e:
             logger.warning(
@@ -345,11 +355,35 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
         # Store results
         key = f"model_at_step_{step:06d}"
+        n_crashed = runner_log.get("n_crashed_episodes", 0)
+        n_total = runner_log.get("n_total_episodes", 0)
+        frac_crashed = (n_crashed / n_total) if n_total else 0.0
         json_log[key] = {
             "success_rate": success_rate,
             "eval_time_sec": eval_time,
+            "n_crashed_episodes": n_crashed,
+            "n_total_episodes": n_total,
             #"test": {"loss_val": loss_val, "nll": nll_val},
         }
+        if n_crashed:
+            logger.warning(
+                "Checkpoint %s (step %d): %d/%d episode(s) excluded from the "
+                "success rate due to a MuJoCo NaN/Inf crash mid-rollout "
+                "(the reported success rate is the mean over the surviving episodes).",
+                ckpt_path.name, step, n_crashed, n_total,
+            )
+        if frac_crashed > PARTIAL_CRASH_WARN_FRACTION:
+            logger.warning(
+                "Checkpoint %s (step %d): %.1f%% of episodes were excluded "
+                "(threshold %.0f%%) - treat this checkpoint's success rate "
+                "with more caution than usual.",
+                ckpt_path.name, step, 100 * frac_crashed, 100 * PARTIAL_CRASH_WARN_FRACTION,
+            )
+            partial_crash_checkpoints.append({
+                "step": step, "ckpt": ckpt_path.name,
+                "n_crashed_episodes": n_crashed, "n_total_episodes": n_total,
+                "frac_crashed": frac_crashed,
+            })
         step_results["steps"].append(step)
         step_results["success_rates"].append(success_rate)
         #step_results["validation_losses"].append(noise_loss)
@@ -386,6 +420,15 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
         logger.warning(
             "%d checkpoint(s) skipped due to MuJoCo instability: %s",
             len(failed_checkpoints), [f["ckpt"] for f in failed_checkpoints],
+        )
+
+    if partial_crash_checkpoints:
+        json_log["partial_crash_checkpoints"] = partial_crash_checkpoints
+        logger.warning(
+            "%d checkpoint(s) lost more than %.0f%% of episodes to MuJoCo "
+            "crashes (still evaluated, but treat with caution): %s",
+            len(partial_crash_checkpoints), 100 * PARTIAL_CRASH_WARN_FRACTION,
+            [c["ckpt"] for c in partial_crash_checkpoints],
         )
 
     save_json_log(out_path, json_log)
