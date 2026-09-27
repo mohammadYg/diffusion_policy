@@ -38,7 +38,7 @@ import hydra
 import numpy as np
 import torch
 from mujoco_py.builder import MujocoException
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 # Must be registered before any cfg saved by a training workspace (all of which
 # use "${eval: ...}" interpolations, e.g. dataset pad_before/pad_after) is
 # resolved - hydra.utils.instantiate()/OmegaConf.resolve() need this custom
@@ -87,7 +87,7 @@ def load_checkpoint_payload(ckpt_path: Path) -> Dict:
         return torch.load(f, pickle_module=dill)
 
 
-def instantiate_workspace(cfg: OmegaConf, output_dir: Path) -> BaseWorkspace:
+def instantiate_workspace(cfg: DictConfig, output_dir: Path) -> BaseWorkspace:
     """Create a workspace from Hydra config."""
     cls = hydra.utils.get_class(cfg._target_)
     return cls(cfg, output_dir=str(output_dir))

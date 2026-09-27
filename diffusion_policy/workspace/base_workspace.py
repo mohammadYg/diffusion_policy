@@ -4,7 +4,7 @@ import pathlib
 import hydra
 import copy
 from hydra.core.hydra_config import HydraConfig
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 import dill
 import torch
 import threading
@@ -16,7 +16,7 @@ class BaseWorkspace:
     include_keys = tuple()
     exclude_keys = tuple()
 
-    def __init__(self, cfg: OmegaConf, output_dir: Optional[str]=None):
+    def __init__(self, cfg: DictConfig, output_dir: Optional[str]=None):
         self.cfg = cfg
         self._output_dir = output_dir
         self._saving_thread = None
