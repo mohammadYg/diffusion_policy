@@ -462,6 +462,13 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
 
                         # build step-log (use the upcoming/global step index)
                         current_step = self.global_step + 1
+                        is_first_step = self.global_step == 0
+                        # Set before any checkpointing below runs, so a saved
+                        # payload's global_step (restored on resume) always
+                        # matches the step number already in its filename -
+                        # setting it after checkpointing left them off by one,
+                        # so resuming re-ran one already-checkpointed step.
+                        self.global_step = current_step
                         current_lr = lr_scheduler.get_last_lr()[0]
                         step_log = {
                             'train_loss (pac_bayes bound)': raw_loss_cpu,
@@ -511,7 +518,7 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                             # step_log.update(runner_log)
 
                         # validation: noise prediction loss
-                        if ((current_step % val_every) == 0 or self.global_step==0):
+                        if ((current_step % val_every) == 0 or is_first_step):
                             # Diagnostic only, piggybacked on the validation cadence (cheap,
                             # no need for its own schedule): total parameter norm, and the
                             # relative update size (grad_step_size / param_norm) - a more
@@ -623,7 +630,6 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                         # log & step
                         wandb_run.log(step_log, step=current_step)
                         json_logger.log(step_log)
-                        self.global_step = current_step
 
                         # optional early stopping per-batch limit
                         if (cfg.training.max_train_steps is not None) and batch_idx >= (cfg.training.max_train_steps - 1):
