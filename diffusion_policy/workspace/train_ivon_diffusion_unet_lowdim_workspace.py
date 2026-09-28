@@ -30,6 +30,8 @@ except ImportError as e:
         "than vendoring its source into this repo)."
     ) from e
 
+from mujoco_py.builder import MujocoException
+
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.policy.ivon_diffusion_unet_lowdim_policy import IvonDiffusionUnetLowdimPolicy
@@ -270,6 +272,17 @@ class TrainIvonDiffusionUnetLowdimWorkspace(BaseWorkspace):
             output_dir=self.output_dir)
         assert isinstance(env_runner, BaseLowdimRunner)
 
+        # Carries the last successful rollout's score(s) forward across MuJoCo
+        # instability so wandb's mean_score plot has no gap/jump - starts at
+        # 0.0 per prefix (e.g. 'test/') for the case where the very first
+        # rollout crashes and there's no previous checkpoint's score to fall
+        # back to. IvonDiffusionUnetLowdimPolicy is a BaseLowdimPacPolicy
+        # subclass, and the rollout below calls run(policy) with no
+        # stochastic= kwarg (defaults to False), so the key RobomimicLowdimRunner
+        # logs is '<prefix>mean_score_deterministic', not '<prefix>mean_score'.
+        prefixes = sorted(set(getattr(env_runner, 'env_prefixs', ['test/'])))
+        last_runner_log: dict = {p + 'mean_score_deterministic': 0.0 for p in prefixes}
+
         # configure logging
         wandb_run = wandb.init(
             dir=str(self.output_dir),
@@ -373,7 +386,25 @@ class TrainIvonDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
                         # run rollout
                         if (current_step % rollout_every) == 0 or self.global_step == 0:
-                            runner_log = env_runner.run(policy)
+                            try:
+                                runner_log = env_runner.run(policy)
+                                last_runner_log.update(runner_log)
+                            except MujocoException as e:
+                                print(f"Warning: MuJoCo instability during rollout at step "
+                                      f"{current_step} ({e}). Reporting the previous rollout's "
+                                      f"score(s) instead so wandb has no gap.")
+                                step_log['rollout_mujoco_error'] = str(e)
+                                # The crashed worker's pipe is permanently closed by
+                                # AsyncVectorEnv._raise_if_errors, so env_runner can't be
+                                # reused - rebuild it.
+                                try:
+                                    env_runner.env.close(terminate=True)
+                                except Exception:
+                                    pass
+                                env_runner = hydra.utils.instantiate(
+                                    cfg.task.env_runner,
+                                    output_dir=self.output_dir)
+                                runner_log = dict(last_runner_log)
                             step_log.update(runner_log)
 
                         # validation: noise prediction loss
