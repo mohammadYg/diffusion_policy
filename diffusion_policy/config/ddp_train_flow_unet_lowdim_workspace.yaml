@@ -2,8 +2,8 @@ defaults:
   - _self_
   - task: pusht_lowdim
 
-name: ddp_train_diffusion_unet_ddim_lowdim
-_target_: diffusion_policy.workspace.ddp_train_diffusion_unet_lowdim_workspace.TrainDiffusionUnetLowdimWorkspace
+name: ddp_train_flow_unet_lowdim
+_target_: diffusion_policy.workspace.ddp_train_flow_unet_lowdim_workspace.TrainFlowUnetLowdimWorkspace
 
 obs_dim: ${task.obs_dim}
 action_dim: ${task.action_dim}
@@ -19,10 +19,9 @@ past_action_visible: False
 keypoint_visible_rate: 1.0
 obs_as_global_cond: True
 pred_action_steps_only: False
-num_mc_samples: 1
 
 policy:
-  _target_: diffusion_policy.policy.diffusion_unet_lowdim_policy.DiffusionUnetLowdimPolicy
+  _target_: diffusion_policy.policy.flow_unet_lowdim_policy.FlowUnetLowdimPolicy
 
   model:
     _target_: diffusion_policy.model.diffusion.conditional_unet1d.ConditionalUnet1D
@@ -33,34 +32,36 @@ policy:
     kernel_size: 5
     n_groups: 8
     cond_predict_scale: True
-  
-  noise_scheduler:
-    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
-    num_train_timesteps: 100
-    beta_start: 0.0001
-    beta_end: 0.02
-    # beta_schedule is important
-    # this is the best we found
-    beta_schedule: squaredcos_cap_v2
-    clip_sample: True
-    set_alpha_to_one: True
-    steps_offset: 0
-    prediction_type: epsilon # or sample
+
+  FM:
+    _target_: diffusion_policy.CFM.path.affine.CondOTProbPath
+    sigma: 0.0
 
   horizon: ${horizon}
   obs_dim: ${obs_dim}
   action_dim: ${action_dim}
   n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
   n_obs_steps: ${n_obs_steps}
-  num_inference_steps: 10
   obs_as_global_cond: ${obs_as_global_cond}
   pred_action_steps_only: ${pred_action_steps_only}
   oa_step_convention: True
+  prior_std: ${training.prior_std}
 
-  # scheduler.step params
-  # predict_epsilon: True
-  use_clipped_model_output: True
-  eta: 0.0
+  # ODE solver parameters - sampling (fixed-step Euler, used for predict_action/rollout)
+  sample_method: "euler"
+  sample_step_size: 0.1  # 10 steps over [0,1]
+  sample_atol: 1e-5
+  sample_rtol: 1e-5
+  sample_return_intermediates: False
+  sample_enable_grad: False
+
+  # ODE solver parameters - likelihood (adaptive, used for compute_nll)
+  likelihood_method: "dopri5"
+  likelihood_step_size: null
+  likelihood_atol: 1e-5
+  likelihood_rtol: 1e-5
+  likelihood_return_intermediates: False
+  likelihood_enable_grad: False
 
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
@@ -78,7 +79,7 @@ dataloader:
   persistent_workers: False
 
 val_dataloader:
-  batch_size: 256
+  batch_size: 1024
   num_workers: 1
   shuffle: False
   pin_memory: True
@@ -105,21 +106,28 @@ training:
   use_ema: True
   # DDP scaling: batch_size/num_updates/lr_warmup_steps/checkpoint_every above are
   # all single-GPU-equivalent values; under world_size>1 they are auto-scaled (see
-  # the DDP scaling comment in ddp_train_diffusion_unet_lowdim_workspace.py's
-  # run()). optimizer.lr is scaled by world_size**ddp_lr_scale_power (1.0 = linear
-  # scaling rule; try 0.5 for sqrt scaling if linear proves unstable).
+  # the DDP scaling comment in ddp_train_flow_unet_lowdim_workspace.py's run()).
+  # optimizer.lr is scaled by world_size**ddp_lr_scale_power (1.0 = linear scaling
+  # rule; try 0.5 for sqrt scaling, or 0.0 for no scaling at all, if linear proves
+  # unstable).
   ddp_lr_scale_power: 1.0
-  # training loop control (vestigial - no validation/rollout/NLL/reconstruction-loss
-  # evaluation runs during DDP training at all; checkpoints are evaluated after
-  # training via eval_ckpts_dp.py instead)
+  # training loop control (vestigial - no validation/rollout/NLL evaluation runs
+  # during DDP training at all; checkpoints are evaluated after training via
+  # eval_ckpts_flow.py instead)
   rollout_every: 1e3
   checkpoint_every: 1e4
-  val_every: 1e3
+  val_every: 2e3
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
   # misc
   tqdm_interval_sec: 1.0
+  #flow
+  prior_std: 1.0
+
+eval:
+  prior_std: ${training.prior_std}
+  exact_divergence: True
 
 logging:
   project: diffusion_policy_debug
@@ -146,7 +154,7 @@ checkpoint_last_N:
     format_str: 'step={global_step:06d}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
-  
+
 multi_run:
   run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
   wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}

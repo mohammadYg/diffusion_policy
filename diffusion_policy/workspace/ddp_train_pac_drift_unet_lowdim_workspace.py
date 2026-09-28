@@ -28,7 +28,8 @@ import wandb
 import tqdm
 from diffusers.training_utils import EMAModel
 
-from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
+from diffusion_policy.common.pytorch_util import (
+    dict_apply, optimizer_to, action_sample_diversity, action_reconstruction_loss)
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.policy.pac_drift_unet_lowdim_policy import PacDriftUnetLowdimPolicy
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
@@ -37,6 +38,14 @@ from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+# Number of independent predict_action() calls (fresh noise/weight-sample each
+# time, no policy change needed) used to measure deployed-time single-sample
+# action diversity - see the validation block in run() and
+# diffusion_policy.common.pytorch_util.action_sample_diversity. Matches
+# train_pac_drift_unet_lowdim_workspace.py/eval_ckpts_drift.py's default so
+# single-GPU, DDP, and post-hoc numbers are directly comparable.
+N_DEPLOYED_DIVERSITY_SAMPLES = 10
 
 
 class PacLossWrapper(nn.Module):
@@ -214,6 +223,13 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
             #     warmup stays the same FRACTION of (now-shorter) training and the
             #     checkpoint_last_N retention window covers the same fraction of
             #     training, rather than a shrunk one.
+            # No rollout (environment/simulator evaluation) ever runs during DDP
+            # training - unlike train_pac_drift_unet_lowdim_workspace.py, which is
+            # the only single-GPU workspace in this project with an ACTIVE
+            # (uncommented) rollout block. Checkpoints are evaluated via rollout
+            # post-hoc instead, through eval_ckpts_drift.py. Validation-set
+            # evaluation (no simulator involved) DOES run, but only on rank 0 - see
+            # val_dataloader and the per-step validation block below.
             #   - optimizer.lr is multiplied by world_size**ddp_lr_scale_power (linear
             #     scaling rule at the default power=1.0) to compensate for the larger
             #     effective global batch (batch_size * world_size) and preserve
@@ -288,6 +304,11 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
             # Dataset configuration
             dataset: BaseLowdimDataset = hydra.utils.instantiate(cfg.task.dataset)
             assert isinstance(dataset, BaseLowdimDataset)
+            # Computed once (matches train_pac_drift_unet_lowdim_workspace.py's
+            # n_bound = len(train_dataloader.dataset)) - the total PAC-Bayes bound
+            # sample count, independent of how DistributedSampler shards the
+            # dataset across ranks for actual training.
+            n_bound = len(dataset)
 
             # Worker seed initialization helper
             def worker_init_fn(worker_id):
@@ -339,10 +360,23 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
             if cfg.training.use_ema and self.ema_model is not None:
                 self.ema_model.set_normalizer(normalizer)
 
+            # Validation dataset - built and evaluated on rank 0 only (empty
+            # whenever task.dataset.val_ratio=0.0, matching every real DDP
+            # comparison run so far). Deliberately NOT sharded via
+            # DistributedSampler - self.model's weights are already
+            # DDP-synchronized across ranks, so a full, unsharded rank-0-only
+            # pass gives the same result any other rank would.
+            val_dataloader = None
+            if rank == 0:
+                val_dataset = dataset.get_validation_dataset()
+                val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
+                print("Validation dataset size: ", len(val_dataset))
+
             # Safe conversion for scientific notation string parameters
             lr_warmup_steps = int(float(cfg.training.lr_warmup_steps))
             num_updates = int(float(cfg.training.num_updates))
             checkpoint_every = int(float(cfg.training.checkpoint_every))
+            val_every = int(float(cfg.training.val_every))
 
             # Scale schedule length and checkpoint cadence to preserve single-GPU
             # equivalent total data throughput and checkpoint-window coverage under
@@ -352,9 +386,11 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                 num_updates = max(1, round(num_updates / world_size))
                 lr_warmup_steps = max(1, round(lr_warmup_steps / world_size))
                 checkpoint_every = max(1, round(checkpoint_every / world_size))
+                val_every = max(1, round(val_every / world_size))
                 if rank == 0:
                     print(f"DDP scaling: num_updates={num_updates}, "
-                          f"lr_warmup_steps={lr_warmup_steps}, checkpoint_every={checkpoint_every} "
+                          f"lr_warmup_steps={lr_warmup_steps}, checkpoint_every={checkpoint_every}, "
+                          f"val_every={val_every} "
                           f"(single-GPU-equivalent config values divided by world_size={world_size})")
 
             # Debug configuration overrides (applied before the LR scheduler is built
@@ -363,6 +399,7 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                 num_updates = 1000
                 max_train_steps = 100
                 checkpoint_every = 100
+                val_every = 100
             else:
                 max_train_steps = cfg.training.max_train_steps
 
@@ -416,7 +453,7 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
             optimizer_to(self.optimizer, device)
 
             # Wrap in LossWrapper (with find_unused_parameters=True to support PAC prior/posterior parameter routing)
-            loss_module = PacLossWrapper(self.model, cfg, n_bound=len(dataset))
+            loss_module = PacLossWrapper(self.model, cfg, n_bound=n_bound)
             if is_distributed:
                 ddp_loss_model = DDP(
                     loss_module,
@@ -453,6 +490,58 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                             # Backward on local loss initiates gradient all-reduce across all GPUs
                             raw_loss.backward()
 
+                            # Diagnostic only (see train_pac_drift_unet_lowdim_workspace.py for
+                            # the max_norm=inf rationale: no clipping is actually applied yet).
+                            # Gradients are already all-reduced/averaged by DDP's backward hooks
+                            # by the time backward() returns, so this is naturally identical
+                            # across ranks without needing reduce_scalars. Added to match
+                            # ddp_train_drift_unet_lowdim_workspace.py: this training path has a
+                            # documented history of a real vanishing-empirical-risk-gradient bug
+                            # (see the git history around the PAC-Bayes bound's gradient-norm
+                            # diagnostics), so DDP runs need the same visibility.
+                            grad_norm = torch.nn.utils.clip_grad_norm_(
+                                self.model.parameters(), max_norm=float('inf'))
+
+                            # Diagnostic only: gradient-norm split between the empirical-risk
+                            # path (loss_emp_bounded) and the KL path (kl_train) - matches
+                            # train_pac_drift_unet_lowdim_workspace.py, whose comment explains
+                            # this exact split is what the vanishing-empirical-risk-gradient bug
+                            # referenced above was originally diagnosed with. Commented out for
+                            # now (computationally expensive under DDP): unlike single-GPU (which
+                            # reuses the same forward pass that also produces raw_loss), this
+                            # requires a SEPARATE, non-DDP-tracked forward pass through
+                            # self.model.compute_bound() directly (calling torch.autograd.grad()
+                            # on tensors from ddp_loss_model's own forward would fire DDP's
+                            # gradient-reduction hooks a second time, corrupting or crashing the
+                            # real gradient all-reduce) - confirmed via smoke test to roughly
+                            # double per-step compute cost (an entire extra forward pass every
+                            # step, on rank 0). Uncomment if this specific bug needs
+                            # re-diagnosing under DDP.
+                            emp_risk_grad_norm_val = 0.0
+                            kl_grad_norm_val = 0.0
+                            # if rank == 0 and cfg.training.kl_penalty > 0.0:
+                            #     _, _, kl_train_diag, _, loss_emp_bounded_diag = self.model.compute_bound(
+                            #         batch,
+                            #         n_bound=n_bound,
+                            #         objective=cfg.training.pac_objective,
+                            #         delta=cfg.training.delta,
+                            #         kl_penalty=cfg.training.kl_penalty,
+                            #         stochastic=cfg.training.stochastic,
+                            #         bounded=cfg.training.bounded,
+                            #         bound_transform=cfg.training.bound_transform,
+                            #         loss_scale=cfg.training.loss_scale,
+                            #     )
+                            #     diag_params = [p for p in self.model.parameters() if p.requires_grad]
+                            #     zero = torch.zeros((), device=device)
+                            #     emp_grads = torch.autograd.grad(
+                            #         loss_emp_bounded_diag, diag_params, retain_graph=True, allow_unused=True)
+                            #     kl_grads = torch.autograd.grad(
+                            #         kl_train_diag, diag_params, retain_graph=True, allow_unused=True)
+                            #     emp_risk_grad_norm_val = torch.sqrt(sum(
+                            #         (g.detach().pow(2).sum() for g in emp_grads if g is not None), zero)).item()
+                            #     kl_grad_norm_val = torch.sqrt(sum(
+                            #         (g.detach().pow(2).sum() for g in kl_grads if g is not None), zero)).item()
+
                             self.optimizer.step()
                             self.optimizer.zero_grad()
                             lr_scheduler.step()
@@ -462,8 +551,10 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                                 ema.step(self.model)
 
                             # Increment global step before checkpointing
+                            is_first_step = (self.global_step == 0)
                             self.global_step += 1
                             current_step = self.global_step
+                            current_lr = lr_scheduler.get_last_lr()[0]
 
                             # Reduce loss, empirical risk, KL, and metrics across all ranks
                             # for logging in a single collective call (see reduce_scalars)
@@ -477,10 +568,89 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
 
                             step_log = {
                                 **reduced_scalars,
+                                'grad_norm': grad_norm.item(),
+                                # Effective parameter-update magnitude this step (grad_norm
+                                # alone doesn't say how far the parameters actually moved).
+                                'grad_step_size': grad_norm.item() * current_lr,
+                                # How much of the total gradient (grad_norm above) comes from
+                                # the empirical-risk path vs. the KL path - see the diagnostic
+                                # computed above. 0.0 when kl_penalty<=0 (no PAC bound, no split).
+                                'emp_risk_grad_norm': emp_risk_grad_norm_val,
+                                'kl_grad_norm': kl_grad_norm_val,
                                 'global_step': current_step,
-                                'lr': lr_scheduler.get_last_lr()[0],
+                                'lr': current_lr,
                                 'epoch': self.epoch,
                             }
+
+                            # Diagnostic only, computed periodically (val_every, scaled like
+                            # checkpoint_every above): total parameter norm, and the relative
+                            # update size (grad_step_size / param_norm) - a more
+                            # scale-invariant instability indicator than grad_norm alone.
+                            # Independent of whether a validation set exists, so not gated on
+                            # val_dataloader (mirrors train_pac_drift_unet_lowdim_workspace.py).
+                            # Cheap (a single sqrt-sum-of-squares pass over parameters, no
+                            # forward pass) and rank-invariant (self.model.parameters() are
+                            # already DDP-synchronized) - like grad_norm above, no
+                            # reduce_scalars needed, safe to compute on rank 0 only.
+                            if rank == 0 and ((current_step % val_every) == 0 or is_first_step):
+                                param_norm = torch.sqrt(
+                                    sum((p.detach() ** 2).sum() for p in self.model.parameters())
+                                ).item()
+                                step_log['param_norm'] = param_norm
+                                step_log['relative_update_size'] = step_log['grad_step_size'] / (param_norm + 1e-12)
+
+                                # Real validation-set evaluation - excluded from DDP training
+                                # by default (see the DDP scaling comment near the top of
+                                # run()), but active here whenever val_dataloader actually has
+                                # data (val_ratio > 0), on rank 0 only. Mirrors
+                                # train_pac_drift_unet_lowdim_workspace.py's noise-prediction-loss
+                                # and deployed-time diversity/reconstruction diagnostics exactly,
+                                # including running both deterministic and stochastic weight-
+                                # sampling variants. Costs exactly what single-GPU already pays
+                                # for this same computation at this same val_every cadence -
+                                # confirmed cheap once decoupled from the (now-removed)
+                                # emp_risk_grad_norm/kl_grad_norm per-step diagnostic, which was
+                                # what actually made an earlier smoke test intractable.
+                                if val_dataloader is not None and len(val_dataloader) > 0:
+                                    eval_policy = self.ema_model if cfg.training.use_ema else self.model
+                                    eval_policy.eval()
+                                    for val_stochastic in (False, True):
+                                        suffix = 'stochastic' if val_stochastic else 'deterministic'
+                                        with torch.no_grad():
+                                            val_losses = []
+                                            val_metric_sums = {}
+                                            n_samples_total = 0
+                                            for v_idx, vbatch in enumerate(val_dataloader):
+                                                n_samples = len(vbatch["obs"])
+                                                n_samples_total += n_samples
+                                                vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
+                                                val_loss, val_metrics = eval_policy.compute_loss(vbatch, stochastic=val_stochastic)
+                                                val_losses.append(val_loss.item() * n_samples)
+                                                for k, v in val_metrics.items():
+                                                    val_metric_sums[k] = val_metric_sums.get(k, 0.0) + v * n_samples
+
+                                                if v_idx == 0:
+                                                    obs_dict = {"obs": vbatch["obs"]}
+                                                    action_samples = torch.stack(
+                                                        [eval_policy.predict_action(obs_dict, stochastic=val_stochastic)["action"]
+                                                         for _ in range(N_DEPLOYED_DIVERSITY_SAMPLES)],
+                                                        dim=1,
+                                                    )
+                                                    step_log[f"test_deployed_action_diversity_{suffix}"] = \
+                                                        action_sample_diversity(action_samples)
+                                                    start = eval_policy.n_obs_steps - 1
+                                                    end = start + eval_policy.n_action_steps
+                                                    reference_action = vbatch["action"][:, start:end]
+                                                    step_log[f"test_deployed_reconstruction_loss_{suffix}"] = \
+                                                        action_reconstruction_loss(action_samples, reference_action)
+
+                                                if (cfg.training.max_val_steps is not None) and v_idx >= (cfg.training.max_val_steps - 1):
+                                                    break
+                                            if len(val_losses) > 0:
+                                                step_log[f'test_loss_{suffix}'] = np.sum(val_losses) / n_samples_total
+                                                for k, total in val_metric_sums.items():
+                                                    step_log[f'test_{k}_{suffix}'] = total / n_samples_total
+                                    eval_policy.train()
 
                             if rank == 0:
                                 tepoch.set_postfix(loss=reduced_scalars['train_loss (pac_bayes bound)'], refresh=False)

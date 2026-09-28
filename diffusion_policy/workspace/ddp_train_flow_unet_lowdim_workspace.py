@@ -21,14 +21,14 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 import wandb
 import tqdm
 from diffusers.training_utils import EMAModel
 
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from diffusion_policy.policy.diffusion_unet_lowdim_policy import DiffusionUnetLowdimPolicy
+from diffusion_policy.policy.flow_unet_lowdim_policy import FlowUnetLowdimPolicy
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.common.checkpoint_util import LastNCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
@@ -37,12 +37,12 @@ from diffusion_policy.model.common.lr_scheduler import get_scheduler
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
-class DiffusionLossWrapper(nn.Module):
+class FlowLossWrapper(nn.Module):
     """
     Standard PyTorch Module wrapper routing forward() to model.compute_loss().
     Ensures DDP autograd hooks and gradient synchronization buckets execute
-    properly (mirrors DriftLossWrapper/PacLossWrapper in the sibling DDP
-    workspaces). This is not cosmetic: DiffusionUnetLowdimPolicy defines no
+    properly (mirrors DriftLossWrapper/DiffusionLossWrapper in the sibling DDP
+    workspaces). This is not cosmetic: FlowUnetLowdimPolicy defines no
     forward() of its own, so calling the DDP-wrapped module directly
     (self.model(batch)) would raise NotImplementedError - and calling
     self.model.module.compute_loss(batch) instead (bypassing DDP's __call__/
@@ -53,12 +53,12 @@ class DiffusionLossWrapper(nn.Module):
     gradient all-reduce actually happen.
 
     DDP is constructed with find_unused_parameters=True below: the sibling
-    plain-drift DDP workspace found this to be empirically required for this
-    same ConditionalUnet1D shape (down/mid/up modules iterated via
-    nn.ModuleList in a Python loop) even when every parameter is genuinely
-    used every forward call - DDP's default (fast) usage-detection can
-    mis-detect reachability for this architecture. Carried over here as the
-    safer default; not independently re-verified for this policy (that
+    plain-drift/diffusion DDP workspaces found this to be empirically
+    required for this same ConditionalUnet1D shape (down/mid/up modules
+    iterated via nn.ModuleList in a Python loop) even when every parameter is
+    genuinely used every forward call - DDP's default (fast) usage-detection
+    can mis-detect reachability for this architecture. Carried over here as
+    the safer default; not independently re-verified for this policy (that
     requires an actual multi-GPU allocation to test).
     """
     def __init__(self, model: nn.Module):
@@ -66,7 +66,7 @@ class DiffusionLossWrapper(nn.Module):
         self.model = model
 
     def forward(self, batch):
-        return self.model.compute_loss(batch, train=True)
+        return self.model.compute_loss(batch)
 
 
 def setup_ddp():
@@ -132,10 +132,10 @@ def reduce_scalars(scalars: dict, world_size: int, device: torch.device) -> dict
     return dict(zip(keys, values.tolist()))
 
 
-class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
+class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
-    def __init__(self, cfg: OmegaConf, output_dir=None):
+    def __init__(self, cfg: DictConfig, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
 
         # Global base seed for deterministic initial model parameters across ranks
@@ -144,14 +144,11 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         np.random.seed(seed)
         random.seed(seed)
 
-        # Underlying policy model. DiffusionUnetLowdimPolicy is scheduler-agnostic
-        # (DDPM vs. DDIM is purely a choice of cfg.policy.noise_scheduler._target_ +
-        # matching sampler kwargs, both handled entirely inside the policy) - this
-        # workspace works unmodified with either config.
-        self.model: DiffusionUnetLowdimPolicy = hydra.utils.instantiate(cfg.policy)
+        # Underlying policy model
+        self.model: FlowUnetLowdimPolicy = hydra.utils.instantiate(cfg.policy)
 
         # Underlying EMA policy model
-        self.ema_model: DiffusionUnetLowdimPolicy = None
+        self.ema_model: FlowUnetLowdimPolicy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
 
@@ -187,20 +184,19 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             #   - lr_warmup_steps and checkpoint_every are divided by world_size too,
             #     so warmup and checkpoint-retention coverage both stay the same
             #     FRACTION of (now-shorter) training, rather than a shrunk one.
-            # No validation/NLL/reconstruction-loss/rollout evaluation is performed
-            # during DDP training at all (matches ddp_train_drift_unet_lowdim_workspace.py
-            # and ddp_train_pac_drift_unet_lowdim_workspace.py) - checkpoints are
-            # evaluated after training completes instead, via eval_ckpts_dp.py (which
-            # also handles the dataset_info()/covariance-spectrum setup nll_bound
-            # needs, so this workspace doesn't need to do it either).
+            # No validation/NLL/rollout evaluation is performed during DDP training at
+            # all (matches ddp_train_drift_unet_lowdim_workspace.py and
+            # ddp_train_diffusion_unet_lowdim_workspace.py) - checkpoints are evaluated
+            # after training completes instead, via eval_ckpts_flow.py.
             #   - optimizer.lr is multiplied by world_size**ddp_lr_scale_power (linear
             #     scaling rule at the default power=1.0) to compensate for the larger
             #     effective global batch (batch_size * world_size) and preserve
             #     single-GPU-equivalent optimization dynamics. Set
-            #     training.ddp_lr_scale_power=0.5 for sqrt scaling if linear scaling
-            #     proves unstable for a given task (this was necessary for drift on
-            #     tool_hang_lowdim_abs - see the DDP scaling test results elsewhere in
-            #     this project).
+            #     training.ddp_lr_scale_power=0.5 for sqrt scaling, or 0.0 for no
+            #     scaling at all, if linear scaling proves unstable for a given task
+            #     (this was necessary for drift on tool_hang_lowdim_abs - see the DDP
+            #     scaling test results elsewhere in this project, where power=0.0
+            #     ultimately matched the single-GPU baseline most closely).
             # This block runs before checkpoint restoration below: on a fresh run it
             # sets the optimizer's initial LR; on a resumed run, load_checkpoint()'s
             # optimizer.load_state_dict() immediately overwrites it with the exact
@@ -254,12 +250,12 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             # Model weights stay synchronized regardless (identical seed at
             # construction, plus checkpoint loading above / DDP's parameter broadcast
             # at wrap time below), so offsetting the seed here only affects the
-            # per-step random timestep/noise draws in DiffusionUnetLowdimPolicy.
-            # compute_loss. Without this, every rank starts from the same RNG state
-            # and consumes it in lockstep, so all ranks draw the exact same "random"
-            # timesteps/noise each step - just applied to different data - which
-            # quietly correlates the training signal across the extra GPUs instead of
-            # letting each contribute an independent sample.
+            # per-step random time/noise draws in FlowUnetLowdimPolicy.compute_loss.
+            # Without this, every rank starts from the same RNG state and consumes it
+            # in lockstep, so all ranks draw the exact same "random" conditional-flow
+            # samples each step - just applied to different data - which quietly
+            # correlates the training signal across the extra GPUs instead of letting
+            # each contribute an independent sample.
             rank_seed = cfg.training.seed + rank
             torch.manual_seed(rank_seed)
             torch.cuda.manual_seed_all(rank_seed)
@@ -396,10 +392,10 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 self.ema_model.to(device)
             optimizer_to(self.optimizer, device)
 
-            # Wrap in LossWrapper (see DiffusionLossWrapper docstring for why
+            # Wrap in LossWrapper (see FlowLossWrapper docstring for why
             # find_unused_parameters=True is used and why compute_loss must be
             # routed through a real forward() rather than called on .module directly)
-            loss_module = DiffusionLossWrapper(self.model)
+            loss_module = FlowLossWrapper(self.model)
             if is_distributed:
                 ddp_loss_model = DDP(
                     loss_module,
@@ -430,7 +426,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         for batch_idx, batch in enumerate(tepoch):
                             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
 
-                            # Forward through DDP wrapper invokes noise-prediction loss
+                            # Forward through DDP wrapper invokes flow-matching loss
                             raw_loss = ddp_loss_model(batch)
 
                             # Backward on local loss initiates gradient all-reduce across all GPUs
@@ -508,7 +504,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
 )
 def main(cfg):
     output_dir = os.environ.get("OUTPUT_DIR", None)
-    workspace = TrainDiffusionUnetLowdimWorkspace(cfg, output_dir=output_dir)
+    workspace = TrainFlowUnetLowdimWorkspace(cfg, output_dir=output_dir)
     workspace.run()
 
 

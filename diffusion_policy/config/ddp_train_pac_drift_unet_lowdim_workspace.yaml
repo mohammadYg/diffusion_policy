@@ -141,7 +141,7 @@ training:
   # BaseLowdimPacPolicy._bound_empirical_risk) so it lands near the
   # transform's near-linear region instead of its saturating tail - see the
   # same setting in train_pac_drift_unet_lowdim_workspace.yaml.
-  loss_scale: 10.0
+  loss_scale: 7.5
   delta: 0.025
   kl_penalty: 1.0e-4
   pac_objective: "fquad"  # "fquad" or "calssic", "bbb"
