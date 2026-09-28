@@ -451,6 +451,9 @@ class TrainIvonDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 self.save_checkpoint()
                             if cfg.checkpoint_last_N.save_last_snapshot:
                                 self.save_snapshot()
+                            lastN_ckpt_path = lastN_manager.get_ckpt_path(step_log)
+                            if lastN_ckpt_path is not None:
+                                self.save_checkpoint(path=lastN_ckpt_path)
 
                         # log & step
                         wandb_run.log(step_log, step=current_step)

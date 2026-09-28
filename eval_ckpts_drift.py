@@ -285,7 +285,17 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
     # Environment runner
     env_runner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir))
 
-    json_log = {}
+    # Records which eval invocation this log is (e.g. eval.stochastic=True
+    # vs. =False) - the two halves of a comparison pair otherwise look
+    # identical except for the output filename's timestamp, which is easy
+    # to mix up downstream. policy_eta is null for drift (no DDIM/eta).
+    json_log = {
+        "eval_config": {
+            "overrides": list(override),
+            "eval_stochastic": bool(OmegaConf.select(cfg, "eval.stochastic", default=False)),
+            "policy_eta": OmegaConf.select(cfg, "policy.eta", default=None),
+        },
+    }
     step_results = {"steps": [], "success_rates": []}
     sum_success_rates = 0.0
     num_evaluated = 0
