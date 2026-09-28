@@ -1,7 +1,6 @@
 import os
 import wandb
 import gym
-from gym import logger
 import numpy as np
 import torch
 import collections
@@ -11,8 +10,7 @@ import h5py
 import dill
 import math
 import wandb.sdk.data_types.video as wv
-from diffusion_policy.gym_util.async_vector_env import AsyncVectorEnv, AsyncState
-from mujoco_py.builder import MujocoException
+from diffusion_policy.gym_util.async_vector_env import AsyncVectorEnv
 # from diffusion_policy.gym_util.sync_vector_env import SyncVectorEnv
 from diffusion_policy.gym_util.multistep_wrapper import MultiStepWrapper
 from diffusion_policy.gym_util.video_recording_wrapper import VideoRecordingWrapper, VideoRecorder
@@ -276,14 +274,7 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             env_prefixs.append('test/')
             env_init_fn_dills.append(dill.dumps(init_fn))
         
-        # tolerate_step_errors=True: _run_streaming() checks
-        # infos[i]['crashed'] and excludes that slot's episode itself,
-        # instead of the whole batch aborting on one worker's MuJoCo
-        # NaN/Inf - see AsyncVectorEnv.__init__'s docstring for that flag.
-        # (_run_chunked, used only by stateful policies which this project
-        # doesn't evaluate, does NOT check infos[i]['crashed'] - if it ever
-        # is used, this flag would need _run_chunked fixed to match first.)
-        env = AsyncVectorEnv(env_fns, tolerate_step_errors=True)
+        env = AsyncVectorEnv(env_fns)
         # env = SyncVectorEnv(env_fns)
 
         self.env_meta = env_meta
@@ -323,41 +314,6 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         rows reassigned mid-batch without corrupting that state, so they
         keep the original synchronized chunk-by-chunk rollout.
         """
-        # A previous run() call tolerated a worker crash and left that slot's
-        # pipe permanently None. Every subsequent env.reset()/call_each(...)
-        # sends to ALL pipes unconditionally, so without rebuilding here the
-        # very next run() call would raise an uncaught AttributeError on the
-        # dead pipe instead of a MujocoException - i.e. one tolerated crash
-        # would otherwise silently turn into a hard failure of the next
-        # rollout/checkpoint eval. `_failed` only gets set by a crash inside
-        # step() (see AsyncVectorEnv.step_wait's tolerate branch) - a crash
-        # inside reset_at/call_at/call_each (_raise_if_errors_at) instead
-        # nulls the pipe without setting `_failed`, and can also leave
-        # `_state` stuck away from DEFAULT, so check for those directly too.
-        # A worker that dies in a way step_wait can't even parse (e.g. its
-        # exception value fails to unpickle, or it's OOM-killed/segfaults
-        # while idle) leaves none of the above set - `is_alive()` is the
-        # only signal left for that case, so check the actual OS processes
-        # too rather than trusting the higher-level bookkeeping alone.
-        if (any(self.env._failed)
-                or any(p is None for p in self.env.parent_pipes)
-                or self.env._state != AsyncState.DEFAULT
-                or not all(p.is_alive() for p in self.env.processes)):
-            try:
-                self.env.close(terminate=True)
-            except Exception:
-                # Best-effort: close() itself can fail if the env is in a
-                # sufficiently broken state (see close_extras' own note on
-                # draining a stuck call) - fall back to reaping the OS
-                # processes by hand so this doesn't leak them, then rebuild
-                # regardless, since env_fns is enough to construct a fresh
-                # env independent of the old one's state.
-                for process in self.env.processes:
-                    if process.is_alive():
-                        process.terminate()
-                for process in self.env.processes:
-                    process.join(timeout=5)
-            self.env = AsyncVectorEnv(self.env_fns, tolerate_step_errors=True)
         if getattr(policy, 'is_stateful', False):
             all_rewards = self._run_chunked(policy, stochastic)
         else:
@@ -398,41 +354,14 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         if self.abs_action:
             env_action = self.undo_transform_action(action)
 
-        # info[i]['crashed'] is set by AsyncVectorEnv.step_wait() for any
-        # slot whose worker died this step (e.g. MuJoCo NaN/Inf) - see
-        # _run_streaming(), which excludes just that slot's in-progress
-        # episode instead of aborting the whole rollout.
         obs, reward, done, info = self.env.step(env_action)
-        return obs, reward, done, action, info
+        return obs, reward, done, action
 
     def _run_chunked(self, policy, stochastic):
         """Original synchronized rollout: n_inits processed in fixed-size
         chunks of n_envs, each chunk running until every slot in it is done.
         Required for stateful policies - see run()'s docstring.
-
-        NOTE: unlike _run_streaming(), this path does not gracefully exclude
-        a single crashed env from the batch - a MuJoCo NaN/Inf here still
-        aborts the whole chunk (raising MujocoException explicitly below,
-        the same way the non-tolerant default path used to for every
-        crash) instead of continuing with that slot excluded. None of this
-        project's own report results use a stateful policy (is_stateful is
-        set by e.g. RobomimicLowdimPolicy, the upstream BC-RNN baseline -
-        see train_robomimic_lowdim_workspace.yaml - which this path IS
-        reachable through if that workspace/config is ever used), so
-        fixing it the same way as _run_streaming (excluding just the
-        crashed slot and continuing) is future work; this at least
-        restores the pre-tolerance behavior instead of leaving the crashed
-        worker's null pipe to be hit unconditionally by env.render()/
-        env.call(...) below, which raised an uncaught AttributeError.
         """
-        # This path always either completes with zero crashes (it raises
-        # MujocoException above on any crash, so _aggregate_log below never
-        # runs otherwise) or doesn't get this far at all - reset explicitly
-        # so a crash count from an earlier _run_streaming call on this same
-        # runner instance is never stale-reported here.
-        self._last_n_crashed = 0
-        self._last_n_unstarted = 0
-
         env = self.env
         n_envs = len(self.env_fns)
         n_inits = len(self.env_init_fn_dills)
@@ -469,22 +398,8 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
 
             done = False
             while not done:
-                obs, reward, done_arr, action, _info = self._predict_and_step(
+                obs, reward, done_arr, action = self._predict_and_step(
                     policy, obs, past_action, stochastic)
-                crashed = [i for i, inf in enumerate(_info) if inf.get('crashed')]
-                if crashed:
-                    # A stateful policy can't have individual slots excluded
-                    # mid-batch (see run()'s docstring), and this loop's own
-                    # env.render()/env.call(...) below address every slot
-                    # unconditionally - so a crashed slot's now-null pipe
-                    # would otherwise be hit by those calls, raising an
-                    # uncaught AttributeError instead of the MujocoException
-                    # callers already know how to handle.
-                    raise MujocoException(
-                        f"Worker(s) {crashed} crashed during a chunked "
-                        "(stateful-policy) rollout; this path can't exclude "
-                        "a single crashed slot, so the whole chunk aborts."
-                    )
                 done = np.all(done_arr)
                 past_action = action
                 pbar.update(action.shape[1])
@@ -500,36 +415,15 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         """Continuous rollout for stateless policies: every vector slot is
         kept busy on a new init the moment its previous one finishes,
         instead of only refilling at fixed chunk boundaries.
-
-        A slot whose worker crashes mid-episode (info[i]['crashed'], set by
-        AsyncVectorEnv.step_wait() on a MuJoCo NaN/Inf or similar) has its
-        in-progress episode excluded entirely - not counted as success or
-        failure - and is permanently retired for the rest of this call (its
-        subprocess is dead; see step_wait()'s docstring). The remaining
-        active slots keep streaming through whatever inits haven't been
-        assigned yet, so a crash costs one slot's worth of parallelism, not
-        the whole rollout. `all_rewards[g]` stays `None` for a lost init's
-        global index; `_aggregate_log` skips those, so the reported success
-        rate is the mean over the survivors (1000-N successful envs, if N
-        crashed), not a whole-checkpoint failure.
         """
         env = self.env
         n_envs = len(self.env_fns)
         n_inits = len(self.env_init_fn_dills)
 
         all_rewards = [None] * n_inits
-        n_lost = 0
-        # n_lost conflates two different causes (used for the loop's own
-        # harvested+n_lost==n_inits bookkeeping, where the distinction
-        # doesn't matter) - n_crashed tracks only real worker crashes, so
-        # callers reporting "N episodes crashed" aren't also counting
-        # inits that were simply never assigned a slot because every
-        # worker had already died.
-        n_crashed = 0
 
         # slot_init[i] = global init index currently assigned to vector-slot
-        # i, or None once that slot has no more work left to do (either it
-        # ran out of pending inits, or its worker crashed).
+        # i, or None once that slot has no more work left to do.
         n_start = min(n_envs, n_inits)
         slot_init = list(range(n_start)) + [None] * (n_envs - n_start)
         active = [g is not None for g in slot_init]
@@ -551,8 +445,8 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             leave=False, mininterval=self.tqdm_interval_sec)
 
         harvested = 0
-        while harvested + n_lost < n_inits:
-            obs, reward, done_arr, action, info = self._predict_and_step(
+        while harvested < n_inits:
+            obs, reward, done_arr, action = self._predict_and_step(
                 policy, obs, past_action, stochastic)
             past_action = action
 
@@ -561,23 +455,6 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             for i in range(n_envs):
                 if active[i] and done_arr[i]:
                     g = slot_init[i]
-
-                    if info[i].get('crashed'):
-                        # Worker is dead (AsyncVectorEnv already closed its
-                        # pipe) - don't call_at/render/get_attr on it, don't
-                        # count this init, and never reinit this slot again.
-                        logger.warn(
-                            f"Eval {env_name}Lowdim: excluding init {g} "
-                            f"(vector slot {i}) - worker crashed: "
-                            f"{info[i].get('error')}"
-                        )
-                        n_lost += 1
-                        n_crashed += 1
-                        pbar.update(1)
-                        slot_init[i] = None
-                        active[i] = False
-                        continue
-
                     # stops/flushes that slot's video recorder (if enabled)
                     # and reads back its total episode reward.
                     env.call_at([i], 'render')
@@ -597,102 +474,22 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             if reinit_indices:
                 # each slot gets a different init_fn, so these can't share
                 # one call_at() (which sends identical args to every index).
-                try:
-                    for i, (fn,) in zip(reinit_indices, reinit_args):
-                        env.call_at([i], 'run_dill_function', fn)
-                    fresh_obs = env.reset_at(reinit_indices)
-                    for i, o in zip(reinit_indices, fresh_obs):
-                        obs[i] = o
-                        # avoid leaking the finished rollout's action into
-                        # the freshly reset one's near-term obs['past_action'].
-                        if past_action is not None:
-                            past_action[i] = 0
-                except MujocoException as e:
-                    # A crash here (e.g. robosuite's reset() calling
-                    # sim.forward()) previously aborted the WHOLE run(),
-                    # discarding every already-harvested episode's reward
-                    # this call - not just the crashed slot's. Retry the
-                    # batch one slot at a time (only in this rare fallback
-                    # path, so the common no-crash case keeps the cheap
-                    # single batched call above) so a crash on one index
-                    # doesn't cost the others' already-computed results too.
-                    logger.warn(
-                        f"Eval {env_name}Lowdim: reinit batch crashed "
-                        f"({e}) - retrying its {len(reinit_indices)} "
-                        "slot(s) one at a time to isolate the failure."
-                    )
-                    for i, (fn,) in zip(reinit_indices, reinit_args):
-                        if env.parent_pipes[i] is None:
-                            # Already dead - either the slot whose crash
-                            # triggered this fallback, or another one that
-                            # failed earlier in the same batched attempt
-                            # above. Nothing left to retry for it.
-                            logger.warn(
-                                f"Eval {env_name}Lowdim: excluding init "
-                                f"{slot_init[i]} (vector slot {i}) - "
-                                "worker crashed during reinit."
-                            )
-                            n_lost += 1
-                            n_crashed += 1
-                            pbar.update(1)
-                            slot_init[i] = None
-                            active[i] = False
-                            continue
-                        try:
-                            env.call_at([i], 'run_dill_function', fn)
-                            fresh_obs_i = env.reset_at([i])
-                        except MujocoException as e2:
-                            logger.warn(
-                                f"Eval {env_name}Lowdim: excluding init "
-                                f"{slot_init[i]} (vector slot {i}) - "
-                                f"worker crashed during reinit: {e2}"
-                            )
-                            n_lost += 1
-                            n_crashed += 1
-                            pbar.update(1)
-                            slot_init[i] = None
-                            active[i] = False
-                            continue
-                        obs[i] = fresh_obs_i[0]
-                        if past_action is not None:
-                            past_action[i] = 0
-
-            if not any(active) and next_init_idx < n_inits:
-                # Every slot is dead or spent, but inits remain that were
-                # never even assigned to a slot - with no one left to pick
-                # them up, count them as lost too instead of looping forever.
-                n_unstarted = n_inits - next_init_idx
-                logger.warn(
-                    f"Eval {env_name}Lowdim: all vector slots crashed or "
-                    f"finished with {n_unstarted} init(s) never started; "
-                    "counting them as lost too rather than hanging."
-                )
-                n_lost += n_unstarted
-                pbar.update(n_unstarted)
-                next_init_idx = n_inits
+                for i, (fn,) in zip(reinit_indices, reinit_args):
+                    env.call_at([i], 'run_dill_function', fn)
+                fresh_obs = env.reset_at(reinit_indices)
+                for i, o in zip(reinit_indices, fresh_obs):
+                    obs[i] = o
+                    # avoid leaking the finished rollout's action into the
+                    # freshly reset one's near-term obs['past_action'].
+                    if past_action is not None:
+                        past_action[i] = 0
         pbar.close()
-        if n_lost:
-            logger.warn(
-                f"Eval {env_name}Lowdim: {n_lost}/{n_inits} episode(s) "
-                f"excluded ({n_crashed} from worker crashes, "
-                f"{n_lost - n_crashed} never started once every slot had "
-                "died); success rate below is averaged over the remaining "
-                f"{n_inits - n_lost}."
-            )
-        self._last_n_crashed = n_crashed
-        self._last_n_unstarted = n_lost - n_crashed
         return all_rewards
 
     def _aggregate_log(self, policy, stochastic, all_rewards):
         max_rewards = collections.defaultdict(list)
         log_data = dict()
-        log_data['n_crashed_episodes'] = getattr(self, '_last_n_crashed', 0)
-        # Distinct from n_crashed_episodes: inits that were never even
-        # assigned a slot because every worker had already died - not
-        # themselves a crash, but still missing from the reported score.
-        log_data['n_unstarted_episodes'] = getattr(self, '_last_n_unstarted', 0)
         n_inits = len(self.env_init_fn_dills)
-        log_data['n_total_episodes'] = n_inits
         # results reported in the paper are generated using the commented out line below
         # which will only report and average metrics from first n_envs initial condition and seeds
         # fortunately this won't invalidate our conclusion since
@@ -702,27 +499,9 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         # for i in range(len(self.env_fns)):
         # and comment out this line
         for i in range(n_inits):
-            if all_rewards[i] is None:
-                # Excluded by _run_streaming due to a worker crash - not a
-                # success and not a failure, just not counted at all, so
-                # the mean below is over the surviving episodes only.
-                continue
             prefix = self.env_prefixs[i]
             max_reward = np.max(all_rewards[i])
             max_rewards[prefix].append(max_reward)
-
-        # Every caller's score_key_for() reads 'test/mean_score...' - only
-        # that prefix's total wipeout is a caller-facing failure (its key
-        # would otherwise be silently missing from log_data below, crashing
-        # the caller's runner_log[...] lookup). A 'train/' (or any other
-        # non-'test/' prefix) wipeout just omits that prefix's own key,
-        # which nothing downstream reads, so it doesn't need to abort an
-        # otherwise-valid checkpoint's real test/ score.
-        if 'test/' in set(self.env_prefixs) and len(max_rewards.get('test/', [])) == 0:
-            raise MujocoException(
-                "All 'test/' episodes were lost to worker crashes; no valid "
-                "score to report for this checkpoint."
-            )
 
         # log aggregate metrics
         if isinstance(policy, BaseLowdimPacPolicy):
