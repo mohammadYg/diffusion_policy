@@ -332,9 +332,14 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
         assert isinstance(env_runner, BaseLowdimRunner)
 
         # Carries the last successful rollout's score(s) forward across MuJoCo
-        # instability so wandb's mean_score plot has no gap/jump.
+        # instability so wandb's mean_score plot has no gap/jump. Both
+        # stochastic variants are rolled out every time (see the "run
+        # rollout" block below), so both keys need a zero default.
         prefixes = sorted(set(getattr(env_runner, 'env_prefixs', ['test/'])))
-        last_runner_log: dict = {p + 'mean_score_deterministic': 0.0 for p in prefixes}
+        last_runner_log: dict = {
+            **{p + 'mean_score_deterministic': 0.0 for p in prefixes},
+            **{p + 'mean_score_stochastic': 0.0 for p in prefixes},
+        }
 
         # configure logging
         wandb_run = wandb.init(
@@ -495,28 +500,33 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         policy = self.ema_model if cfg.training.use_ema else self.model
                         policy.eval()
 
-                        # run rollout
+                        # run rollout - both deterministic (posterior mean weights)
+                        # and stochastic (weights sampled from the posterior) variants
+                        # every time, so their mean_score_deterministic/_stochastic
+                        # trends are directly comparable at every logged step.
                         if (current_step % rollout_every) == 0 or self.global_step==0:
-                            try:
-                                runner_log = env_runner.run(policy, stochastic=False)
-                                last_runner_log.update(runner_log)
-                            except MujocoException as e:
-                                print(f"Warning: MuJoCo instability during rollout at step "
-                                      f"{current_step} ({e}). Reporting the previous rollout's "
-                                      f"score(s) instead so wandb has no gap.")
-                                step_log['rollout_mujoco_error'] = str(e)
-                                # The crashed worker's pipe is permanently closed by
-                                # AsyncVectorEnv._raise_if_errors, so env_runner can't be
-                                # reused - rebuild it.
+                            for rollout_stochastic in (False, True):
                                 try:
-                                    env_runner.env.close(terminate=True)
-                                except Exception:
-                                    pass
-                                env_runner = hydra.utils.instantiate(
-                                    cfg.task.env_runner,
-                                    output_dir=self.output_dir)
-                                runner_log = dict(last_runner_log)
-                            step_log.update(runner_log)
+                                    runner_log = env_runner.run(policy, stochastic=rollout_stochastic)
+                                    last_runner_log.update(runner_log)
+                                except MujocoException as e:
+                                    print(f"Warning: MuJoCo instability during rollout "
+                                          f"(stochastic={rollout_stochastic}) at step "
+                                          f"{current_step} ({e}). Reporting the previous "
+                                          f"rollout's score(s) instead so wandb has no gap.")
+                                    step_log['rollout_mujoco_error'] = str(e)
+                                    # The crashed worker's pipe is permanently closed by
+                                    # AsyncVectorEnv._raise_if_errors, so env_runner can't be
+                                    # reused - rebuild it.
+                                    try:
+                                        env_runner.env.close(terminate=True)
+                                    except Exception:
+                                        pass
+                                    env_runner = hydra.utils.instantiate(
+                                        cfg.task.env_runner,
+                                        output_dir=self.output_dir)
+                                    runner_log = dict(last_runner_log)
+                                step_log.update(runner_log)
                             # runner_log = env_runner.run(policy, stochastic=True)
                             # step_log.update(runner_log)
 
@@ -533,34 +543,52 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             step_log['param_norm'] = param_norm
                             step_log['relative_update_size'] = step_log['grad_step_size'] / (param_norm + 1e-12)
 
-                        # validation: noise prediction loss
+                        # validation: noise prediction loss - both deterministic
+                        # (posterior mean weights) and stochastic (weights sampled
+                        # from the posterior) variants every time, so
+                        # test_noise_pred_loss_deterministic vs. _stochastic shows
+                        # directly how much weight-sampling costs/changes held-out
+                        # performance - not just cfg.eval.stochastic's single fixed
+                        # choice.
                         if ((current_step % val_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
-                            with torch.no_grad():
-                                val_losses = []
-                                with tqdm.tqdm(val_dataloader, desc=f"Validation step {current_step}: Noise Prediction Loss on test set", 
-                                        leave=False, mininterval=cfg.training.tqdm_interval_sec) as vepoch:
-                                    n_samples_total=0
-                                    for v_idx, vbatch in enumerate(vepoch):
-                                        n_samples = len(vbatch["obs"])
-                                        n_samples_total = n_samples_total + n_samples
-                                        vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
-                                        val_loss = policy.compute_loss(vbatch, stochastic=cfg.eval.stochastic, train=False)
-                                        val_losses.append(val_loss.item() * n_samples)
-                                        if (cfg.training.max_val_steps is not None) and v_idx >= (cfg.training.max_val_steps - 1):
-                                            break
-                                if len(val_losses) > 0:
-                                    noise_loss = np.sum(val_losses) / n_samples_total
-                                    step_log['test_noise_pred_loss'] = noise_loss
+                            for val_stochastic in (False, True):
+                                suffix = 'stochastic' if val_stochastic else 'deterministic'
+                                with torch.no_grad():
+                                    val_losses = []
+                                    with tqdm.tqdm(val_dataloader, desc=f"Validation step {current_step} ({suffix}): Noise Prediction Loss on test set",
+                                            leave=False, mininterval=cfg.training.tqdm_interval_sec) as vepoch:
+                                        n_samples_total=0
+                                        for v_idx, vbatch in enumerate(vepoch):
+                                            n_samples = len(vbatch["obs"])
+                                            n_samples_total = n_samples_total + n_samples
+                                            vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
+                                            val_loss = policy.compute_loss(vbatch, stochastic=val_stochastic, train=False)
+                                            val_losses.append(val_loss.item() * n_samples)
+                                            if (cfg.training.max_val_steps is not None) and v_idx >= (cfg.training.max_val_steps - 1):
+                                                break
+                                    if len(val_losses) > 0:
+                                        noise_loss = np.sum(val_losses) / n_samples_total
+                                        step_log[f'test_noise_pred_loss_{suffix}'] = noise_loss
 
-                        # NLL bound
+                        # NLL bound - both variants, same reasoning as above.
                         if ((current_step % nll_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
-                            NLL_test = policy.nll_bound(val_dataloader, current_step, npoints=100, stochastic=cfg.eval.stochastic)
-                            step_log['test_nll_bpd'] = NLL_test
+                            for val_stochastic in (False, True):
+                                suffix = 'stochastic' if val_stochastic else 'deterministic'
+                                NLL_test = policy.nll_bound(val_dataloader, current_step, npoints=100, stochastic=val_stochastic)
+                                step_log[f'test_nll_bpd_{suffix}'] = NLL_test
 
-                        # reconstruction loss
+                        # reconstruction loss - both variants, same reasoning as
+                        # above. (Previously called as
+                        # compute_action_reconst_loss(val_dataloader, cfg), which
+                        # bound `cfg` to the method's stochastic= parameter
+                        # positionally - always truthy, so this was always running
+                        # as if stochastic=True regardless of cfg.eval.stochastic;
+                        # now passed explicitly and correctly for both.)
                         if ((current_step % reconst_loss_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
-                            reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
-                            step_log['test_action_reconst_loss'] = reconst_loss.item()
+                            for val_stochastic in (False, True):
+                                suffix = 'stochastic' if val_stochastic else 'deterministic'
+                                reconst_loss = policy.compute_action_reconst_loss(val_dataloader, stochastic=val_stochastic)
+                                step_log[f'test_action_reconst_loss_{suffix}'] = reconst_loss.item()
 
                         policy.train()
                         

@@ -284,46 +284,33 @@ class TrainPacFlowUnetLowdimWorkspace(BaseWorkspace):
                         policy = self.ema_model if cfg.training.use_ema else self.model
                         policy.eval()
 
-                        # run rollout
+                        # run rollout - both deterministic (posterior mean weights)
+                        # and stochastic (weights sampled from the posterior) variants
+                        # every time, so their mean_score_deterministic/_stochastic
+                        # trends are directly comparable at every logged step.
                         if (current_step % rollout_every) == 0 or self.global_step==0:
-                            try:
-                                runner_log = env_runner.run(policy, stochastic=False)
-                                last_runner_log.update(runner_log)
-                            except MujocoException as e:
-                                print(f"Warning: MuJoCo instability during rollout at step "
-                                      f"{current_step} ({e}). Reporting the previous rollout's "
-                                      f"score(s) instead so wandb has no gap.")
-                                step_log['rollout_mujoco_error'] = str(e)
-                                # The crashed worker's pipe is permanently closed by
-                                # AsyncVectorEnv._raise_if_errors, so env_runner can't be
-                                # reused - rebuild it.
+                            for rollout_stochastic in (False, True):
                                 try:
-                                    env_runner.env.close(terminate=True)
-                                except Exception:
-                                    pass
-                                env_runner = hydra.utils.instantiate(
-                                    cfg.task.env_runner,
-                                    output_dir=self.output_dir)
-                                runner_log = dict(last_runner_log)
-                            step_log.update(runner_log)
-
-                            try:
-                                runner_log = env_runner.run(policy, stochastic=True)
-                                last_runner_log.update(runner_log)
-                            except MujocoException as e:
-                                print(f"Warning: MuJoCo instability during rollout at step "
-                                      f"{current_step} ({e}). Reporting the previous rollout's "
-                                      f"score(s) instead so wandb has no gap.")
-                                step_log['rollout_mujoco_error'] = str(e)
-                                try:
-                                    env_runner.env.close(terminate=True)
-                                except Exception:
-                                    pass
-                                env_runner = hydra.utils.instantiate(
-                                    cfg.task.env_runner,
-                                    output_dir=self.output_dir)
-                                runner_log = dict(last_runner_log)
-                            step_log.update(runner_log)
+                                    runner_log = env_runner.run(policy, stochastic=rollout_stochastic)
+                                    last_runner_log.update(runner_log)
+                                except MujocoException as e:
+                                    print(f"Warning: MuJoCo instability during rollout "
+                                          f"(stochastic={rollout_stochastic}) at step "
+                                          f"{current_step} ({e}). Reporting the previous "
+                                          f"rollout's score(s) instead so wandb has no gap.")
+                                    step_log['rollout_mujoco_error'] = str(e)
+                                    # The crashed worker's pipe is permanently closed by
+                                    # AsyncVectorEnv._raise_if_errors, so env_runner can't be
+                                    # reused - rebuild it.
+                                    try:
+                                        env_runner.env.close(terminate=True)
+                                    except Exception:
+                                        pass
+                                    env_runner = hydra.utils.instantiate(
+                                        cfg.task.env_runner,
+                                        output_dir=self.output_dir)
+                                    runner_log = dict(last_runner_log)
+                                step_log.update(runner_log)
 
                         if ((current_step % val_every) == 0 or self.global_step==0):
                             # Diagnostic only, piggybacked on the validation cadence (cheap,
@@ -338,33 +325,40 @@ class TrainPacFlowUnetLowdimWorkspace(BaseWorkspace):
                             step_log['param_norm'] = param_norm
                             step_log['relative_update_size'] = step_log['grad_step_size'] / (param_norm + 1e-12)
 
-                        # validation: nll computation
+                        # validation: nll computation - both deterministic
+                        # (posterior mean weights) and stochastic (weights sampled
+                        # from the posterior) variants every time, so
+                        # test_NLL_deterministic vs. _stochastic shows directly how
+                        # much weight-sampling costs/changes held-out performance -
+                        # not just cfg.eval.stochastic's single fixed choice.
                         if ((current_step % val_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
-                            nlls = []
-                            val_losses = []
-                            with tqdm.tqdm(val_dataloader, desc=f"Validation step {current_step}: NLL computation on the test set", 
-                                    leave=False, mininterval=cfg.training.tqdm_interval_sec) as vepoch:
-                                n_samples_total=0
-                                for v_idx, vbatch in enumerate(vepoch):
-                                    n_samples = len(vbatch["obs"])
-                                    n_samples_total = n_samples_total + n_samples
-                                    vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
-                                    
-                                    val_loss = policy.compute_loss(vbatch, stochastic=cfg.eval.stochastic)
-                                    nll = policy.compute_nll(vbatch, stochastic=cfg.eval.stochastic,
-                                                                exact_divergence=cfg.eval.exact_divergence,
-                                                            )
-                                    
-                                    nlls.append(nll.item() * n_samples)
-                                    val_losses.append(val_loss.item() * n_samples)
-                                    if (cfg.training.max_val_steps is not None) and v_idx >= (cfg.training.max_val_steps - 1):
-                                        break
-                            if len(nlls) > 0:
-                                nll = np.sum(nlls) / n_samples_total
-                                step_log['test_NLL'] = nll
-                            if len(val_losses) > 0:
-                                val_loss = np.sum(val_losses) / n_samples_total
-                                step_log['test_loss'] = val_loss
+                            for val_stochastic in (False, True):
+                                suffix = 'stochastic' if val_stochastic else 'deterministic'
+                                nlls = []
+                                val_losses = []
+                                with tqdm.tqdm(val_dataloader, desc=f"Validation step {current_step} ({suffix}): NLL computation on the test set",
+                                        leave=False, mininterval=cfg.training.tqdm_interval_sec) as vepoch:
+                                    n_samples_total=0
+                                    for v_idx, vbatch in enumerate(vepoch):
+                                        n_samples = len(vbatch["obs"])
+                                        n_samples_total = n_samples_total + n_samples
+                                        vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
+
+                                        val_loss = policy.compute_loss(vbatch, stochastic=val_stochastic)
+                                        nll = policy.compute_nll(vbatch, stochastic=val_stochastic,
+                                                                    exact_divergence=cfg.eval.exact_divergence,
+                                                                )
+
+                                        nlls.append(nll.item() * n_samples)
+                                        val_losses.append(val_loss.item() * n_samples)
+                                        if (cfg.training.max_val_steps is not None) and v_idx >= (cfg.training.max_val_steps - 1):
+                                            break
+                                if len(nlls) > 0:
+                                    nll = np.sum(nlls) / n_samples_total
+                                    step_log[f'test_NLL_{suffix}'] = nll
+                                if len(val_losses) > 0:
+                                    val_loss = np.sum(val_losses) / n_samples_total
+                                    step_log[f'test_loss_{suffix}'] = val_loss
 
                         policy.train()
                         

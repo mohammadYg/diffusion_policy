@@ -336,11 +336,16 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
 
         # Carries the last successful rollout's score(s) forward across MuJoCo
         # instability so wandb's mean_score plot has no gap/jump - starts at 0.0
-        # per prefix (e.g. 'test/') for the case where the very first rollout fails.
+        # per prefix (e.g. 'test/') for the case where the very first rollout
+        # fails. Both stochastic variants are rolled out every time (see the
+        # "run rollout" block below), so both keys need a zero default.
         last_runner_log: dict = {}
         if env_runner is not None:
             prefixes = sorted(set(getattr(env_runner, 'env_prefixs', ['test/'])))
-            last_runner_log = {prefix + 'mean_score_deterministic': 0.0 for prefix in prefixes}
+            last_runner_log = {
+                **{prefix + 'mean_score_deterministic': 0.0 for prefix in prefixes},
+                **{prefix + 'mean_score_stochastic': 0.0 for prefix in prefixes},
+            }
 
         # configure logging
         wandb_run = wandb.init(
@@ -492,30 +497,33 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                         policy = self.ema_model if cfg.training.use_ema else self.model
                         policy.eval()
 
-                        # run rollout
-                        if env_runner is not None and ((current_step % rollout_every) == 0): #or self.global_step==0):
-                            try:
-                                runner_log = env_runner.run(policy, stochastic=False)
-                                last_runner_log.update(runner_log)
-                            except MujocoException as e:
-                                print(f"Warning: MuJoCo instability during rollout at step "
-                                      f"{current_step} ({e}). Reporting the previous rollout's "
-                                      f"score(s) instead so wandb has no gap.")
-                                step_log['rollout_mujoco_error'] = str(e)
-                                # The crashed worker's pipe is permanently closed by
-                                # AsyncVectorEnv._raise_if_errors, so env_runner can't be
-                                # reused - rebuild it.
+                        # run rollout - both deterministic (posterior mean weights)
+                        # and stochastic (weights sampled from the posterior) variants
+                        # every time, so their mean_score_deterministic/_stochastic
+                        # trends are directly comparable at every logged step.
+                        if env_runner is not None and ((current_step % rollout_every) == 0):
+                            for rollout_stochastic in (False, True):
                                 try:
-                                    env_runner.env.close(terminate=True)
-                                except Exception:
-                                    pass
-                                env_runner = hydra.utils.instantiate(
-                                    cfg.task.env_runner,
-                                    output_dir=self.output_dir)
-                                runner_log = dict(last_runner_log)
-                            step_log.update(runner_log)
-                            # runner_log = env_runner.run(policy, stochastic=True)
-                            # step_log.update(runner_log)
+                                    runner_log = env_runner.run(policy, stochastic=rollout_stochastic)
+                                    last_runner_log.update(runner_log)
+                                except MujocoException as e:
+                                    print(f"Warning: MuJoCo instability during rollout "
+                                          f"(stochastic={rollout_stochastic}) at step "
+                                          f"{current_step} ({e}). Reporting the previous "
+                                          f"rollout's score(s) instead so wandb has no gap.")
+                                    step_log['rollout_mujoco_error'] = str(e)
+                                    # The crashed worker's pipe is permanently closed by
+                                    # AsyncVectorEnv._raise_if_errors, so env_runner can't be
+                                    # reused - rebuild it.
+                                    try:
+                                        env_runner.env.close(terminate=True)
+                                    except Exception:
+                                        pass
+                                    env_runner = hydra.utils.instantiate(
+                                        cfg.task.env_runner,
+                                        output_dir=self.output_dir)
+                                    runner_log = dict(last_runner_log)
+                                step_log.update(runner_log)
 
                         # validation: noise prediction loss
                         if ((current_step % val_every) == 0 or is_first_step):
@@ -532,70 +540,76 @@ class TrainPacDriftUnetLowdimWorkspace(BaseWorkspace):
                             step_log['relative_update_size'] = step_log['grad_step_size'] / (param_norm + 1e-12)
 
                             if len(val_dataloader) > 0:
-                                with torch.no_grad():
-                                    val_losses = []
-                                    val_metric_sums = {}
-                                    with tqdm.tqdm(val_dataloader, desc=f"Validation step {current_step}: Noise Prediction Loss on test set",
-                                            leave=False, mininterval=cfg.training.tqdm_interval_sec) as vepoch:
-                                        n_samples_total=0
-                                        for v_idx, vbatch in enumerate(vepoch):
-                                            n_samples = len(vbatch["obs"])
-                                            n_samples_total = n_samples_total + n_samples
-                                            vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
-                                            val_loss, val_metrics = policy.compute_loss(vbatch, stochastic=cfg.eval.stochastic)
-                                            val_losses.append(val_loss.item() * n_samples)
-                                            # Same drift_loss diagnostics as train (scale, loss_R,
-                                            # mean_dist_to_pos, diversity, entropy_R, ...) but on
-                                            # held-out data, so train-vs-val divergence in these
-                                            # interpretable quantities is visible directly, not
-                                            # just via the (sometimes uninformative) scalar loss.
-                                            for k, v in val_metrics.items():
-                                                val_metric_sums[k] = val_metric_sums.get(k, 0.0) + v * n_samples
+                                # Both deterministic (posterior mean weights) and
+                                # stochastic (weights sampled from the posterior)
+                                # variants every time, so e.g. test_loss_deterministic
+                                # vs. test_loss_stochastic shows directly how much
+                                # weight-sampling costs/changes held-out performance -
+                                # not just cfg.eval.stochastic's single fixed choice.
+                                for val_stochastic in (False, True):
+                                    suffix = 'stochastic' if val_stochastic else 'deterministic'
+                                    with torch.no_grad():
+                                        val_losses = []
+                                        val_metric_sums = {}
+                                        with tqdm.tqdm(val_dataloader, desc=f"Validation step {current_step} ({suffix}): Noise Prediction Loss on test set",
+                                                leave=False, mininterval=cfg.training.tqdm_interval_sec) as vepoch:
+                                            n_samples_total=0
+                                            for v_idx, vbatch in enumerate(vepoch):
+                                                n_samples = len(vbatch["obs"])
+                                                n_samples_total = n_samples_total + n_samples
+                                                vbatch = dict_apply(vbatch, lambda x: x.to(device, non_blocking=True))
+                                                val_loss, val_metrics = policy.compute_loss(vbatch, stochastic=val_stochastic)
+                                                val_losses.append(val_loss.item() * n_samples)
+                                                # Same drift_loss diagnostics as train (scale, loss_R,
+                                                # mean_dist_to_pos, diversity, entropy_R, ...) but on
+                                                # held-out data, so train-vs-val divergence in these
+                                                # interpretable quantities is visible directly, not
+                                                # just via the (sometimes uninformative) scalar loss.
+                                                for k, v in val_metrics.items():
+                                                    val_metric_sums[k] = val_metric_sums.get(k, 0.0) + v * n_samples
 
-                                            # Deployed-time single-sample action diversity: unlike
-                                            # drift_loss's own `diversity` (measured among the G
-                                            # training-time candidates), this measures the actual
-                                            # predict_action() stochasticity a real rollout would
-                                            # see - N_DEPLOYED_DIVERSITY_SAMPLES independent calls
-                                            # (fresh noise/weight-sample each time, no policy
-                                            # change needed) on this first held-out batch only,
-                                            # since it's a diagnostic snapshot, not something to
-                                            # average over the whole validation set (cheap:
-                                            # single-forward-pass policy, no environment/
-                                            # simulator involved). stochastic=cfg.eval.stochastic
-                                            # matches the convention already used for
-                                            # compute_loss just above.
-                                            if v_idx == 0:
-                                                obs_dict = {"obs": vbatch["obs"]}
-                                                action_samples = torch.stack(
-                                                    [policy.predict_action(obs_dict, stochastic=cfg.eval.stochastic)["action"]
-                                                     for _ in range(N_DEPLOYED_DIVERSITY_SAMPLES)],
-                                                    dim=1,
-                                                )
-                                                step_log["test_deployed_action_diversity"] = \
-                                                    action_sample_diversity(action_samples)
-                                                # Reconstruction loss: how close each of the
-                                                # same K deployed samples is to the actual
-                                                # demonstrated action, vs. diversity (how
-                                                # spread out they are from each other) - the
-                                                # deployed-time counterpart to drift_loss's own
-                                                # mean_dist_to_pos. Reference is sliced to the
-                                                # same executed Ta-window predict_action()'s
-                                                # "action" is (start=n_obs_steps-1), in the
-                                                # same raw/unnormalized units.
-                                                start = policy.n_obs_steps - 1
-                                                end = start + policy.n_action_steps
-                                                reference_action = vbatch["action"][:, start:end]
-                                                step_log["test_deployed_reconstruction_loss"] = \
-                                                    action_reconstruction_loss(action_samples, reference_action)
+                                                # Deployed-time single-sample action diversity: unlike
+                                                # drift_loss's own `diversity` (measured among the G
+                                                # training-time candidates), this measures the actual
+                                                # predict_action() stochasticity a real rollout would
+                                                # see - N_DEPLOYED_DIVERSITY_SAMPLES independent calls
+                                                # (fresh noise/weight-sample each time, no policy
+                                                # change needed) on this first held-out batch only,
+                                                # since it's a diagnostic snapshot, not something to
+                                                # average over the whole validation set (cheap:
+                                                # single-forward-pass policy, no environment/
+                                                # simulator involved).
+                                                if v_idx == 0:
+                                                    obs_dict = {"obs": vbatch["obs"]}
+                                                    action_samples = torch.stack(
+                                                        [policy.predict_action(obs_dict, stochastic=val_stochastic)["action"]
+                                                         for _ in range(N_DEPLOYED_DIVERSITY_SAMPLES)],
+                                                        dim=1,
+                                                    )
+                                                    step_log[f"test_deployed_action_diversity_{suffix}"] = \
+                                                        action_sample_diversity(action_samples)
+                                                    # Reconstruction loss: how close each of the
+                                                    # same K deployed samples is to the actual
+                                                    # demonstrated action, vs. diversity (how
+                                                    # spread out they are from each other) - the
+                                                    # deployed-time counterpart to drift_loss's own
+                                                    # mean_dist_to_pos. Reference is sliced to the
+                                                    # same executed Ta-window predict_action()'s
+                                                    # "action" is (start=n_obs_steps-1), in the
+                                                    # same raw/unnormalized units.
+                                                    start = policy.n_obs_steps - 1
+                                                    end = start + policy.n_action_steps
+                                                    reference_action = vbatch["action"][:, start:end]
+                                                    step_log[f"test_deployed_reconstruction_loss_{suffix}"] = \
+                                                        action_reconstruction_loss(action_samples, reference_action)
 
-                                            if (cfg.training.max_val_steps is not None) and v_idx >= (cfg.training.max_val_steps - 1):
-                                                break
-                                    if len(val_losses) > 0:
-                                        noise_loss = np.sum(val_losses) / n_samples_total
-                                        step_log['test_loss'] = noise_loss
-                                        for k, total in val_metric_sums.items():
-                                            step_log[f'test_{k}'] = total / n_samples_total
+                                                if (cfg.training.max_val_steps is not None) and v_idx >= (cfg.training.max_val_steps - 1):
+                                                    break
+                                        if len(val_losses) > 0:
+                                            noise_loss = np.sum(val_losses) / n_samples_total
+                                            step_log[f'test_loss_{suffix}'] = noise_loss
+                                            for k, total in val_metric_sums.items():
+                                                step_log[f'test_{k}_{suffix}'] = total / n_samples_total
 
                         policy.train()
                         
