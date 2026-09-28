@@ -262,6 +262,13 @@ class TrainPacFlowUnetLowdimWorkspace(BaseWorkspace):
 
                         # build step-log (use the upcoming/global step index)
                         current_step = self.global_step + 1
+                        is_first_step = self.global_step == 0
+                        # Set before any checkpointing below runs, so a saved
+                        # payload's global_step (restored on resume) always
+                        # matches the step number already in its filename -
+                        # setting it after checkpointing left them off by one,
+                        # so resuming re-ran one already-checkpointed step.
+                        self.global_step = current_step
                         current_lr = lr_scheduler.get_last_lr()[0]
                         step_log = {
                             'train_loss (pac_bayes bound)': raw_loss_cpu,
@@ -288,7 +295,7 @@ class TrainPacFlowUnetLowdimWorkspace(BaseWorkspace):
                         # and stochastic (weights sampled from the posterior) variants
                         # every time, so their mean_score_deterministic/_stochastic
                         # trends are directly comparable at every logged step.
-                        if (current_step % rollout_every) == 0 or self.global_step==0:
+                        if (current_step % rollout_every) == 0 or is_first_step:
                             for rollout_stochastic in (False, True):
                                 try:
                                     runner_log = env_runner.run(policy, stochastic=rollout_stochastic)
@@ -312,7 +319,7 @@ class TrainPacFlowUnetLowdimWorkspace(BaseWorkspace):
                                     runner_log = dict(last_runner_log)
                                 step_log.update(runner_log)
 
-                        if ((current_step % val_every) == 0 or self.global_step==0):
+                        if ((current_step % val_every) == 0 or is_first_step):
                             # Diagnostic only, piggybacked on the validation cadence (cheap,
                             # no need for its own schedule): total parameter norm, and the
                             # relative update size (grad_step_size / param_norm) - a more
@@ -331,7 +338,7 @@ class TrainPacFlowUnetLowdimWorkspace(BaseWorkspace):
                         # test_NLL_deterministic vs. _stochastic shows directly how
                         # much weight-sampling costs/changes held-out performance -
                         # not just cfg.eval.stochastic's single fixed choice.
-                        if ((current_step % val_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
+                        if ((current_step % val_every) == 0 or is_first_step) and (len(val_dataloader) > 0):
                             for val_stochastic in (False, True):
                                 suffix = 'stochastic' if val_stochastic else 'deterministic'
                                 nlls = []
@@ -393,7 +400,6 @@ class TrainPacFlowUnetLowdimWorkspace(BaseWorkspace):
                         # log & step
                         wandb_run.log(step_log, step=current_step)
                         json_logger.log(step_log)
-                        self.global_step = current_step
 
                         # optional early stopping per-batch limit
                         if (cfg.training.max_train_steps is not None) and batch_idx >= (cfg.training.max_train_steps - 1):
