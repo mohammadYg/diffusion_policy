@@ -521,7 +521,11 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                           f"(stochastic={rollout_stochastic}) at step "
                                           f"{current_step} ({e}). Reporting the previous "
                                           f"rollout's score(s) instead so wandb has no gap.")
-                                    step_log['rollout_mujoco_error'] = str(e)
+                                    # Keyed per variant - both can crash in the
+                                    # same step, and an unsuffixed key would
+                                    # have the second overwrite the first.
+                                    error_suffix = 'stochastic' if rollout_stochastic else 'deterministic'
+                                    step_log[f'rollout_mujoco_error_{error_suffix}'] = str(e)
                                     # The crashed worker's pipe is permanently closed by
                                     # AsyncVectorEnv._raise_if_errors, so env_runner can't be
                                     # reused - rebuild it.
