@@ -14,6 +14,7 @@ from copy import deepcopy
 
 from gym import logger
 from gym.vector.vector_env import VectorEnv
+from mujoco_py.builder import MujocoException
 from gym.error import (
     AlreadyPendingCallError,
     NoAsyncCallError,
@@ -381,6 +382,13 @@ class AsyncVectorEnv(VectorEnv):
         for _ in newly_failed:
             index, exctype, value = self.error_queue.get()
             errors_by_index[index] = (exctype, value)
+        # tolerate_step_errors only tolerates MuJoCo instability (the crash
+        # this feature exists to survive) - any other exception type (e.g. a
+        # real bug: a misconfigured action space, an assertion in the env
+        # wrapper) is still raised, matching the non-tolerant path's
+        # behavior, instead of being silently treated as an excludable
+        # episode crash and carried-forward like a MuJoCo NaN/Inf would be.
+        non_mujoco_error = None
         for i in newly_failed:
             exctype, value = errors_by_index[i]
             logger.warn(
@@ -392,6 +400,18 @@ class AsyncVectorEnv(VectorEnv):
             self.parent_pipes[i] = None
             self._failed[i] = True
             self._last_error[i] = "{0}: {1}".format(exctype.__name__, value)
+            if not (isinstance(exctype, type) and issubclass(exctype, MujocoException)):
+                non_mujoco_error = (exctype, value)
+
+        if non_mujoco_error is not None:
+            exctype, value = non_mujoco_error
+            logger.error(
+                "Worker crashed with a non-MuJoCo error ({0}: {1}) - "
+                "tolerate_step_errors only tolerates MujocoException, so "
+                "this is raised instead of being excluded as a crashed "
+                "episode.".format(exctype.__name__, value)
+            )
+            raise exctype(value)
 
         placeholder_info = lambda i: {"crashed": True, "error": self._last_error[i]}
         observations_list, rewards, dones, infos = [], [], [], []

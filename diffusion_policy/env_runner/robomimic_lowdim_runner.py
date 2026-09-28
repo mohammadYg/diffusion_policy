@@ -11,7 +11,7 @@ import h5py
 import dill
 import math
 import wandb.sdk.data_types.video as wv
-from diffusion_policy.gym_util.async_vector_env import AsyncVectorEnv
+from diffusion_policy.gym_util.async_vector_env import AsyncVectorEnv, AsyncState
 from mujoco_py.builder import MujocoException
 # from diffusion_policy.gym_util.sync_vector_env import SyncVectorEnv
 from diffusion_policy.gym_util.multistep_wrapper import MultiStepWrapper
@@ -323,15 +323,20 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         rows reassigned mid-batch without corrupting that state, so they
         keep the original synchronized chunk-by-chunk rollout.
         """
-        if any(self.env._failed):
-            # A previous run() call tolerated a worker crash (see
-            # tolerate_step_errors in __init__) and left that slot's pipe
-            # permanently None. Every subsequent env.reset()/call_each(...)
-            # sends to ALL pipes unconditionally, so without rebuilding here
-            # the very next run() call would raise an uncaught
-            # AttributeError on the dead pipe instead of a MujocoException -
-            # i.e. one tolerated crash would otherwise silently turn into a
-            # hard failure of the next rollout/checkpoint eval.
+        # A previous run() call tolerated a worker crash and left that slot's
+        # pipe permanently None. Every subsequent env.reset()/call_each(...)
+        # sends to ALL pipes unconditionally, so without rebuilding here the
+        # very next run() call would raise an uncaught AttributeError on the
+        # dead pipe instead of a MujocoException - i.e. one tolerated crash
+        # would otherwise silently turn into a hard failure of the next
+        # rollout/checkpoint eval. `_failed` only gets set by a crash inside
+        # step() (see AsyncVectorEnv.step_wait's tolerate branch) - a crash
+        # inside reset_at/call_at/call_each (_raise_if_errors_at) instead
+        # nulls the pipe without setting `_failed`, and can also leave
+        # `_state` stuck away from DEFAULT, so check for those directly too.
+        if (any(self.env._failed)
+                or any(p is None for p in self.env.parent_pipes)
+                or self.env._state != AsyncState.DEFAULT):
             self.env.close(terminate=True)
             self.env = AsyncVectorEnv(self.env_fns, tolerate_step_errors=True)
         if getattr(policy, 'is_stateful', False):
@@ -594,17 +599,17 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             max_reward = np.max(all_rewards[i])
             max_rewards[prefix].append(max_reward)
 
-        # A prefix with zero survivors (every one of its episodes lost to a
-        # worker crash) would otherwise silently omit its usual key (e.g.
-        # 'test/mean_score') from log_data below, crashing the caller's
-        # runner_log[...] lookup. Treat total wipeout as another form of
-        # MuJoCo instability so it goes through the same
-        # carry-forward-previous-checkpoint handling callers already have.
-        empty_prefixes = [p for p in set(self.env_prefixs) if len(max_rewards.get(p, [])) == 0]
-        if empty_prefixes:
+        # Every caller's score_key_for() reads 'test/mean_score...' - only
+        # that prefix's total wipeout is a caller-facing failure (its key
+        # would otherwise be silently missing from log_data below, crashing
+        # the caller's runner_log[...] lookup). A 'train/' (or any other
+        # non-'test/' prefix) wipeout just omits that prefix's own key,
+        # which nothing downstream reads, so it doesn't need to abort an
+        # otherwise-valid checkpoint's real test/ score.
+        if 'test/' in set(self.env_prefixs) and len(max_rewards.get('test/', [])) == 0:
             raise MujocoException(
-                f"All episodes for prefix(es) {empty_prefixes} were lost to "
-                "worker crashes; no valid score to report for this checkpoint."
+                "All 'test/' episodes were lost to worker crashes; no valid "
+                "score to report for this checkpoint."
             )
 
         # log aggregate metrics
