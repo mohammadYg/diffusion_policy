@@ -33,6 +33,15 @@ from gym.vector.utils import (
 
 __all__ = ["AsyncVectorEnv"]
 
+# A worker's error_queue.put((index,) + sys.exc_info()[:2]) can silently fail
+# if the exception's value doesn't pickle (the Queue's feeder thread catches
+# and drops that failure internally, without telling the sender) - without a
+# timeout, the parent's error_queue.get() would then block forever, holding
+# a GPU/cluster job for its whole walltime instead of failing loudly. MuJoCo/
+# robosuite exceptions are plain strings and always pickle fine, so this is
+# only a safety net for an unexpected exception type.
+ERROR_QUEUE_GET_TIMEOUT_SEC = 60
+
 
 class AsyncState(Enum):
     DEFAULT = "default"
@@ -380,7 +389,22 @@ class AsyncVectorEnv(VectorEnv):
         # each newly-failed slot up by that key.
         errors_by_index = {}
         for _ in newly_failed:
-            index, exctype, value = self.error_queue.get()
+            try:
+                index, exctype, value = self.error_queue.get(
+                    timeout=ERROR_QUEUE_GET_TIMEOUT_SEC)
+            except Exception as e:
+                # Couldn't retrieve/reconstruct one of this step's errors -
+                # e.g. its exception value failed to pickle and was
+                # silently dropped by the Queue's feeder thread (get()
+                # would otherwise hang forever), or failed to unpickle
+                # cleanly. We know from `successes` that some worker(s)
+                # failed, just not reliably which one or why, so abort
+                # loudly and boundedly instead.
+                raise RuntimeError(
+                    "A worker reported a step() failure, but its exception "
+                    f"could not be retrieved from error_queue ({e!r}) - "
+                    "likely failed to pickle."
+                ) from e
             errors_by_index[index] = (exctype, value)
         # tolerate_step_errors only tolerates MuJoCo instability (the crash
         # this feature exists to survive) - any other exception type (e.g. a
@@ -411,7 +435,14 @@ class AsyncVectorEnv(VectorEnv):
                 "this is raised instead of being excluded as a crashed "
                 "episode.".format(exctype.__name__, value)
             )
-            raise exctype(value)
+            # value is already the worker's actual exception instance (see
+            # _worker*'s error_queue.put((index,) + sys.exc_info()[:2])) -
+            # re-raise it directly. Reconstructing via exctype(value) passes
+            # the exception itself as the sole constructor arg, which only
+            # happens to work for single-string-arg exceptions; for any
+            # exception whose __init__ takes more than that, it raises a
+            # confusing TypeError instead and hides the real error.
+            raise value
 
         placeholder_info = lambda i: {"crashed": True, "error": self._last_error[i]}
         observations_list, rewards, dones, infos = [], [], [], []
@@ -458,7 +489,17 @@ class AsyncVectorEnv(VectorEnv):
         """
         timeout = 0 if terminate else timeout
         try:
-            if self._state != AsyncState.DEFAULT:
+            # Only attempt to drain a pending call when NOT forcibly
+            # terminating - terminate=True is about to kill every process
+            # regardless, and the drain itself can fail here in ways a
+            # caller can't recover from: if the pending call is a
+            # reset/step whose worker(s) already died (e.g. every
+            # parent_pipe is None, or one is at EOF from a segfault), the
+            # drain's own _poll()/recv() misreads a fully-dead pipe as
+            # "ready" and then calls recv() on it, raising AttributeError
+            # or EOFError instead of the intended mp.TimeoutError - which
+            # would propagate out of close() itself uncaught.
+            if not terminate and self._state != AsyncState.DEFAULT:
                 logger.warn(
                     "Calling `close` while waiting for a pending "
                     "call to `{0}` to complete.".format(self._state.value)
@@ -530,7 +571,18 @@ class AsyncVectorEnv(VectorEnv):
         num_errors = self.num_envs - sum(successes)
         assert num_errors > 0
         for _ in range(num_errors):
-            index, exctype, value = self.error_queue.get()
+            try:
+                index, exctype, value = self.error_queue.get(
+                    timeout=ERROR_QUEUE_GET_TIMEOUT_SEC)
+            except Exception as e:
+                # See the matching note in step_wait()'s tolerate branch -
+                # this bounds what would otherwise be an indefinite hang if
+                # a worker's exception value failed to pickle.
+                raise RuntimeError(
+                    "A worker reported a failure, but its exception could "
+                    f"not be retrieved from error_queue ({e!r}) - likely "
+                    "failed to pickle."
+                ) from e
             logger.error(
                 "Received the following error from Worker-{0}: "
                 "{1}: {2}".format(index, exctype.__name__, value)
@@ -540,7 +592,10 @@ class AsyncVectorEnv(VectorEnv):
             self.parent_pipes[index] = None
 
         logger.error("Raising the last exception back to the main process.")
-        raise exctype(value)
+        # value is already the worker's actual exception instance - see the
+        # note in step_wait()'s tolerate branch on why exctype(value) is
+        # wrong for exceptions whose __init__ takes more than one arg.
+        raise value
 
     def _raise_if_errors_at(self, indices, successes):
         # Like _raise_if_errors, but for a call that only targeted `indices`
@@ -550,7 +605,16 @@ class AsyncVectorEnv(VectorEnv):
             return
         for i, success in zip(indices, successes):
             if not success:
-                index, exctype, value = self.error_queue.get()
+                try:
+                    index, exctype, value = self.error_queue.get(
+                        timeout=ERROR_QUEUE_GET_TIMEOUT_SEC)
+                except Exception as e:
+                    # See the matching note in step_wait()'s tolerate branch.
+                    raise RuntimeError(
+                        "A worker reported a failure, but its exception "
+                        f"could not be retrieved from error_queue ({e!r}) - "
+                        "likely failed to pickle."
+                    ) from e
                 logger.error(
                     "Received the following error from Worker-{0}: "
                     "{1}: {2}".format(index, exctype.__name__, value)
@@ -558,7 +622,9 @@ class AsyncVectorEnv(VectorEnv):
                 logger.error("Shutting down Worker-{0}.".format(index))
                 self.parent_pipes[index].close()
                 self.parent_pipes[index] = None
-                raise exctype(value)
+                # value is already the worker's actual exception instance -
+                # see the note in step_wait()'s tolerate branch.
+                raise value
 
     def reset_at(self, indices):
         """Reset only the sub-environments at `indices`, leaving all others
