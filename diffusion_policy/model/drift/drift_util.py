@@ -63,17 +63,24 @@ def drift_loss(gen, fixed_pos, fixed_neg=None, weight_gen=None, weight_pos=None,
         # without this normalization, scale would grow just because weights are large, not because distances are large.
         scale = weighted_dist.mean() / targets_w.mean()
         info["scale"] = scale
-        info["scale_clamped"] = torch.clamp(scale, min=1e-3)
+        # Whether the 1e-3 floor below is actually engaged this step - lets
+        # a grad_norm spike (or explosion, e.g. False's G>=12 collapse) be
+        # attributed to a genuine training instability vs. this numerical
+        # floor, instead of only inferring it from scale's own magnitude.
+        info["scale_clamp_active"] = (scale < 1e-3).float()
+        # scale_inputs (and its clamped form, computed below into the same
+        # variable) is used for real computation further down - only its
+        # logged diagnostic entries (scale_clamped/scale_inputs/
+        # scale_inputs_clamped) were removed, not the values themselves.
         scale_inputs = scale / (S ** 0.5)
-        info["scale_inputs"] = scale_inputs
+        info["scale_inputs_clamp_active"] = (scale_inputs < 1e-3).float()
         scale_inputs = torch.clamp(scale_inputs, min=1e-3)
-        info["scale_inputs_clamped"] = scale_inputs
 
         # Raw (unrenormalized) accuracy/diversity diagnostics, free from `dist`
-        # (computed before any /scale division, so - unlike `scale`/`loss_{R}`/
-        # `force_scale_{R}` below - these stay meaningful even when the batch's
-        # own scale collapses or the force-renormalization saturates, e.g. at
-        # small gen_per_label; see the gen_per_label=1 case where train_loss
+        # (computed before any /scale division, so - unlike `scale`/`loss_{R}`
+        # below - these stay meaningful even when the batch's own scale
+        # collapses or the force-renormalization saturates, e.g. at small
+        # gen_per_label; see the gen_per_label=1 case where train_loss
         # was pinned at a constant while these would have kept moving).
         gen_pos_dist = dist[:, :, -C_p:]  # [B, C_g, C_p]: generated -> true-action distance
         info["mean_dist_to_pos"] = gen_pos_dist.mean()
@@ -154,22 +161,25 @@ def drift_loss(gen, fixed_pos, fixed_neg=None, weight_gen=None, weight_pos=None,
             total_force_R = torch.einsum("biy,byx->bix", R_coeff, targets_scaled) # [B, C_g, S]
 
             total_coeffs = R_coeff.sum(dim=-1)  # [B, C_g]
-            # Numerical sanity check only: total_coeffs is algebraically guaranteed
-            # to be exactly 0 (it's -sum_neg*sum_pos + sum_pos*sum_neg). Logging its
-            # magnitude is a free correctness/stability tripwire - if it ever drifts
-            # meaningfully off 0, something upstream (e.g. mixed precision) is wrong.
-            info[f"total_coeffs_abs_{R}"] = total_coeffs.abs()
+            # total_coeffs is algebraically guaranteed to be exactly 0 (it's
+            # -sum_neg*sum_pos + sum_pos*sum_neg) - no longer logged (it never
+            # moved from ~0 in practice), but left computed here since it's
+            # used below regardless.
             total_force_R = total_force_R - total_coeffs.unsqueeze(-1) * old_gen_scaled
             f_norm_val = (total_force_R ** 2).mean()
             info[f"loss_{R}"] = f_norm_val
 
+            # force_scale = sqrt(loss_R) (up to the 1e-8 clamp floor), so it's
+            # not logged separately - it's used for the force renormalization
+            # below regardless.
             force_scale = torch.sqrt(torch.clamp(f_norm_val, min=1e-8))
-            info[f"force_scale_{R}"] = force_scale
             force_across_R = force_across_R + total_force_R / force_scale   # [B, C_g, S]
 
         # Raw (signed) drift term, summed across all temperatures - this is
         # exactly the vector added to old_gen_scaled to form the goal below.
-        info["force_across_R_L2_norm"] = (force_across_R ** 2).mean(dim=(-1, -2))
+        # (Its L2 norm was logged here but removed: it tracked the same
+        # declining-with-gen_per_label trend as loss_{R}/diversity rather
+        # than adding distinct information, in practice.)
         goal_scaled = old_gen_scaled + force_across_R
 
     # Loss with gradients through gen

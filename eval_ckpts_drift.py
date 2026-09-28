@@ -47,7 +47,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from diffusion_policy.common.pytorch_util import dict_apply
+from diffusion_policy.common.pytorch_util import dict_apply, action_sample_diversity, action_reconstruction_loss
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
@@ -150,6 +150,55 @@ def evaluate_drift_loss(policy, dataloader: DataLoader, cfg, device: torch.devic
     avg_loss = total_loss / total_samples
     avg_metrics = {k: v / total_samples for k, v in metric_sums.items()}
     return avg_loss, avg_metrics
+
+
+def evaluate_deployed_diversity(policy, dataloader: DataLoader, cfg, device: torch.device,
+                                 is_pac: bool, n_samples: int = 10) -> Optional[Dict[str, float]]:
+    """Deployed-time single-sample action quality. Every diversity/collapse/
+    mean_dist_to_pos diagnostic drift_loss logs is measured among the G
+    *training-time* candidates; at rollout time the policy is called once
+    per step (predict_action()) with a single fresh noise draw. This
+    measures that actual deployed behavior directly: `n_samples`
+    independent predict_action() calls on the same held-out observation
+    batch (no change to predict_action() needed - it already draws fresh
+    noise every call), then two complementary statistics over the
+    resulting action chunks - `diversity` (mean pairwise distance among
+    the samples) and `reconstruction_loss` (mean squared error of each
+    sample against the batch's own ground-truth demonstrated action, via
+    vmap). Only needs one batch, not the full validation set, so this is
+    cheap relative to the rollout evaluation itself.
+    """
+    policy.eval()
+    try:
+        batch = next(iter(dataloader))
+    except StopIteration:
+        return None
+    obs = batch["obs"].to(device, non_blocking=True)
+    obs_dict = {"obs": obs}
+
+    samples = []
+    with torch.inference_mode():
+        for _ in range(n_samples):
+            if is_pac:
+                stochastic = bool(OmegaConf.select(cfg, "eval.stochastic", default=False))
+                result = policy.predict_action(obs_dict, stochastic=stochastic)
+            else:
+                result = policy.predict_action(obs_dict)
+            samples.append(result["action"])
+    # [B, n_samples, Ta, Da]
+    samples = torch.stack(samples, dim=1)
+
+    # predict_action()'s "action" is the executed Ta-window action_pred[:,
+    # start:end] (start=n_obs_steps-1); slice the raw (unnormalized)
+    # ground-truth action the same way so units and shape line up exactly.
+    start = policy.n_obs_steps - 1
+    end = start + policy.n_action_steps
+    reference = batch["action"][:, start:end].to(device, non_blocking=True)
+
+    return {
+        "diversity": action_sample_diversity(samples),
+        "reconstruction_loss": action_reconstruction_loss(samples, reference),
+    }
 
 
 def score_key_for(policy, stochastic: bool) -> str:
@@ -262,6 +311,8 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, stochastic: b
     eval_times: List[float] = []
     loss_val = []
     metric_val: Dict[str, List[float]] = {}
+    deployed_diversity_val: List[float] = []
+    deployed_recon_loss_val: List[float] = []
     failed_checkpoints: List[Dict] = []
     partial_crash_checkpoints: List[Dict] = []
     last_success_rate: Optional[float] = None
@@ -337,6 +388,8 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, stochastic: b
             continue
 
         # Compute validation drift_loss + its diagnostic metrics (scale, loss_{R})
+        deployed_diversity = None
+        deployed_recon_loss = None
         if len(val_dataloader) == 0:
             loss_val.append(0.0)
             logger.warning("Validation dataloader is empty, skipping loss evaluation.")
@@ -345,6 +398,13 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, stochastic: b
             loss_val.append(loss)
             for k, v in metrics.items():
                 metric_val.setdefault(k, []).append(v)
+            deployed_metrics = evaluate_deployed_diversity(
+                policy, val_dataloader, cfg, device_obj, is_pac)
+            if deployed_metrics is not None:
+                deployed_diversity = deployed_metrics["diversity"]
+                deployed_recon_loss = deployed_metrics["reconstruction_loss"]
+                deployed_diversity_val.append(deployed_diversity)
+                deployed_recon_loss_val.append(deployed_recon_loss)
 
         key = f"model_at_step_{step:06d}"
         n_crashed = runner_log.get("n_crashed_episodes", 0)
@@ -356,6 +416,8 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, stochastic: b
             "eval_time_sec": eval_time,
             "n_crashed_episodes": n_crashed,
             "n_total_episodes": n_total,
+            "deployed_action_diversity": deployed_diversity,
+            "deployed_reconstruction_loss": deployed_recon_loss,
         }
         if n_crashed:
             logger.warning(
@@ -394,6 +456,10 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, stochastic: b
         json_log["loss_val"] = np.mean(loss_val)
         for k, vals in metric_val.items():
             json_log[f"drift_metric_{k}"] = np.mean(vals)
+        if deployed_diversity_val:
+            json_log["mean_deployed_action_diversity"] = np.mean(deployed_diversity_val)
+        if deployed_recon_loss_val:
+            json_log["mean_deployed_reconstruction_loss"] = np.mean(deployed_recon_loss_val)
         json_log["mean_scores"] = step_results["success_rates"]
         json_log["num_steps"] = step_results["steps"]
         json_log[f"mean_success_rate_last_{num_evaluated}_checkpoints"] = sum_success_rates / num_evaluated

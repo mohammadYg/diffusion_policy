@@ -12,6 +12,7 @@ import dill
 import math
 import wandb.sdk.data_types.video as wv
 from diffusion_policy.gym_util.async_vector_env import AsyncVectorEnv
+from mujoco_py.builder import MujocoException
 # from diffusion_policy.gym_util.sync_vector_env import SyncVectorEnv
 from diffusion_policy.gym_util.multistep_wrapper import MultiStepWrapper
 from diffusion_policy.gym_util.video_recording_wrapper import VideoRecordingWrapper, VideoRecorder
@@ -322,6 +323,17 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
         rows reassigned mid-batch without corrupting that state, so they
         keep the original synchronized chunk-by-chunk rollout.
         """
+        if any(self.env._failed):
+            # A previous run() call tolerated a worker crash (see
+            # tolerate_step_errors in __init__) and left that slot's pipe
+            # permanently None. Every subsequent env.reset()/call_each(...)
+            # sends to ALL pipes unconditionally, so without rebuilding here
+            # the very next run() call would raise an uncaught
+            # AttributeError on the dead pipe instead of a MujocoException -
+            # i.e. one tolerated crash would otherwise silently turn into a
+            # hard failure of the next rollout/checkpoint eval.
+            self.env.close(terminate=True)
+            self.env = AsyncVectorEnv(self.env_fns, tolerate_step_errors=True)
         if getattr(policy, 'is_stateful', False):
             all_rewards = self._run_chunked(policy, stochastic)
         else:
@@ -581,6 +593,19 @@ class RobomimicLowdimRunner(BaseLowdimRunner):
             prefix = self.env_prefixs[i]
             max_reward = np.max(all_rewards[i])
             max_rewards[prefix].append(max_reward)
+
+        # A prefix with zero survivors (every one of its episodes lost to a
+        # worker crash) would otherwise silently omit its usual key (e.g.
+        # 'test/mean_score') from log_data below, crashing the caller's
+        # runner_log[...] lookup. Treat total wipeout as another form of
+        # MuJoCo instability so it goes through the same
+        # carry-forward-previous-checkpoint handling callers already have.
+        empty_prefixes = [p for p in set(self.env_prefixs) if len(max_rewards.get(p, [])) == 0]
+        if empty_prefixes:
+            raise MujocoException(
+                f"All episodes for prefix(es) {empty_prefixes} were lost to "
+                "worker crashes; no valid score to report for this checkpoint."
+            )
 
         # log aggregate metrics
         if isinstance(policy, BaseLowdimPacPolicy):

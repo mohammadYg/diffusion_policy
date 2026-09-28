@@ -21,7 +21,7 @@ import tqdm
 
 from mujoco_py.builder import MujocoException
 
-from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
+from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to, action_sample_diversity, action_reconstruction_loss
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.policy.drift_unet_lowdim_policy import DriftUnetLowdimPolicy
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
@@ -32,6 +32,14 @@ from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from diffusers.training_utils import EMAModel
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+# Number of independent predict_action() calls (fresh noise each time, no
+# policy change needed) used to measure deployed-time single-sample action
+# diversity - see the validation block in run() and
+# diffusion_policy.common.pytorch_util.action_sample_diversity. Matches
+# eval_ckpts_drift.py's default so training-time and post-hoc numbers are
+# directly comparable.
+N_DEPLOYED_DIVERSITY_SAMPLES = 10
 
 # %%
 class TrainDriftUnetLowdimWorkspace(BaseWorkspace):
@@ -295,6 +303,41 @@ class TrainDriftUnetLowdimWorkspace(BaseWorkspace):
                                             # just via the (sometimes uninformative) scalar loss.
                                             for k, v in val_metrics.items():
                                                 val_metric_sums[k] = val_metric_sums.get(k, 0.0) + v * n_samples
+
+                                            # Deployed-time single-sample action diversity: unlike
+                                            # drift_loss's own `diversity` (measured among the G
+                                            # training-time candidates), this measures the actual
+                                            # predict_action() stochasticity a real rollout would
+                                            # see - N_DEPLOYED_DIVERSITY_SAMPLES independent calls
+                                            # (fresh noise each time, no policy change needed) on
+                                            # this first held-out batch only, since it's a
+                                            # diagnostic snapshot, not something to average over
+                                            # the whole validation set (cheap: single-forward-pass
+                                            # policy, no environment/simulator involved).
+                                            if v_idx == 0:
+                                                obs_dict = {"obs": vbatch["obs"]}
+                                                action_samples = torch.stack(
+                                                    [policy.predict_action(obs_dict)["action"]
+                                                     for _ in range(N_DEPLOYED_DIVERSITY_SAMPLES)],
+                                                    dim=1,
+                                                )
+                                                step_log["test_deployed_action_diversity"] = \
+                                                    action_sample_diversity(action_samples)
+                                                # Reconstruction loss: how close each of the
+                                                # same K deployed samples is to the actual
+                                                # demonstrated action, vs. diversity (how
+                                                # spread out they are from each other) - the
+                                                # deployed-time counterpart to drift_loss's own
+                                                # mean_dist_to_pos. Reference is sliced to the
+                                                # same executed Ta-window predict_action()'s
+                                                # "action" is (start=n_obs_steps-1), in the
+                                                # same raw/unnormalized units.
+                                                start = policy.n_obs_steps - 1
+                                                end = start + policy.n_action_steps
+                                                reference_action = vbatch["action"][:, start:end]
+                                                step_log["test_deployed_reconstruction_loss"] = \
+                                                    action_reconstruction_loss(action_samples, reference_action)
+
                                             if (cfg.training.max_val_steps is not None) and v_idx >= (cfg.training.max_val_steps - 1):
                                                 break
                                     if len(val_losses) > 0:

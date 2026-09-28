@@ -371,9 +371,18 @@ class AsyncVectorEnv(VectorEnv):
             i for i, (pipe, ok) in enumerate(zip(self.parent_pipes, successes))
             if pipe is not None and not ok
         ]
-        for i in newly_failed:
+        # error_queue delivers entries in wall-clock crash order, not in
+        # ascending worker-index order, so if two workers crash within the
+        # same step_wait() call, a positional `index == i` assumption can
+        # pair the wrong worker's index with the wrong exception. Drain all
+        # of this step's errors first, keyed by their own index, then look
+        # each newly-failed slot up by that key.
+        errors_by_index = {}
+        for _ in newly_failed:
             index, exctype, value = self.error_queue.get()
-            assert index == i
+            errors_by_index[index] = (exctype, value)
+        for i in newly_failed:
+            exctype, value = errors_by_index[i]
             logger.warn(
                 "Worker-{0} crashed during step ({1}: {2}); excluding its "
                 "in-progress episode and retiring that slot for the rest "
