@@ -253,6 +253,13 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
     loss_val = []
     nll_val = []
     failed_checkpoints: List[Dict] = []
+    # Steps whose 0.0 came from a crash with no previous checkpoint to carry
+    # forward from - the ONLY case the zero-replacement safety net below
+    # should touch. A genuine 0.0 (every episode actually failed) must stay
+    # 0.0: replacing it with the mean of the other checkpoints would inflate
+    # the reported success rate, sometimes drastically, on tasks/checkpoints
+    # that really did fail.
+    crash_no_prior_steps: set = set()
     last_success_rate: Optional[float] = None
     last_success_step: Optional[int] = None
 
@@ -292,6 +299,8 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
             # Carry the previous checkpoint's success_rate forward (0.0 if there is none yet) so mean_scores has no gap/NaN.
             reported_success_rate = last_success_rate if last_success_rate is not None else 0.0
+            if last_success_rate is None:
+                crash_no_prior_steps.add(step)
             json_log[f"model_at_step_{step:06d}"] = {
                 "error": str(e),
                 "success_rate": reported_success_rate,
@@ -357,30 +366,29 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
     # Final summary
     if num_evaluated > 0:
-        # A checkpoint's success_rate can be exactly 0.0 either genuinely
-        # (every episode failed) or as the carry-forward placeholder for
-        # a checkpoint that crashed with no prior score to fall back to
-        # (the very first checkpoint) - either way, a lone 0.0 sitting in
-        # an otherwise-reasonable trend is more likely an artifact than a
-        # real regression, so replace it with the mean of the other,
-        # non-zero checkpoints rather than letting it drag down the
-        # aggregate mean_success_rate.
+        # Only a checkpoint that crashed with NO prior checkpoint to carry
+        # forward from (its 0.0 is purely a "we have no idea" placeholder,
+        # not a measurement) gets replaced - never a genuine 0.0, which is a
+        # real measurement (every episode failed) and would otherwise get
+        # silently inflated by averaging it away.
         success_rates = step_results["success_rates"]
-        nonzero_rates = [s for s in success_rates if s != 0.0]
-        if nonzero_rates and len(nonzero_rates) < len(success_rates):
-            replacement = float(np.mean(nonzero_rates))
-            for idx, step in enumerate(step_results["steps"]):
-                if success_rates[idx] == 0.0:
-                    success_rates[idx] = replacement
-                    key = f"model_at_step_{step:06d}"
-                    if key in json_log:
-                        json_log[key]["success_rate"] = replacement
-                        json_log[key]["success_rate_zero_replaced_with_mean"] = True
+        steps = step_results["steps"]
+        replace_idx = [i for i, s in enumerate(steps) if s in crash_no_prior_steps]
+        real_rates = [r for i, r in enumerate(success_rates) if i not in replace_idx]
+        if replace_idx and real_rates:
+            replacement = float(np.mean(real_rates))
+            for i in replace_idx:
+                success_rates[i] = replacement
+                key = f"model_at_step_{steps[i]:06d}"
+                if key in json_log:
+                    json_log[key]["success_rate"] = replacement
+                    json_log[key]["success_rate_zero_replaced_with_mean"] = True
             sum_success_rates = float(np.sum(success_rates))
             logger.warning(
-                "%d checkpoint(s) had a 0.0 success_rate - replaced with "
-                "the mean of the other %d checkpoint(s), %.4f.",
-                len(success_rates) - len(nonzero_rates), len(nonzero_rates), replacement,
+                "%d checkpoint(s) crashed with no prior checkpoint to carry "
+                "forward from - replaced their placeholder 0.0 with the mean "
+                "of the other %d evaluated checkpoint(s), %.4f.",
+                len(replace_idx), len(real_rates), replacement,
             )
 
         json_log["loss_val"] = np.mean(loss_val)

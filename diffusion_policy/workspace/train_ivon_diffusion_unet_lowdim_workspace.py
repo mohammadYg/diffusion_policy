@@ -373,6 +373,13 @@ class TrainIvonDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
                         # build step-log (use the upcoming/global step index)
                         current_step = self.global_step + 1
+                        is_first_step = self.global_step == 0
+                        # Set before any checkpointing below runs, so a saved
+                        # payload's global_step (restored on resume) always
+                        # matches the step number already in its filename -
+                        # setting it after checkpointing left them off by one,
+                        # so resuming re-ran one already-checkpointed step.
+                        self.global_step = current_step
                         step_log = {
                             'train_loss': raw_loss_cpu,
                             'global_step': current_step,
@@ -385,7 +392,7 @@ class TrainIvonDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         policy.eval()
 
                         # run rollout
-                        if (current_step % rollout_every) == 0 or self.global_step == 0:
+                        if (current_step % rollout_every) == 0 or is_first_step:
                             try:
                                 runner_log = env_runner.run(policy)
                                 last_runner_log.update(runner_log)
@@ -408,7 +415,7 @@ class TrainIvonDiffusionUnetLowdimWorkspace(BaseWorkspace):
                             step_log.update(runner_log)
 
                         # validation: noise prediction loss
-                        if ((current_step % val_every) == 0 or self.global_step == 0) and (len(val_dataloader) > 0):
+                        if ((current_step % val_every) == 0 or is_first_step) and (len(val_dataloader) > 0):
                             with torch.no_grad():
                                 val_losses = []
                                 with tqdm.tqdm(val_dataloader, desc=f"Validation step {current_step}: Noise Prediction Loss on test set",
@@ -427,12 +434,12 @@ class TrainIvonDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                     step_log['test_noise_pred_loss'] = noise_loss
 
                         # NLL bound
-                        if ((current_step % nll_every) == 0 or self.global_step == 0) and (len(val_dataloader) > 0):
+                        if ((current_step % nll_every) == 0 or is_first_step) and (len(val_dataloader) > 0):
                             NLL_test = policy.nll_bound(val_dataloader, current_step, npoints=100)
                             step_log['test_nll_bpd'] = NLL_test
 
                         # reconstruction loss
-                        if ((current_step % reconst_loss_every) == 0 or self.global_step == 0) and (len(val_dataloader) > 0):
+                        if ((current_step % reconst_loss_every) == 0 or is_first_step) and (len(val_dataloader) > 0):
                             reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
                             step_log['test_action_reconst_loss'] = reconst_loss.item()
 
@@ -448,7 +455,6 @@ class TrainIvonDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         # log & step
                         wandb_run.log(step_log, step=current_step)
                         json_logger.log(step_log)
-                        self.global_step = current_step
 
                         # optional early stopping per-batch limit
                         if (cfg.training.max_train_steps is not None) and batch_idx >= (cfg.training.max_train_steps - 1):
