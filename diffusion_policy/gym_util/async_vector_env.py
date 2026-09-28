@@ -14,7 +14,6 @@ from copy import deepcopy
 
 from gym import logger
 from gym.vector.vector_env import VectorEnv
-from mujoco_py.builder import MujocoException
 from gym.error import (
     AlreadyPendingCallError,
     NoAsyncCallError,
@@ -32,15 +31,6 @@ from gym.vector.utils import (
 )
 
 __all__ = ["AsyncVectorEnv"]
-
-# A worker's error_queue.put((index,) + sys.exc_info()[:2]) can silently fail
-# if the exception's value doesn't pickle (the Queue's feeder thread catches
-# and drops that failure internally, without telling the sender) - without a
-# timeout, the parent's error_queue.get() would then block forever, holding
-# a GPU/cluster job for its whole walltime instead of failing loudly. MuJoCo/
-# robosuite exceptions are plain strings and always pickle fine, so this is
-# only a safety net for an unexpected exception type.
-ERROR_QUEUE_GET_TIMEOUT_SEC = 60
 
 
 class AsyncState(Enum):
@@ -98,32 +88,11 @@ class AsyncVectorEnv(VectorEnv):
         context=None,
         daemon=True,
         worker=None,
-        tolerate_step_errors=False,
     ):
-        """
-        tolerate_step_errors : bool (default: `False`)
-            If `False` (the default, and the only behavior available before
-            this flag existed), a worker raising during `step()` (e.g. a
-            MuJoCo NaN/Inf instability) still raises back to the caller and
-            discards the whole batch's results for that step, exactly like
-            upstream gym.vector - the safe default for any caller that
-            doesn't inspect `infos[i]['crashed']`.
-            If `True`, `step_wait()` instead isolates the crashed worker
-            (closes its pipe, retires it permanently) and returns real
-            results for every other worker plus a `done=True,
-            infos[i]={'crashed': True, 'error': ...}` placeholder for the
-            dead slot - see `step_wait()`'s docstring. Only pass `True` if
-            the caller actually checks `infos[i]['crashed']` and excludes
-            that slot's in-progress episode itself (e.g.
-            `RobomimicLowdimRunner._run_streaming`); otherwise a crash will
-            be silently miscounted as a normal episode that scored 0
-            instead of being excluded or raised.
-        """
         ctx = mp.get_context(context)
         self.env_fns = env_fns
         self.shared_memory = shared_memory
         self.copy = copy
-        self.tolerate_step_errors = tolerate_step_errors
 
         # Added dummy_env_fn to fix OpenGL error in Mujoco
         # disable any OpenGL rendering in dummy_env_fn, since it
@@ -196,13 +165,6 @@ class AsyncVectorEnv(VectorEnv):
 
         self._state = AsyncState.DEFAULT
         self._check_observation_spaces()
-
-        # Indices whose worker has permanently died (e.g. a MuJoCo NaN/Inf
-        # crash during step_wait - see step_wait()/step_async() below). Once
-        # True, that pipe is closed and set to None in self.parent_pipes;
-        # callers must never target a dead index with step/reset/call again.
-        self._failed = [False] * self.num_envs
-        self._last_error = [None] * self.num_envs
 
     def seed(self, seeds=None):
         self._assert_is_running()
@@ -289,11 +251,8 @@ class AsyncVectorEnv(VectorEnv):
                 self._state.value,
             )
 
-        # Dead pipes (self._failed[i]) never receive a command again - the
-        # worker process behind them has already exited (see step_wait()).
         for pipe, action in zip(self.parent_pipes, actions):
-            if pipe is not None:
-                pipe.send(("step", action))
+            pipe.send(("step", action))
         self._state = AsyncState.WAITING_STEP
 
     def step_wait(self, timeout=None):
@@ -306,33 +265,13 @@ class AsyncVectorEnv(VectorEnv):
         Returns
         -------
         observations : sample from `observation_space`
-            A batch of observations from the vectorized environment. A
-            slot whose worker has died (this call or a previous one) holds
-            stale data from its last successful step - callers must ignore
-            it (see `infos[i]['crashed']`).
+            A batch of observations from the vectorized environment.
         rewards : `np.ndarray` instance (dtype `np.float_`)
-            A vector of rewards from the vectorized environment. `0.0` for
-            a crashed slot.
+            A vector of rewards from the vectorized environment.
         dones : `np.ndarray` instance (dtype `np.bool_`)
             A vector whose entries indicate whether the episode has ended.
-            Always `True` for a crashed slot, so callers that harvest on
-            `done` still see it - they must check `infos[i]['crashed']`
-            to tell a real episode end from a lost one.
         infos : list of dict
-            A list of auxiliary diagnostic information. A crashed slot's
-            entry is `{'crashed': True, 'error': <str>}` instead of the
-            env's own info dict.
-
-        Unlike the upstream gym.vector implementation, a single worker
-        crashing (e.g. a MuJoCo NaN/Inf instability) does NOT raise and does
-        NOT discard the other workers' already-received results for this
-        step: that worker's pipe is closed and permanently retired
-        (`self._failed[i] = True`), its slot reports `done=True` with
-        `infos[i]['crashed']=True` from here on, and every other slot's
-        real result for this step is still returned normally. Callers are
-        responsible for excluding crashed slots from whatever they're
-        aggregating (see `RobomimicLowdimRunner._run_streaming`) rather
-        than treating the whole batch as failed.
+            A list of auxiliary diagnostic information.
         """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_STEP:
@@ -348,120 +287,10 @@ class AsyncVectorEnv(VectorEnv):
                 "{0} second{1}.".format(timeout, "s" if timeout > 1 else "")
             )
 
-        if not self.tolerate_step_errors:
-            # Default, backward-compatible path: identical to upstream
-            # gym.vector - any single worker's error raises and discards
-            # the whole batch's results for this step. Safe for any caller
-            # that doesn't inspect infos[i]['crashed'].
-            results, successes = zip(*[pipe.recv() for pipe in self.parent_pipes])
-            self._raise_if_errors(successes)
-            self._state = AsyncState.DEFAULT
-            observations_list, rewards, dones, infos = zip(*results)
-
-            if not self.shared_memory:
-                self.observations = concatenate(
-                    observations_list, self.observations, self.single_observation_space
-                )
-
-            return (
-                deepcopy(self.observations) if self.copy else self.observations,
-                np.array(rewards),
-                np.array(dones, dtype=np.bool_),
-                infos,
-            )
-
-        raw = [
-            pipe.recv() if pipe is not None else (None, True)
-            for pipe in self.parent_pipes
-        ]
-        results, successes = zip(*raw)
+        results, successes = zip(*[pipe.recv() for pipe in self.parent_pipes])
+        self._raise_if_errors(successes)
         self._state = AsyncState.DEFAULT
-
-        newly_failed = [
-            i for i, (pipe, ok) in enumerate(zip(self.parent_pipes, successes))
-            if pipe is not None and not ok
-        ]
-        # error_queue delivers entries in wall-clock crash order, not in
-        # ascending worker-index order, so if two workers crash within the
-        # same step_wait() call, a positional `index == i` assumption can
-        # pair the wrong worker's index with the wrong exception. Drain all
-        # of this step's errors first, keyed by their own index, then look
-        # each newly-failed slot up by that key.
-        errors_by_index = {}
-        for _ in newly_failed:
-            try:
-                index, exctype, value = self.error_queue.get(
-                    timeout=ERROR_QUEUE_GET_TIMEOUT_SEC)
-            except Exception as e:
-                # Couldn't retrieve/reconstruct one of this step's errors -
-                # e.g. its exception value failed to pickle and was
-                # silently dropped by the Queue's feeder thread (get()
-                # would otherwise hang forever), or failed to unpickle
-                # cleanly. We know from `successes` that some worker(s)
-                # failed, just not reliably which one or why, so abort
-                # loudly and boundedly instead.
-                raise RuntimeError(
-                    "A worker reported a step() failure, but its exception "
-                    f"could not be retrieved from error_queue ({e!r}) - "
-                    "likely failed to pickle."
-                ) from e
-            errors_by_index[index] = (exctype, value)
-        # tolerate_step_errors only tolerates MuJoCo instability (the crash
-        # this feature exists to survive) - any other exception type (e.g. a
-        # real bug: a misconfigured action space, an assertion in the env
-        # wrapper) is still raised, matching the non-tolerant path's
-        # behavior, instead of being silently treated as an excludable
-        # episode crash and carried-forward like a MuJoCo NaN/Inf would be.
-        non_mujoco_error = None
-        for i in newly_failed:
-            exctype, value = errors_by_index[i]
-            logger.warn(
-                "Worker-{0} crashed during step ({1}: {2}); excluding its "
-                "in-progress episode and retiring that slot for the rest "
-                "of this rollout.".format(i, exctype.__name__, value)
-            )
-            self.parent_pipes[i].close()
-            self.parent_pipes[i] = None
-            self._failed[i] = True
-            self._last_error[i] = "{0}: {1}".format(exctype.__name__, value)
-            if not (isinstance(exctype, type) and issubclass(exctype, MujocoException)):
-                non_mujoco_error = (exctype, value)
-
-        if non_mujoco_error is not None:
-            exctype, value = non_mujoco_error
-            logger.error(
-                "Worker crashed with a non-MuJoCo error ({0}: {1}) - "
-                "tolerate_step_errors only tolerates MujocoException, so "
-                "this is raised instead of being excluded as a crashed "
-                "episode.".format(exctype.__name__, value)
-            )
-            # value is already the worker's actual exception instance (see
-            # _worker*'s error_queue.put((index,) + sys.exc_info()[:2])) -
-            # re-raise it directly. Reconstructing via exctype(value) passes
-            # the exception itself as the sole constructor arg, which only
-            # happens to work for single-string-arg exceptions; for any
-            # exception whose __init__ takes more than that, it raises a
-            # confusing TypeError instead and hides the real error.
-            raise value
-
-        placeholder_info = lambda i: {"crashed": True, "error": self._last_error[i]}
-        observations_list, rewards, dones, infos = [], [], [], []
-        for i, (pipe, result) in enumerate(zip(self.parent_pipes, results)):
-            if pipe is None:
-                # Either just failed above, or was already dead from an
-                # earlier step_wait() call - its shared-memory observation
-                # slot (if shared_memory=True) is simply stale and unused
-                # by callers that check infos[i]['crashed'] first.
-                observations_list.append(self.observations[i] if not self.shared_memory else None)
-                rewards.append(0.0)
-                dones.append(True)
-                infos.append(placeholder_info(i))
-            else:
-                obs_i, reward_i, done_i, info_i = result
-                observations_list.append(obs_i)
-                rewards.append(reward_i)
-                dones.append(done_i)
-                infos.append(info_i)
+        observations_list, rewards, dones, infos = zip(*results)
 
         if not self.shared_memory:
             self.observations = concatenate(
@@ -489,17 +318,7 @@ class AsyncVectorEnv(VectorEnv):
         """
         timeout = 0 if terminate else timeout
         try:
-            # Only attempt to drain a pending call when NOT forcibly
-            # terminating - terminate=True is about to kill every process
-            # regardless, and the drain itself can fail here in ways a
-            # caller can't recover from: if the pending call is a
-            # reset/step whose worker(s) already died (e.g. every
-            # parent_pipe is None, or one is at EOF from a segfault), the
-            # drain's own _poll()/recv() misreads a fully-dead pipe as
-            # "ready" and then calls recv() on it, raising AttributeError
-            # or EOFError instead of the intended mp.TimeoutError - which
-            # would propagate out of close() itself uncaught.
-            if not terminate and self._state != AsyncState.DEFAULT:
+            if self._state != AsyncState.DEFAULT:
                 logger.warn(
                     "Calling `close` while waiting for a pending "
                     "call to `{0}` to complete.".format(self._state.value)
@@ -533,12 +352,10 @@ class AsyncVectorEnv(VectorEnv):
             return True
         end_time = time.perf_counter() + timeout
         delta = None
-        for i, pipe in enumerate(self.parent_pipes):
-            if pipe is None:
-                # Permanently dead from an earlier crash (self._failed[i]) -
-                # nothing to wait on for this slot, not a reason to time out.
-                continue
+        for pipe in self.parent_pipes:
             delta = max(end_time - time.perf_counter(), 0)
+            if pipe is None:
+                return False
             if pipe.closed or (not pipe.poll(delta)):
                 return False
         return True
@@ -571,18 +388,7 @@ class AsyncVectorEnv(VectorEnv):
         num_errors = self.num_envs - sum(successes)
         assert num_errors > 0
         for _ in range(num_errors):
-            try:
-                index, exctype, value = self.error_queue.get(
-                    timeout=ERROR_QUEUE_GET_TIMEOUT_SEC)
-            except Exception as e:
-                # See the matching note in step_wait()'s tolerate branch -
-                # this bounds what would otherwise be an indefinite hang if
-                # a worker's exception value failed to pickle.
-                raise RuntimeError(
-                    "A worker reported a failure, but its exception could "
-                    f"not be retrieved from error_queue ({e!r}) - likely "
-                    "failed to pickle."
-                ) from e
+            index, exctype, value = self.error_queue.get()
             logger.error(
                 "Received the following error from Worker-{0}: "
                 "{1}: {2}".format(index, exctype.__name__, value)
@@ -592,10 +398,7 @@ class AsyncVectorEnv(VectorEnv):
             self.parent_pipes[index] = None
 
         logger.error("Raising the last exception back to the main process.")
-        # value is already the worker's actual exception instance - see the
-        # note in step_wait()'s tolerate branch on why exctype(value) is
-        # wrong for exceptions whose __init__ takes more than one arg.
-        raise value
+        raise exctype(value)
 
     def _raise_if_errors_at(self, indices, successes):
         # Like _raise_if_errors, but for a call that only targeted `indices`
@@ -605,16 +408,7 @@ class AsyncVectorEnv(VectorEnv):
             return
         for i, success in zip(indices, successes):
             if not success:
-                try:
-                    index, exctype, value = self.error_queue.get(
-                        timeout=ERROR_QUEUE_GET_TIMEOUT_SEC)
-                except Exception as e:
-                    # See the matching note in step_wait()'s tolerate branch.
-                    raise RuntimeError(
-                        "A worker reported a failure, but its exception "
-                        f"could not be retrieved from error_queue ({e!r}) - "
-                        "likely failed to pickle."
-                    ) from e
+                index, exctype, value = self.error_queue.get()
                 logger.error(
                     "Received the following error from Worker-{0}: "
                     "{1}: {2}".format(index, exctype.__name__, value)
@@ -622,9 +416,7 @@ class AsyncVectorEnv(VectorEnv):
                 logger.error("Shutting down Worker-{0}.".format(index))
                 self.parent_pipes[index].close()
                 self.parent_pipes[index] = None
-                # value is already the worker's actual exception instance -
-                # see the note in step_wait()'s tolerate branch.
-                raise value
+                raise exctype(value)
 
     def reset_at(self, indices):
         """Reset only the sub-environments at `indices`, leaving all others

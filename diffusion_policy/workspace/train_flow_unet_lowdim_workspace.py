@@ -236,15 +236,7 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
                         policy = self.ema_model if cfg.training.use_ema else self.model
                         policy.eval()
 
-                        # # run rollout - NOTE if re-enabling: env_runner tolerates a
-                        # # single crashed worker internally now (see
-                        # # AsyncVectorEnv's tolerate_step_errors and
-                        # # RobomimicLowdimRunner.run()'s own self-heal) - most
-                        # # crashes no longer reach this except block at all, and
-                        # # when it does fire (total 'test/' wipeout, or a crash
-                        # # outside step()), env_runner has already been left in a
-                        # # state its own next run() call would self-heal from, so
-                        # # this manual rebuild is a safety net, not the only path.
+                        # # run rollout
                         # if (current_step % rollout_every) == 0 or is_first_step:
                         #     try:
                         #         runner_log = env_runner.run(policy)
@@ -254,7 +246,9 @@ class TrainFlowUnetLowdimWorkspace(BaseWorkspace):
                         #               f"{current_step} ({e}). Reporting the previous rollout's "
                         #               f"score(s) instead so wandb has no gap.")
                         #         step_log['rollout_mujoco_error'] = str(e)
-                        #         # Rebuild defensively - see the NOTE above.
+                        #         # The crashed worker's pipe is permanently closed by
+                        #         # AsyncVectorEnv._raise_if_errors, so env_runner can't be
+                        #         # reused - rebuild it.
                         #         try:
                         #             env_runner.env.close(terminate=True)
                         #         except Exception:
