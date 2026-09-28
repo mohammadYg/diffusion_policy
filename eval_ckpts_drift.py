@@ -216,9 +216,10 @@ def run_env_runner(env_runner, policy, stochastic: bool) -> Tuple[dict, float]:
     """Run the environment runner and return the log dict and mean score.
     NOTE: env_runner.run()'s actual signature is run(self, policy,
     stochastic=False) (see pusht_keypoints_runner.py / robomimic_lowdim_runner.py) -
-    NOT run(policy, cfg). Passing cfg positionally there (as the two sibling
-    eval scripts eval_ckpts_dp.py/eval_ckpts_flow.py do) would silently bind
-    to the `stochastic` parameter instead.
+    NOT run(policy, cfg). The two sibling eval scripts eval_ckpts_dp.py/
+    eval_ckpts_flow.py take `cfg` as a parameter too, but only to read
+    cfg.eval.stochastic before calling run(policy, stochastic=...) - neither
+    passes cfg positionally to run() itself.
     """
     runner_log = env_runner.run(policy, stochastic=stochastic)
     key = score_key_for(policy, stochastic)

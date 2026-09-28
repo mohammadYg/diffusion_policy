@@ -279,12 +279,27 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
     partial_crash_checkpoints: List[Dict] = []
     last_success_rate: Optional[float] = None
     last_success_step: Optional[int] = None
+    seen_steps: set = set()
 
     # Iterate over checkpoints
     for ckpt_path in all_ckpt_files:
         step = parse_step_from_filename(ckpt_path.name)
         if step is None:
             continue
+
+        # train_flow_unet_lowdim_workspace.py's separate topk_manager_nll can
+        # save a second checkpoint file (step=XXXXXX-nll_bpd=Y.ckpt) at the
+        # same step as a regular last-N checkpoint - both files are the same
+        # model state, so evaluating both would double-count that step into
+        # mean_scores/mean_success_rate and overwrite one json_log key with
+        # the other's (same) result.
+        if step in seen_steps:
+            logger.info(
+                "Skipping %s (step %d): already evaluated another checkpoint "
+                "file at this step.", ckpt_path.name, step,
+            )
+            continue
+        seen_steps.add(step)
 
         logger.info("Evaluating checkpoint %s (step %d)", ckpt_path.name, step)
 

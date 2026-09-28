@@ -165,9 +165,18 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             cfg.training.num_updates = 1000
             cfg.training.max_train_steps = 100
             cfg.training.max_val_steps = 100
-            rollout_every = 100
-            checkpoint_every = 100
-            val_every = 100
+            # Write into cfg (not bare local vars) - the with-block below
+            # re-reads rollout_every/checkpoint_every/val_every/nll_every/
+            # reconst_loss_every from cfg right after this, which silently
+            # clobbered a bare local assignment here with the production
+            # cadence, so debug mode could run its whole 1000-step budget
+            # without ever validating, checkpointing or logging NLL/
+            # reconstruction loss.
+            cfg.training.rollout_every = 100
+            cfg.training.checkpoint_every = 100
+            cfg.training.val_every = 100
+            cfg.training.nll_every = 100
+            cfg.training.reconst_loss_every = 100
         
         # compute covariance_spectrum of the training data
         self.model.dataset_info(cov_dataloader, covariance_spectrum=None, diagonal=False)
@@ -215,6 +224,13 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
                         # build step-log (use the upcoming/global step index)
                         current_step = self.global_step + 1
+                        is_first_step = self.global_step == 0
+                        # Set before any checkpointing below runs, so a saved
+                        # payload's global_step (restored on resume) always
+                        # matches the step number already in its filename -
+                        # setting it after checkpointing left them off by one,
+                        # so resuming re-ran one already-checkpointed step.
+                        self.global_step = current_step
                         step_log = {
                             'train_loss': raw_loss_cpu,
                             'global_step': current_step,
@@ -225,8 +241,16 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         policy = self.ema_model if cfg.training.use_ema else self.model
                         policy.eval()
 
-                        # # run rollout
-                        # if (current_step % rollout_every) == 0 or self.global_step==0:
+                        # # run rollout - NOTE if re-enabling: env_runner tolerates a
+                        # # single crashed worker internally now (see
+                        # # AsyncVectorEnv's tolerate_step_errors and
+                        # # RobomimicLowdimRunner.run()'s own self-heal) - most
+                        # # crashes no longer reach this except block at all, and
+                        # # when it does fire (total 'test/' wipeout, or a crash
+                        # # outside step()), env_runner has already been left in a
+                        # # state its own next run() call would self-heal from, so
+                        # # this manual rebuild is a safety net, not the only path.
+                        # if (current_step % rollout_every) == 0 or is_first_step:
                         #     try:
                         #         runner_log = env_runner.run(policy)
                         #         last_runner_log.update(runner_log)
@@ -235,9 +259,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         #               f"{current_step} ({e}). Reporting the previous rollout's "
                         #               f"score(s) instead so wandb has no gap.")
                         #         step_log['rollout_mujoco_error'] = str(e)
-                        #         # The crashed worker's pipe is permanently closed by
-                        #         # AsyncVectorEnv._raise_if_errors, so env_runner can't be
-                        #         # reused - rebuild it.
+                        #         # Rebuild defensively - see the NOTE above.
                         #         try:
                         #             env_runner.env.close(terminate=True)
                         #         except Exception:
@@ -249,7 +271,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         #     step_log.update(runner_log)
 
                         # validation: noise prediction loss
-                        if ((current_step % val_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
+                        if ((current_step % val_every) == 0 or is_first_step) and (len(val_dataloader) > 0):
                             with torch.no_grad():
                                 val_losses = []
                                 with tqdm.tqdm(val_dataloader, desc=f"Validation step {current_step}: Noise Prediction Loss on test set", 
@@ -268,12 +290,12 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                     step_log['test_noise_pred_loss'] = noise_loss
 
                         # NLL bound
-                        if ((current_step % nll_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
+                        if ((current_step % nll_every) == 0 or is_first_step) and (len(val_dataloader) > 0):
                             NLL_test = policy.nll_bound(val_dataloader, current_step, npoints=100)
                             step_log['test_nll_bpd'] = NLL_test.item()
 
                         # reconstruction loss
-                        if ((current_step % reconst_loss_every) == 0 or self.global_step==0) and (len(val_dataloader) > 0):
+                        if ((current_step % reconst_loss_every) == 0 or is_first_step) and (len(val_dataloader) > 0):
                             reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
                             step_log['test_action_reconst_loss'] = reconst_loss.item()
 
@@ -310,7 +332,6 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         # log & step
                         wandb_run.log(step_log, step=current_step)
                         json_logger.log(step_log)
-                        self.global_step = current_step
 
                         # optional early stopping per-batch limit
                         if (cfg.training.max_train_steps is not None) and batch_idx >= (cfg.training.max_train_steps - 1):

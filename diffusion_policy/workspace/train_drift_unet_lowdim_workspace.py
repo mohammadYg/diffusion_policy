@@ -177,9 +177,15 @@ class TrainDriftUnetLowdimWorkspace(BaseWorkspace):
             cfg.training.num_updates = 1000
             cfg.training.max_train_steps = 100
             cfg.training.max_val_steps = 100
-            rollout_every = 100
-            checkpoint_every = 100
-            val_every = 100
+            # Write into cfg (not bare local vars) - the with-block below
+            # re-reads rollout_every/checkpoint_every/val_every from cfg
+            # right after this, which silently clobbered a bare local
+            # assignment here with the production cadence, so debug mode
+            # could run its whole 1000-step budget without ever
+            # validating or checkpointing.
+            cfg.training.rollout_every = 100
+            cfg.training.checkpoint_every = 100
+            cfg.training.val_every = 100
         
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
@@ -230,6 +236,13 @@ class TrainDriftUnetLowdimWorkspace(BaseWorkspace):
 
                         # build step-log (use the upcoming/global step index)
                         current_step = self.global_step + 1
+                        is_first_step = self.global_step == 0
+                        # Set before any checkpointing below runs, so a saved
+                        # payload's global_step (restored on resume) always
+                        # matches the step number already in its filename -
+                        # setting it after checkpointing left them off by one,
+                        # so resuming re-ran one already-checkpointed step.
+                        self.global_step = current_step
                         current_lr = lr_scheduler.get_last_lr()[0]
                         step_log = {
                             'train_loss': raw_loss_cpu,
@@ -246,8 +259,16 @@ class TrainDriftUnetLowdimWorkspace(BaseWorkspace):
                         policy = self.ema_model if cfg.training.use_ema else self.model
                         policy.eval()
 
-                        # # run rollout
-                        # if env_runner is not None and ((current_step % rollout_every) == 0): #or self.global_step==0:
+                        # # run rollout - NOTE if re-enabling: env_runner tolerates a
+                        # # single crashed worker internally now (see
+                        # # AsyncVectorEnv's tolerate_step_errors and
+                        # # RobomimicLowdimRunner.run()'s own self-heal) - most
+                        # # crashes no longer reach this except block at all, and
+                        # # when it does fire (total 'test/' wipeout, or a crash
+                        # # outside step()), env_runner has already been left in a
+                        # # state its own next run() call would self-heal from, so
+                        # # this manual rebuild is a safety net, not the only path.
+                        # if env_runner is not None and ((current_step % rollout_every) == 0): #or is_first_step:
                         #     try:
                         #         runner_log = env_runner.run(policy)
                         #         last_runner_log.update(runner_log)
@@ -256,9 +277,7 @@ class TrainDriftUnetLowdimWorkspace(BaseWorkspace):
                         #               f"{current_step} ({e}). Reporting the previous rollout's "
                         #               f"score(s) instead so wandb has no gap.")
                         #         step_log['rollout_mujoco_error'] = str(e)
-                        #         # The crashed worker's pipe is permanently closed by
-                        #         # AsyncVectorEnv._raise_if_errors, so env_runner can't be
-                        #         # reused - rebuild it.
+                        #         # Rebuild defensively - see the NOTE above.
                         #         try:
                         #             env_runner.env.close(terminate=True)
                         #         except Exception:
@@ -270,7 +289,7 @@ class TrainDriftUnetLowdimWorkspace(BaseWorkspace):
                         #     step_log.update(runner_log)
 
                         # validation: noise prediction loss
-                        if ((current_step % val_every) == 0 or self.global_step==0):
+                        if ((current_step % val_every) == 0 or is_first_step):
                             # Diagnostic only, piggybacked on the validation cadence (cheap,
                             # no need for its own schedule): total parameter norm, and the
                             # relative update size (grad_step_size / param_norm) - a more
@@ -379,7 +398,6 @@ class TrainDriftUnetLowdimWorkspace(BaseWorkspace):
                         # log & step
                         wandb_run.log(step_log, step=current_step)
                         json_logger.log(step_log)
-                        self.global_step = current_step
 
                         # optional early stopping per-batch limit
                         if (cfg.training.max_train_steps is not None) and batch_idx >= (cfg.training.max_train_steps - 1):
