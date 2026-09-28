@@ -158,10 +158,14 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
 
         # # configure env runner
         # env_runner: BaseLowdimRunner
-        # env_runner = hydra.utils.instantiate(
-        #     cfg.task.env_runner,
-        #     output_dir=self.output_dir)
-        # assert isinstance(env_runner, BaseLowdimRunner)
+        # try:
+        #     env_runner = hydra.utils.instantiate(
+        #         cfg.task.env_runner,
+        #         output_dir=self.output_dir)
+        #     assert isinstance(env_runner, BaseLowdimRunner)
+        # except Exception as e:
+        #     print(f"Warning: env_runner instantiation failed ({e}). Rollouts will be skipped.")
+        #     env_runner = None
 
         # configure logging
         wandb_run = wandb.init(
@@ -289,7 +293,7 @@ class TrainProbDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 # policy.eval()
 
                 # # run rollout
-                # if (self.epoch % cfg.training.rollout_every) == 0: #and (self.epoch>500):
+                # if env_runner is not None and (self.epoch % cfg.training.rollout_every) == 0: #and (self.epoch>500):
                 #     env_runner.current_epoch = self.epoch
                 #     runner_log = env_runner.run(policy, cfg)
                 #     # log all

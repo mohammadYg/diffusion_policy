@@ -120,15 +120,21 @@ class TrainNovelFlowUnetLowdimWorkspace(BaseWorkspace):
 
         # configure env runner
         env_runner: BaseLowdimRunner
-        env_runner = hydra.utils.instantiate(
-            cfg.task.env_runner,
-            output_dir=self.output_dir)
-        assert isinstance(env_runner, BaseLowdimRunner)
+        try:
+            env_runner = hydra.utils.instantiate(
+                cfg.task.env_runner,
+                output_dir=self.output_dir)
+            assert isinstance(env_runner, BaseLowdimRunner)
+        except Exception as e:
+            print(f"Warning: env_runner instantiation failed ({e}). Rollouts will be skipped.")
+            env_runner = None
 
         # Carries the last successful rollout's score(s) forward across MuJoCo
         # instability so wandb's mean_score plot has no gap/jump.
-        prefixes = sorted(set(getattr(env_runner, 'env_prefixs', ['test/'])))
-        last_runner_log: dict = {p + 'mean_score': 0.0 for p in prefixes}
+        last_runner_log: dict = {}
+        if env_runner is not None:
+            prefixes = sorted(set(getattr(env_runner, 'env_prefixs', ['test/'])))
+            last_runner_log = {p + 'mean_score': 0.0 for p in prefixes}
 
         # configure logging
         wandb_run = wandb.init(
@@ -237,7 +243,7 @@ class TrainNovelFlowUnetLowdimWorkspace(BaseWorkspace):
                         policy.eval()
 
                         # run rollout
-                        if (current_step % rollout_every) == 0 or is_first_step:
+                        if env_runner is not None and ((current_step % rollout_every) == 0 or is_first_step):
                             try:
                                 runner_log = env_runner.run(policy)
                                 last_runner_log.update(runner_log)
