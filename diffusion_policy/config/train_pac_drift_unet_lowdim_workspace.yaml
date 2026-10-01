@@ -34,7 +34,7 @@ policy:
     #_target_: diffusion_policy.model.diffusion.conditional_prob8_unet1d.BayesianConditionalUnet1D          # last layer of last module is determininstic 
     #_target_: diffusion_policy.model.diffusion.conditional_prob9_unet1d.BayesianConditionalUnet1D          # Last module bayesian
     #_target_: diffusion_policy.model.diffusion.conditional_prob10_unet1d.BayesianConditionalUnet1D         # Only Last module bayesian
-    _target_: diffusion_policy.model.diffusion.conditional_prob11_unet1d.BayesianConditionalUnet1D         # Only Last module bayesian
+    _target_: diffusion_policy.model.diffusion.conditional_prob11_unet1d.BayesianConditionalUnet1D         # FiLM conditioning bayesian everywhere + mid_modules/final_conv bayesian, down/up conv backbone deterministic
     
     input_dim: "${eval: ${task.action_dim} if ${obs_as_global_cond} else ${task.obs_dim} + ${task.action_dim}}"
     global_cond_dim: "${eval: ${task.obs_dim}*${n_obs_steps} if ${obs_as_global_cond} else None}"

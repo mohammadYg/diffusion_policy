@@ -253,6 +253,7 @@ class BayesianConditionalUnet1D(nn.Module):
                         rho_prior=rho_prior,
                         prior_dist=prior_dist,
                         init_post=init_post,
+                        init_prior=init_prior,
                         post_sigma_scale=post_sigma_scale,
                         prior_sigma_scale=prior_sigma_scale,
                         local_reparam=local_reparam
@@ -268,6 +269,7 @@ class BayesianConditionalUnet1D(nn.Module):
                         rho_prior=rho_prior,
                         prior_dist=prior_dist,
                         init_post=init_post,
+                        init_prior=init_prior,
                         post_sigma_scale=post_sigma_scale,
                         prior_sigma_scale=prior_sigma_scale,
                         local_reparam=local_reparam
