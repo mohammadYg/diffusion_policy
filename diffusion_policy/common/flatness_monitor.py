@@ -189,26 +189,44 @@ def flatness_report(policy, batches, prefix: str = "flat/", seed: int = 0, n_pro
 
 class NoiseContribution:
     """PAC-DP only: how the learned posterior noise sigma_i interacts with the curvature.
-    Create it once at the start of training (it stores the initial sigma on the CPU)."""
+    Create it once from the model at the start of training (or from a freshly built, untrained
+    model with the same config): it stores that model's sigma on the CPU, by layer name, as the
+    "initial" noise. ``report`` can then be called on any model with the same architecture."""
 
-    def __init__(self, policy):
-        self.pairs = [(n, m) for n, m in policy.model.named_modules()
-                      if hasattr(m, "weight") and hasattr(m, "weight_prior") and hasattr(m.weight, "sigma")]
-        self.sigma0 = {n: (m.weight.sigma.detach().cpu(),
-                           m.bias.sigma.detach().cpu() if hasattr(getattr(m, "bias", None), "sigma") else None)
-                       for n, m in self.pairs}
+    def __init__(self, policy, use_prior: bool = False, sigma_fn=None):
+        """use_prior=True: take the "initial" noise from the PRIOR Gaussians of ``policy`` - right
+        for a data-dependent prior, where posterior training starts at the prior (Q = P).
+        sigma_fn(gaussian) -> std: how a Gaussian's std follows from rho (default: its own
+        .sigma); pass e.g. ``lambda g: torch.exp(g.rho)`` for checkpoints trained when the code
+        used sigma = exp(rho). It is used for both the initial and the learned noise."""
+        self.sigma_fn = sigma_fn or (lambda g: g.sigma)
+        self.sigma0 = {}
+        for n, m in self._pairs(policy):
+            for kind in ("weight", "bias"):
+                g = getattr(m, kind + "_prior" if use_prior else kind, None)
+                if g is not None and hasattr(g, "sigma"):
+                    self.sigma0[f"{n}.{kind}"] = self.sigma_fn(g).detach().cpu()
 
-    def _tensors(self, use_initial: bool):
+    @staticmethod
+    def _pairs(policy):
+        return [(n, m) for n, m in policy.model.named_modules()
+                if hasattr(m, "weight") and hasattr(m, "weight_prior") and hasattr(m.weight, "sigma")]
+
+    def available(self, policy) -> bool:
+        return len(self._pairs(policy)) > 0
+
+    def _tensors(self, policy, use_initial: bool):
         params, scales, names = [], [], []
-        for n, m in self.pairs:
-            for kind, idx in (("weight", 0), ("bias", 1)):
+        for n, m in self._pairs(policy):
+            for kind in ("weight", "bias"):
                 g = getattr(m, kind, None)
                 if g is None or not hasattr(g, "sigma"):
                     continue
-                s = self.sigma0[n][idx].to(g.mu.device) if use_initial else g.sigma.detach()
+                name = f"{n}.{kind}"
+                s = self.sigma0[name].to(g.mu.device) if use_initial else self.sigma_fn(g).detach()
                 params.append(g.mu)
                 scales.append(s)
-                names.append(f"{n}.{kind}")
+                names.append(name)
         return names, params, scales
 
     def report(self, policy, batches, prefix: str = "noise/", seed: int = 0, n_draws: int = 8,
@@ -218,8 +236,8 @@ class NoiseContribution:
         out = {}
         with torch.no_grad():
             base = sum(_loss(policy, b, seed + i).item() for i, b in enumerate(batches)) / len(batches)
-        names, params, sig = self._tensors(use_initial=False)
-        _, _, sig0 = self._tensors(use_initial=True)
+        names, params, sig = self._tensors(policy, use_initial=False)
+        _, _, sig0 = self._tensors(policy, use_initial=True)
         gap = lambda scales: sum(_perturbed_loss(policy, batches, params, scales, seed, draw=k)
                                  for k in range(n_draws)) / n_draws - base
         out[f"{prefix}gap_learned"] = gap(sig)

@@ -3,6 +3,23 @@ Evaluate Diffusion Policy checkpoints.
 
 Usage:
     python eval_ckpts_dp.py --ckpts_dir data/outputs/.../checkpoints -o data/outputs/.../eval
+    # add flatness metrics (written to flatness_log_<timestamp>.json next to eval_log_*.json):
+    python eval_ckpts_dp.py -c .../checkpoints --flatness
+    # flatness only (no rollouts, no validation loss / NLL):
+    python eval_ckpts_dp.py -c .../checkpoints --flatness_only
+
+Flatness metrics (diffusion_policy/common/flatness_monitor.py) are computed on the same
+evaluated network (EMA if use_ema), on fixed batches drawn exactly as during training: same
+seed, the training split (`dataset`) as "train" and the validation split as "test" (if any).
+For PAC-DP checkpoints the noise metrics are added. Their "initial" sigma is the noise at the
+start of posterior training:
+  - data-dependent prior (training.data_dependent_prior=True): posterior training starts at the
+    trained prior (Q = P), so the initial sigma is read exactly from the checkpoint's prior;
+  - otherwise: it follows from the config, policy.model.rho_post or, if set,
+    policy.model.post_sigma_scale times each layer's fan-in std; it is obtained by building an
+    untrained model from that config (the same initialisation code as in training).
+--sigma_param exp is needed for checkpoints trained between 2026-08-07 (71a1470) and
+2026-09-15 (959fc5a), when the code used sigma = exp(rho) instead of softplus(rho).
 """
 
 import json
@@ -28,6 +45,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from diffusion_policy.common.pytorch_util import dict_apply
+from diffusion_policy.common.flatness_monitor import flatness_report, make_fixed_batches, NoiseContribution
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.policy.base_lowdim_pac_policy import BaseLowdimPacPolicy
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
@@ -67,6 +85,26 @@ def load_checkpoint_payload(ckpt_path: Path) -> Dict:
     """Load checkpoint payload using dill as the pickle module."""
     with ckpt_path.open("rb") as f:
         return torch.load(f, pickle_module=dill)
+
+
+def drop_stale_null_model_kwargs(cfg: DictConfig) -> List[str]:
+    """Backward compatibility for checkpoints saved before an argument was removed from the
+    network class (e.g. ConditionalUnet1D's local_cond_dim, removed in f899039): drop
+    policy.model arguments that are null in the saved cfg AND no longer accepted by the class.
+    A null argument means the feature was unused, so no weights depend on it."""
+    import inspect
+    from omegaconf import open_dict
+    model_cfg = OmegaConf.select(cfg, "policy.model")
+    if model_cfg is None or "_target_" not in model_cfg:
+        return []
+    params = inspect.signature(hydra.utils.get_class(model_cfg._target_).__init__).parameters
+    if any(p.kind == p.VAR_KEYWORD for p in params.values()):
+        return []
+    stale = [k for k in model_cfg if k != "_target_" and k not in params and model_cfg[k] is None]
+    with open_dict(cfg):
+        for k in stale:
+            del cfg.policy.model[k]
+    return stale
 
 
 def instantiate_workspace(cfg: DictConfig, output_dir: Path) -> BaseWorkspace:
@@ -163,6 +201,17 @@ def build_env_runner(cfg, output_dir: Path):
     return hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir))
 
 
+def compute_flatness(policy, flat_batches: Dict[str, list], noise_monitor, n_probes: int) -> Dict:
+    """Flatness metrics per split ("train", "test"); noise metrics too for PAC-DP."""
+    out = {}
+    for split, batches in flat_batches.items():
+        res = flatness_report(policy, batches, prefix="", n_probes=n_probes)
+        if noise_monitor is not None:
+            res.update(noise_monitor.report(policy, batches, prefix="noise/", n_probes=n_probes))
+        out[split] = res
+    return out
+
+
 def free_cuda_memory():
     """Clear CUDA cache if available."""
     if torch.cuda.is_available():
@@ -189,7 +238,20 @@ def delete_checkpoint(ckpt_path: Path) -> None:
 @click.option("-d", "--device", default="cuda:0", help="Torch device string")
 @click.option("--override", multiple=True, help="Hydra-style overrides e.g. task.env_runner.n_test=300")
 @click.option("--delete_ckpts", is_flag=True, help="Whether to delete checkpoints after evaluation")
-def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tuple[str, ...], delete_ckpts: bool = False):
+@click.option("--flatness", is_flag=True, help="Also compute flatness metrics (flatness_log_*.json)")
+@click.option("--flatness_only", is_flag=True, help="Only compute flatness metrics (no rollouts, loss or NLL)")
+@click.option("--flat_n_batches", type=int, default=None, help="Fixed batches per split (default: cfg or 4)")
+@click.option("--flat_batch_size", type=int, default=None, help="Batch size (default: cfg or 64)")
+@click.option("--flat_probes", type=int, default=None, help="Hutchinson probes (default: cfg or 32)")
+@click.option("--sigma_param", type=click.Choice(["softplus", "exp"]), default="softplus",
+              help="sigma(rho) used when the PAC-DP checkpoints were trained "
+                   "(exp for runs trained 2026-08-07 .. 2026-09-14)")
+@click.option("--last_n", type=int, default=None,
+              help="Only evaluate the last N step checkpoints (by step; default: all)")
+def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tuple[str, ...], delete_ckpts: bool = False,
+         flatness: bool = False, flatness_only: bool = False, flat_n_batches: Optional[int] = None,
+         flat_batch_size: Optional[int] = None, flat_probes: Optional[int] = None,
+         sigma_param: str = "softplus", last_n: Optional[int] = None):
     """Evaluate all checkpoints in ckpts_dir (step >= 50) and log results."""
     # Setup paths
     parent_dir = ckpts_dir.parent
@@ -209,6 +271,9 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
     # Load config from the LAST checkpoint (assumes all have same config)
     cfg = load_checkpoint_payload(all_ckpt_files[-1])["cfg"]
+    dropped = drop_stale_null_model_kwargs(cfg)
+    if dropped:
+        logger.info("Dropped null model arguments no longer accepted by the current code: %s", dropped)
     if override:
         override_cfg = OmegaConf.from_dotlist(list(override))
         cfg = OmegaConf.merge(cfg, override_cfg)
@@ -235,8 +300,60 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
         persistent_workers=False,
     )
 
-    # Environment runner
-    env_runner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir))
+    # Environment runner (not needed when only flatness is computed)
+    env_runner = None if flatness_only else hydra.utils.instantiate(cfg.task.env_runner, output_dir=str(output_dir))
+
+    # Flatness setup: the same fixed batches as the training-time monitor (same seed and,
+    # when the checkpoint's cfg has them, the same training.flat_* settings).
+    do_flatness = flatness or flatness_only
+    if do_flatness:
+        pick = lambda cli, key, default: cli if cli is not None else int(
+            OmegaConf.select(cfg, f"training.{key}", default=default))
+        flat_settings = dict(n_batches=pick(flat_n_batches, "flat_n_batches", 4),
+                             batch_size=pick(flat_batch_size, "flat_batch_size", 64),
+                             probes=pick(flat_probes, "flat_probes", 32))
+        kw = dict(n_batches=flat_settings["n_batches"], batch_size=flat_settings["batch_size"],
+                  seed=0, device=device_obj)
+        flat_batches = {"train": make_fixed_batches(dataset, **kw)}
+        if len(val_dataset) > 0:
+            flat_batches["test"] = make_fixed_batches(val_dataset, **kw)
+        else:
+            logger.warning("Validation set is empty: flatness is computed on train batches only.")
+
+        # Initial noise for PAC-DP (see module docstring): from the checkpoint's own prior for
+        # a data-dependent prior (built per checkpoint below), else from the config's
+        # rho_post / post_sigma_scale via an untrained model built from that config.
+        sigma_fn = (lambda g: torch.exp(g.rho)) if sigma_param == "exp" else (lambda g: torch.nn.functional.softplus(g.rho))
+        ddp_prior = bool(OmegaConf.select(cfg, "training.data_dependent_prior", default=False))
+        fresh = instantiate_workspace(cfg, output_dir)
+        fresh_policy = fresh.ema_model if cfg.training.use_ema else fresh.model
+        noise_monitor = None
+        is_bayes = bool(_is_stochastic_policy(fresh_policy) and NoiseContribution._pairs(fresh_policy))
+        if is_bayes and not ddp_prior:
+            noise_monitor = NoiseContribution(fresh_policy, sigma_fn=sigma_fn)
+        del fresh, fresh_policy
+        free_cuda_memory()
+        if is_bayes:
+            initial_sigma_source = (
+                "checkpoint prior (data-dependent prior: posterior training starts at Q = P)" if ddp_prior else
+                f"config: policy.model.rho_post={OmegaConf.select(cfg, 'policy.model.rho_post', default=None)}, "
+                f"post_sigma_scale={OmegaConf.select(cfg, 'policy.model.post_sigma_scale', default=None)} "
+                f"(sigma = {sigma_param}(rho); post_sigma_scale x fan-in std overrides rho_post when set)")
+        else:
+            initial_sigma_source = None
+
+        flat_path = output_dir / f"flatness_log_{timestamp}.json"
+        flat_log = {
+            "eval_config": {
+                "overrides": list(override),
+                "model_type": "PAC-DP (Bayesian)" if is_bayes else "DP (deterministic)",
+                "sigma_param": sigma_param if is_bayes else None,
+                "evaluated_network": "ema_model" if cfg.training.use_ema else "model",
+                "splits": list(flat_batches.keys()),
+                **flat_settings,
+                "initial_sigma_source": initial_sigma_source,
+            },
+        }
 
     # Prepare containers for results
     json_log = {
@@ -273,11 +390,13 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
     last_success_rate: Optional[float] = None
     last_success_step: Optional[int] = None
 
-    # Iterate over checkpoints
-    for ckpt_path in all_ckpt_files:
+    # Iterate over checkpoints (optionally only the last N, ordered by step)
+    step_ckpt_files = sorted((p for p in all_ckpt_files if parse_step_from_filename(p.name) is not None),
+                             key=lambda p: parse_step_from_filename(p.name))
+    if last_n is not None:
+        step_ckpt_files = step_ckpt_files[-last_n:]
+    for ckpt_path in step_ckpt_files:
         step = parse_step_from_filename(ckpt_path.name)
-        if step is None:
-            continue
 
         logger.info("Evaluating checkpoint %s (step %d)", ckpt_path.name, step)
 
@@ -289,10 +408,28 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
 
         # Load workspace and model
         workspace = instantiate_workspace(cfg, output_dir)
-        workspace.load_payload(payload, exclude_keys=["optimizer", "model"], include_keys=None)
+        # The raw model's state is skipped only when the EMA copy is evaluated - with
+        # use_ema=False the evaluated network IS workspace.model and must be loaded.
+        exclude = ["optimizer", "model"] if cfg.training.use_ema else ["optimizer"]
+        workspace.load_payload(payload, exclude_keys=exclude, include_keys=None)
         policy = workspace.ema_model if cfg.training.use_ema else workspace.model
         policy.to(device_obj)
         policy.eval()
+
+        if do_flatness:
+            flat_start = time.perf_counter()
+            if is_bayes and ddp_prior:     # initial noise = this checkpoint's (fixed) prior
+                noise_monitor = NoiseContribution(policy, use_prior=True, sigma_fn=sigma_fn)
+            flat_log[f"model_at_step_{step:06d}"] = compute_flatness(
+                policy, flat_batches, noise_monitor, flat_settings["probes"])
+            flat_log[f"model_at_step_{step:06d}"]["time_sec"] = time.perf_counter() - flat_start
+            save_json_log(flat_path, flat_log)
+            logger.info("Flatness for step %d written to %s", step, flat_path)
+
+        if flatness_only:
+            del policy, workspace, payload
+            free_cuda_memory()
+            continue
 
         try:
             # Run environment evaluation
@@ -409,7 +546,7 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
         if eval_times:
             json_log["eval_times_sec"] = eval_times
             json_log[f"mean_eval_time_sec_last_{len(eval_times)}_checkpoints"] = float(np.mean(eval_times))
-    else:
+    elif not flatness_only:
         logger.warning("No valid checkpoints found.")
 
     if failed_checkpoints:
@@ -419,8 +556,11 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
             len(failed_checkpoints), [f["ckpt"] for f in failed_checkpoints],
         )
 
-    save_json_log(out_path, json_log)
-    logger.info("Evaluation complete. Log written to %s", out_path)
+    if not flatness_only:
+        save_json_log(out_path, json_log)
+        logger.info("Evaluation complete. Log written to %s", out_path)
+    if do_flatness:
+        logger.info("Flatness log written to %s", flat_path)
 
     # Delete checkpoints after ALL evaluations are complete
     if delete_ckpts:
