@@ -31,6 +31,7 @@ from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager, LastNCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
+from diffusion_policy.common.flatness_monitor import flatness_report, make_fixed_batches, NoiseContribution
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from diffusers.training_utils import EMAModel
 
@@ -305,6 +306,22 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
         # posterior/bound split rather than the full (prior+posterior) dataset.
         train_dataset = self._setup_train_dataset(cfg, dataset, normalizer, device)
         train_dataloader = DataLoader(train_dataset, **cfg.dataloader)
+
+        # ---- flatness monitoring (same metrics, batches and seeds in the DP and PAC-DP runs) ----
+        # training.flat_every (default 1e4, 0 disables): log flatness of the evaluated network on
+        # fixed train batches (from the FULL dataset) and fixed test batches (validation set).
+        flat_every = int(cfg.training.get('flat_every', 10000))
+        if flat_every > 0:
+            flat_kw = dict(n_batches=int(cfg.training.get('flat_n_batches', 4)),
+                           batch_size=int(cfg.training.get('flat_batch_size', 64)), seed=0, device=device)
+            flat_batches = {'train': make_fixed_batches(dataset, **flat_kw)}
+            if len(val_dataset) > 0:
+                flat_batches['test'] = make_fixed_batches(val_dataset, **flat_kw)
+            flat_probes = int(cfg.training.get('flat_probes', 32))
+            # PAC-DP only: noise contribution, on the same network that is evaluated (EMA if used).
+            # Created after the prior/posterior setup, so "initial" sigma = sigma at the start
+            # of posterior training.
+            noise_monitor = NoiseContribution(self.ema_model if cfg.training.use_ema else self.model)
 
         # configure lr scheduler
         lr_scheduler = get_scheduler(
@@ -606,6 +623,12 @@ class TrainPacDiffusionUnetLowdimWorkspace(BaseWorkspace):
                                 suffix = 'stochastic' if val_stochastic else 'deterministic'
                                 reconst_loss = policy.compute_action_reconst_loss(val_dataloader, stochastic=val_stochastic)
                                 step_log[f'test_action_reconst_loss_{suffix}'] = reconst_loss.item()
+
+                        # flatness (wandb: flat/train/*, flat/test/*, noise/train/*, noise/test/*)
+                        if flat_every > 0 and ((current_step % flat_every) == 0 or is_first_step):
+                            for split, fb in flat_batches.items():
+                                step_log.update(flatness_report(policy, fb, prefix=f'flat/{split}/', n_probes=flat_probes))
+                                step_log.update(noise_monitor.report(policy, fb, prefix=f'noise/{split}/', n_probes=flat_probes))
 
                         policy.train()
                         

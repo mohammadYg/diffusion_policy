@@ -113,6 +113,12 @@ training:
   rollout_every: 50
   checkpoint_every: 50
   val_every: 50
+  # flatness monitoring (diffusion_policy/common/flatness_monitor.py), logged to wandb as
+  # flat/{train,test}/* (and noise/{train,test}/* for PAC-DP). Keep identical in DP and PAC-DP runs.
+  flat_every: 1e4        # 0 disables
+  flat_n_batches: 4      # fixed batches per split
+  flat_batch_size: 64
+  flat_probes: 32        # Hutchinson probes for the curvature estimates
   sample_every: 50
   PAC_Bayes_every: 8000
   nll_every: 50

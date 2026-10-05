@@ -28,6 +28,7 @@ from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager, LastNCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
+from diffusion_policy.common.flatness_monitor import flatness_report, make_fixed_batches
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from diffusers.training_utils import EMAModel, enable_full_determinism
 
@@ -167,6 +168,18 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             self.ema_model.to(device)
         optimizer_to(self.optimizer, device)
 
+        # ---- flatness monitoring (same metrics, batches and seeds in the DP and PAC-DP runs) ----
+        # training.flat_every (default 1e4, 0 disables): log flatness of the evaluated network on
+        # fixed train batches (from the FULL dataset) and fixed test batches (validation set).
+        flat_every = int(cfg.training.get('flat_every', 10000))
+        if flat_every > 0:
+            flat_kw = dict(n_batches=int(cfg.training.get('flat_n_batches', 4)),
+                           batch_size=int(cfg.training.get('flat_batch_size', 64)), seed=0, device=device)
+            flat_batches = {'train': make_fixed_batches(dataset, **flat_kw)}
+            if len(val_dataset) > 0:
+                flat_batches['test'] = make_fixed_batches(val_dataset, **flat_kw)
+            flat_probes = int(cfg.training.get('flat_probes', 32))
+
         if cfg.training.debug:
             cfg.training.num_updates = 1000
             cfg.training.max_train_steps = 100
@@ -298,6 +311,11 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         if ((current_step % reconst_loss_every) == 0 or is_first_step) and (len(val_dataloader) > 0):
                             reconst_loss = policy.compute_action_reconst_loss(val_dataloader, cfg)
                             step_log['test_action_reconst_loss'] = reconst_loss.item()
+
+                        # flatness (wandb: flat/train/*, flat/test/*)
+                        if flat_every > 0 and ((current_step % flat_every) == 0 or is_first_step):
+                            for split, fb in flat_batches.items():
+                                step_log.update(flatness_report(policy, fb, prefix=f'flat/{split}/', n_probes=flat_probes))
 
                         policy.train()
                         
