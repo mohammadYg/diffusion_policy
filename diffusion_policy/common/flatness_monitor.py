@@ -23,6 +23,13 @@ Metrics (prefix e.g. ``flat/train/`` or ``flat/test/``):
   trace_rel                     sum_i theta_i^2 H_ii           (Hutchinson)
   top_eig_rel                   largest eigenvalue of D H D, D = diag|theta| (power iteration)
   trace_raw, top_eig_raw        the same without the |theta| scaling (reference only)
+  sam_rel_{r}                   direct (A)SAM score: L(theta + delta) - L(theta) with the one-step
+                                worst-case perturbation in the relative ball ||delta/|theta|||_2 <= r,
+                                delta = r * D^2 g / ||D g||, g = grad L, D = diag|theta| (adaptive SAM)
+  sam_curv_rel_{r}              (L(theta + delta) + L(theta - delta))/2 - L(theta): the same direction
+                                with the first-order term r*||D g|| cancelled (curvature part only)
+  grad_norm_rel                 ||D g||: the first-order part, sam_rel ~ r*grad_norm_rel + sam_curv_rel
+  sam_raw_{r}                   plain SAM score, ||delta||_2 <= r, delta = r g/||g|| (reference only)
   block/<name>/trace_rel        trace_rel restricted to one block of the U-Net
 PAC-DP only (``noise_contribution_report``, prefix ``noise/``):
   gap_learned                   E_xi[L(mu + sigma*xi)] - L(mu): what the learned noise costs
@@ -39,6 +46,8 @@ from typing import Dict, List
 import torch
 
 _SHARP_RADII = (5e-3, 1e-2, 2e-2)
+_SAM_RADII = (0.05, 0.1, 0.2)          # relative-ball radii for sam_rel (norm of delta/|theta|)
+_SAM_RAW_RADII = (0.05,)               # SAM's usual radius, raw parameter units
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -150,9 +159,52 @@ def _top_eig(policy, batches, params, scales, iters, seed, gen) -> float:
     return lam
 
 
+def _grad(policy, batches, params, seed: int):
+    """Gradient of the mean pinned loss over batches."""
+    total = [torch.zeros_like(p) for p in params]
+    for i, b in enumerate(batches):
+        g = torch.autograd.grad(_loss(policy, b, seed + i), params)
+        for t, x in zip(total, g):
+            t += x.detach() / len(batches)
+    return total
+
+
+@torch.no_grad()
+def _shifted_loss(policy, batches, params, deltas, sign: float, seed: int) -> float:
+    """Mean pinned loss at params + sign * deltas (params restored afterwards)."""
+    for p, d in zip(params, deltas):
+        p.add_(sign * d)
+    try:
+        return sum(_loss(policy, b, seed + i).item() for i, b in enumerate(batches)) / len(batches)
+    finally:
+        for p, d in zip(params, deltas):
+            p.sub_(sign * d)
+
+
+def _sam_scores(policy, batches, params, scales, radii, base: float, seed: int, tag: str) -> Dict[str, float]:
+    """Direct SAM score with SAM's one-step ascent (Foret et al.): maximise g.delta over the ball
+    ||delta / scales||_2 <= r, i.e. delta = r * scales^2 g / ||scales g||. scales = |theta| gives
+    adaptive SAM (scale-invariant), scales = 1 plain SAM. One step gives a lower bound on the
+    exact max; at a minimum the max is ~ r^2/2 * top eigenvalue of D H D."""
+    g = _grad(policy, batches, params, seed)
+    dg_norm = torch.sqrt(sum(((s * x) ** 2).sum() for s, x in zip(scales, g))).item()
+    out = {f"grad_norm_{tag}": dg_norm}
+    if dg_norm == 0.0:
+        return out
+    unit = [s * s * x / dg_norm for s, x in zip(scales, g)]
+    for r in radii:
+        deltas = [r * u for u in unit]
+        plus = _shifted_loss(policy, batches, params, deltas, 1.0, seed)
+        minus = _shifted_loss(policy, batches, params, deltas, -1.0, seed)
+        out[f"sam_{tag}_{r:g}"] = plus - base
+        out[f"sam_curv_{tag}_{r:g}"] = 0.5 * (plus + minus) - base
+    return out
+
+
 # ----------------------------------------------------------------------------- reports
 def flatness_report(policy, batches, prefix: str = "flat/", seed: int = 0, n_probes: int = 32,
-                    power_iters: int = 10, n_sharp: int = 8, radii=_SHARP_RADII, raw: bool = True) -> Dict[str, float]:
+                    power_iters: int = 10, n_sharp: int = 8, radii=_SHARP_RADII, raw: bool = True,
+                    sam_radii=_SAM_RADII, sam_raw_radii=_SAM_RAW_RADII) -> Dict[str, float]:
     """Identical flatness metrics for DP and PAC-DP (see module docstring)."""
     was_training = policy.training
     policy.eval()
@@ -169,6 +221,12 @@ def flatness_report(policy, batches, prefix: str = "flat/", seed: int = 0, n_pro
         out[f"{prefix}sharp_rel_{a:g}"] = sum(vals) / n_sharp - out[f"{prefix}loss"]
     grad_ctx = _grads_on(params)
     grad_ctx.__enter__()
+    if sam_radii:
+        sam = _sam_scores(policy, batches, params, rel, sam_radii, out[f"{prefix}loss"], seed, "rel")
+        out.update({f"{prefix}{k}": v for k, v in sam.items()})
+    if raw and sam_raw_radii:
+        sam = _sam_scores(policy, batches, params, one, sam_raw_radii, out[f"{prefix}loss"], seed, "raw")
+        out.update({f"{prefix}{k}": v for k, v in sam.items() if not k.startswith("sam_curv")})
     diag_rel = _hutchinson(policy, batches, params, rel, n_probes, seed, gen)
     out[f"{prefix}trace_rel"] = sum(d.sum().item() for d in diag_rel)
     blocks: Dict[str, float] = {}
