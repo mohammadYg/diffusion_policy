@@ -3,7 +3,7 @@
     python aggregate_flatness.py RUN_LIST [OUT_ROOT] [TAG] [PREFIX]
 
 Per run: flatness from <run>/<TAG>/flatness_log_*.json (newest file). Success rate, at the SAME
-checkpoints as the flatness, from every <run>/eval/eval_log_*.json (one column per log, labelled by
+checkpoints as the flatness, from every <run>/eval{,_output}/eval_log_*.json (one column per log, labelled by
 its eval_config, or by its timestamp when the log has none), or else from test/mean_score in the
 training log (logs.json.txt), matched by epoch or global step. Every value is given as
     lastN = mean over the evaluated checkpoints,   final = last checkpoint.
@@ -51,7 +51,8 @@ def key_index(key):
 def success_sources(run_dir):
     """{label: {(kind, n): success_rate}}."""
     out = {}
-    for f in sorted(glob.glob(f"{run_dir}/eval/eval_log_*.json")):
+    for f in sorted(glob.glob(f"{run_dir}/eval/eval_log_*.json") + glob.glob(f"{run_dir}/eval_output/eval_log_*.json"),
+                    key=os.path.basename):
         try:
             d = json.load(open(f))
         except Exception:
