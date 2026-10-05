@@ -63,15 +63,22 @@ def list_ckpt_files(ckpts_dir: Path) -> List[Path]:
     return sorted(p for p in ckpts_dir.iterdir() if p.suffix == ".ckpt")
 
 
+def ckpt_key(filename: str, n: int) -> str:
+    """Log key of a checkpoint: model_at_step_001234 for 'step=...' files, and
+    model_at_epoch_1234 (as in older eval logs) for 'epoch=...' files."""
+    return f"model_at_epoch_{n}" if filename.startswith("epoch=") else f"model_at_step_{n:06d}"
+
+
 def parse_step_from_filename(filename: str) -> Optional[int]:
-    """Parse step number from checkpoint filename like 'step=0010-...ckpt'.
-    Returns None if no step pattern is found or the file is 'latest.ckpt'.
+    """Parse step number from checkpoint filename like 'step=0010-...ckpt' (or the epoch number
+    from 'epoch=0010.ckpt', used by older runs). Returns None if no pattern is found or the file
+    is 'latest.ckpt'.
     """
     if filename == "latest.ckpt":
         return None
-    # pattern: 'step=1234'
+    # pattern: 'step=1234' or 'epoch=1234'
     try:
-        parts = filename.split("step=")
+        parts = filename.split("step=" if "step=" in filename else "epoch=")
         if len(parts) < 2:
             return None
         after = parts[1]
@@ -395,8 +402,10 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
                              key=lambda p: parse_step_from_filename(p.name))
     if last_n is not None:
         step_ckpt_files = step_ckpt_files[-last_n:]
+    keys_by_step: Dict[int, str] = {}
     for ckpt_path in step_ckpt_files:
         step = parse_step_from_filename(ckpt_path.name)
+        keys_by_step[step] = ckpt_key(ckpt_path.name, step)
 
         logger.info("Evaluating checkpoint %s (step %d)", ckpt_path.name, step)
 
@@ -420,9 +429,9 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
             flat_start = time.perf_counter()
             if is_bayes and ddp_prior:     # initial noise = this checkpoint's (fixed) prior
                 noise_monitor = NoiseContribution(policy, use_prior=True, sigma_fn=sigma_fn)
-            flat_log[f"model_at_step_{step:06d}"] = compute_flatness(
+            flat_log[keys_by_step[step]] = compute_flatness(
                 policy, flat_batches, noise_monitor, flat_settings["probes"])
-            flat_log[f"model_at_step_{step:06d}"]["time_sec"] = time.perf_counter() - flat_start
+            flat_log[keys_by_step[step]]["time_sec"] = time.perf_counter() - flat_start
             save_json_log(flat_path, flat_log)
             logger.info("Flatness for step %d written to %s", step, flat_path)
 
@@ -448,7 +457,7 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
             reported_success_rate = last_success_rate if last_success_rate is not None else 0.0
             if last_success_rate is None:
                 crash_no_prior_steps.add(step)
-            json_log[f"model_at_step_{step:06d}"] = {
+            json_log[keys_by_step[step]] = {
                 "error": str(e),
                 "success_rate": reported_success_rate,
                 "success_rate_carried_over_from_step": last_success_step,
@@ -487,7 +496,7 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
             nll_val.append(nll)
 
         # Store results
-        key = f"model_at_step_{step:06d}"
+        key = keys_by_step[step]
         json_log[key] = {
             "success_rate": success_rate,
             "eval_time_sec": eval_time,
@@ -526,7 +535,7 @@ def main(ckpts_dir: Path, output_dir: Optional[Path], device: str, override: Tup
             replacement = float(np.mean(real_rates))
             for i in replace_idx:
                 success_rates[i] = replacement
-                key = f"model_at_step_{steps[i]:06d}"
+                key = keys_by_step[steps[i]]
                 if key in json_log:
                     json_log[key]["success_rate"] = replacement
                     json_log[key]["success_rate_zero_replaced_with_mean"] = True
