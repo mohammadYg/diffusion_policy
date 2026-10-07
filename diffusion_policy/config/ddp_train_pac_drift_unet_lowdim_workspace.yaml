@@ -48,6 +48,14 @@ policy:
     prior_dist: 'gaussian'
     init_post: 'random'
     init_prior: 'random'
+    # Fan-in-scaled alternative to the absolute rho_post/rho_prior above: when
+    # set, a layer's initial posterior/prior std is post_sigma_scale/
+    # prior_sigma_scale times that layer's own (fan-in-scaled) deterministic
+    # weight-init std, instead of one value shared by every layer regardless
+    # of width - see bayes_conv1d_components.sigma_to_rho(). null (default)
+    # keeps the original absolute-rho behaviour unchanged.
+    post_sigma_scale: null
+    prior_sigma_scale: null
     # Local reparameterization trick (Kingma, Salimans & Welling, 2015):
     # sample pre-activations directly instead of sampling a full weight
     # tensor per forward call - mathematically exact for these layers and

@@ -1014,6 +1014,204 @@ specific to this task's dimensionality ($T=16$, $D=10$) or general would
 need a finer $G$ sweep, an explicit clamp-active flag, and a repeat on
 other tasks.
 
+\subsection{Why True itself peaks at $G=3$--$4$: a bias-variance trade-off}
+\label{sec:why_true_peaks}
+
+Section~\ref{sec:why_high_g} left an open question: True's own success
+rate falls $\sim$31\% (relative) from its peak at $G=4$ to $G=16$, with
+none of the collapse diagnostics moving to explain it -- True never
+collapses, at any $G$ or any single timestep (Section~\ref{sec:why_high_g}).
+Two additional diagnostics, not otherwise discussed in this appendix,
+resolve this: True's own curve is not one trend but two failure modes
+meeting at $G=3$--$4$.
+
+\textbf{Low $G$ ($G=2$): a noisy training signal, not overfitting.}
+$G=2$ has the healthiest-looking fit diagnostics of the whole sweep --
+the highest \texttt{diversity} and the worst (least demo-overfit)
+\texttt{mean\_dist\_to\_pos} of any $G$ -- yet the second-worst success
+rate. What stands out instead is \texttt{grad\_norm}: $82.9$ at $G=2$,
+dropping to a $45$--$49$ plateau by $G=3$--$8$ (Table~\ref{tab:drift_true_mechanism}).
+With only $2$ generated candidates, each training step's repulsion term
+has exactly one pairwise comparison to estimate a dispersal direction
+from -- a high-variance, noisy gradient signal, not a generalization
+failure.
+
+\textbf{High $G$ ($G\ge5$): the demonstration's affinity share is diluted
+by construction.} \texttt{drift\_loss} also logs \texttt{sum\_pos\_R}
+(the demonstrated action's share of total softmax affinity mass) and
+\texttt{sum\_neg\_R} (the other $G-1$ candidates' combined share), which
+set the attraction and repulsion coefficients directly:
+$\texttt{r\_coeff\_pos} = \texttt{aff\_pos}\cdot\texttt{sum\_neg}$ and
+$\texttt{r\_coeff\_neg} = -\texttt{aff\_neg}\cdot\texttt{sum\_pos}$
+(Section~\ref{sec:drift}). As $G$ grows, \texttt{sum\_pos\_R} collapses
+toward $0$ and \texttt{sum\_neg\_R} saturates toward $1$ at every
+temperature -- mechanically \emph{strengthening} attraction and
+\emph{weakening} repulsion as $G$ grows. This is a structural property
+of the loss's own coefficient bookkeeping, not merely an emergent
+statistical artifact, and it is exactly what drives
+\texttt{mean\_dist\_to\_pos}/\texttt{diversity}'s monotonic shrinkage
+past $G=4$: the network is structurally pulled toward fitting the
+specific per-step demonstration more tightly as $G$ grows, at the cost
+of candidate diversity.
+
+\begin{table}[H]
+\centering
+\caption{Diagnostics explaining True's own $G$-optimum (3-seed mean,
+tail-averaged over the last $10{,}000$ logged steps).
+\texttt{sum\_pos}$_R$: the demonstrated action's share of total softmax
+affinity mass at temperature $R$. $1/G$: the naive count-based ceiling
+that share would have under a fully uniform (self-connection-excluded)
+kernel.}
+\label{tab:drift_true_mechanism}
+\begin{tabular}{cccccc}
+\toprule
+$G$ & Success rate & \texttt{grad\_norm} & \texttt{sum\_pos}$_{0.02}$ & \texttt{sum\_pos}$_{0.2}$ & $1/G$ \\
+\midrule
+2  & $0.582$ & $82.9$ & $0.358$ & $0.442$ & $0.500$ \\
+3  & $0.693$ & $56.0$ & $0.216$ & $0.288$ & $0.333$ \\
+4  & $0.694$ & $45.4$ & $0.156$ & $0.215$ & $0.250$ \\
+5  & $0.655$ & $46.9$ & $0.124$ & $0.173$ & $0.200$ \\
+6  & $0.597$ & $48.9$ & $0.103$ & $0.145$ & $0.167$ \\
+7  & $0.601$ & $45.1$ & $0.088$ & $0.125$ & $0.143$ \\
+8  & $0.535$ & $45.9$ & $0.077$ & $0.110$ & $0.125$ \\
+12 & $0.489$ & $48.9$ & $0.051$ & $0.074$ & $0.083$ \\
+16 & $0.482$ & $55.4$ & $0.039$ & $0.055$ & $0.062$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Can temperature compensate for a large $G$? The ceiling argument
+alone said no -- the actual test shows that's incomplete.} Comparing
+\texttt{sum\_pos}$_R$ against the naive count-based ceiling $1/G$ shows
+each temperature recovers a roughly \emph{constant fraction} of that
+ceiling across every $G\ge4$ tested: the sharpest temperature
+($R=0.02$) sits at $\approx0.61$--$0.65\times$ the ceiling, the softest
+($R=0.2$) at $\approx0.86$--$0.89\times$. Softer is consistently better
+in this internal diagnostic (consistent with Section~\ref{sec:temp_calibration}'s
+finding below that \emph{sharpening} $R$ made False's analogous
+imbalance worse, not better), and the ceiling itself, $1/G$, shrinks
+with $G$: at $G=8$, an infinitely soft kernel could only reach
+$1/8=0.125$ in this diagnostic, barely above what $R=0.2$ already
+achieves ($0.110$). We read this as meaning temperature could not
+meaningfully help at $G=8$.
+
+We were wrong about that, and the confirmatory test we ran shows why
+(Table~\ref{tab:drift_temp_confirm}): True rerun at $G=3$ (3 seeds, both
+a tighter $R=\{0.01,0.025,0.1\}$ and a softer $R=\{0.04,0.1,0.4\}$ than
+the main sweep) and at $G=8,12$ (softer $R=\{0.04,0.1,0.4\}$, single
+seed each, since $G=3$ was the load-bearing 3-seed comparison and
+$G=8/12$ were a targeted follow-up). $G=3$ is unaffected by temperature
+in either direction, exactly as predicted ($0.693\pm0.017$ original vs.\
+$0.685\pm0.008$ tight vs.\ $0.684\pm0.005$ soft -- all within noise of
+each other). $G=12$ is likewise unaffected ($0.489\pm0.025\to0.492$).
+But at $G=8$, softening $R$ recovers far more than the ceiling
+argument's own numbers suggested it should: success rises from
+$0.535\pm0.016$ to $\mathbf{0.646}$ -- a single seed, but a gap
+$\sim$7$\times$ the original 3-seed standard deviation, not plausibly
+noise. That recovers roughly two-thirds of the gap back to $G=4$'s
+$0.694$, from a temperature change alone.
+
+\begin{table}[H]
+\centering
+\caption{Confirmatory temperature test for True (Tool Hang, tail-averaged
+over the last $10{,}000$ logged steps). Original-$R$ rows repeat
+matching entries from Tables~\ref{tab:drift_3seed}/\ref{tab:drift_true_mechanism}.
+\texttt{grad\_norm} mean and spike count are ranges across seeds where 3
+seeds were run; spike count is the number of logged steps (out of the
+$10{,}000$-step tail window) with \texttt{grad\_norm}$>100$.}
+\label{tab:drift_temp_confirm}
+\begin{tabular}{ccccc}
+\toprule
+$G$ & $R$ & Success rate & \texttt{grad\_norm} mean & spikes ($>100$) \\
+\midrule
+3  & original $\{0.02,0.05,0.2\}$             & $0.693 \pm 0.017$ & $50$--$59$     & $615$--$890$  \\
+3  & tight $\{0.01,0.025,0.1\}$ ($0.5\times$) & $0.685 \pm 0.008$ & $48$--$53$     & $769$--$938$  \\
+3  & soft $\{0.04,0.1,0.4\}$ ($2\times$)      & $0.684 \pm 0.005$ & $64$--$70$     & $932$--$1150$ \\
+8  & original $\{0.02,0.05,0.2\}$             & $0.535 \pm 0.016$ & $45.5$--$46.3$ & $779$--$881$  \\
+8  & soft $\{0.04,0.1,0.4\}$ (1 seed)          & $\mathbf{0.646}$  & $44.1$         & $688$         \\
+12 & original $\{0.02,0.05,0.2\}$             & $0.489 \pm 0.025$ & $47.7$--$49.7$ & $741$--$899$  \\
+12 & soft $\{0.04,0.1,0.4\}$ (1 seed)          & $0.492$           & $50.3$         & $783$         \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We checked whether \texttt{grad\_norm}'s full distribution (not just its
+tail-averaged mean, which barely moves in any of these six comparisons)
+explains $G=8$'s jump: fewer or smaller gradient spikes could plausibly
+mean a more stably-converged final policy at a similar average gradient
+magnitude. In isolation this looks compelling at $G=8$: softer $R$
+reduces the spike count ($688$ vs.\ $779$--$881$) and the worst single
+spike ($1024$ vs.\ $1408$--$1584$, not shown in the table). But the same
+comparison at $G=3$ shows the \emph{opposite} direction (spike count
+\emph{rises}, from $615$--$890$ to $932$--$1150$, under softer $R$, with
+success unchanged), and at $G=12$ shows no change at all ($783$, inside
+the original $741$--$899$ range, success also unchanged). If reduced
+spike frequency were the real mechanism, $G=3$ should have gotten worse
+under softer $R$, not stayed flat -- so we read the $G=8$
+\texttt{grad\_norm} pattern as most likely coincidental rather than
+causal.
+
+\textbf{The honest state of this result}: temperature can produce a
+large, real improvement at intermediate $G$ (here, $G=8$), and the
+\texttt{sum\_pos}/\texttt{sum\_neg} mechanism correctly predicts the
+\emph{direction} (softer helps, and helps least once $G$ is far enough
+that the ceiling is already exhausted, as at $G=12$) -- but none of the
+diagnostics logged so far, including the ceiling analysis itself,
+predicts the \emph{magnitude} at $G=8$. This is a real, unresolved gap,
+not a settled finding; Section~\ref{sec:diagnostic_gaps} proposes the
+additional instrumentation that would be needed to close it.
+
+\subsection{Diagnostic gaps: what we would log to explain this}
+\label{sec:diagnostic_gaps}
+
+The $G=8$ result above is the clearest evidence in this appendix that
+the currently-logged diagnostics are insufficient to explain drift
+training dynamics, not merely imprecise. Four additions would directly
+target the gap:
+
+\begin{itemize}
+\item \textbf{A clamp-active flag.} \texttt{drift\_loss} clamps
+\texttt{scale\_inputs} at $10^{-3}$ (Section~\ref{sec:why_high_g}), and
+we already flagged that this clamp being active is a live, unruled-out
+alternative explanation for False's \texttt{grad\_norm} explosion at
+$G\ge12$. Logging whether the clamp is active (a boolean, or the
+fraction of a batch hitting it) each step would let us separate a
+genuine training instability from a numerical-floor artifact directly,
+instead of inferring it after the fact.
+\item \textbf{Cross-timestep coordinate correlation.} Section~\ref{sec:temp_calibration}'s
+$\sqrt{T}$ rescaling assumed the $T=16$ per-timestep coordinates are
+independent; the diversity-ratio mismatch there ($\sim$10$\times$ vs.\
+the $\sqrt{16}=4\times$ the independence assumption predicts) suggests
+they are not, but we never measured this directly. A logged mean cosine
+similarity (or a PCA effective-dimensionality estimate) between
+consecutive timesteps' action vectors would replace that inference with
+a measurement, and might also help explain why softening $R$ helps more
+at some $G$ than a purely count-based argument predicts.
+\item \textbf{Deployed single-sample action diversity.} Every diagnostic
+in this appendix measures diversity among the $G$ \emph{training-time}
+candidates. Deployment uses exactly one sample per step
+(\texttt{predict\_action()}), and we have never measured the deployed
+policy's own single-sample stochasticity directly. Logging the spread
+(e.g.\ mean pairwise distance) of $K$ repeated \texttt{predict\_action()}
+calls on the same held-out observation, at evaluation time, would close
+this gap directly, and is the single most likely candidate to explain
+$G=8$'s jump: softening $R$ may change deployed-time behavior in a way
+none of our training-time diagnostics capture.
+\item \textbf{Collapse/transition-onset step, not just a tail-window
+average.} Every diagnostic in this appendix is tail-averaged over the
+last $10{,}000$ of $250{,}000$ steps -- a single end-of-training
+snapshot. Logging the training step at which \texttt{diversity} (or
+\texttt{grad\_norm}) first crosses a fixed threshold would let us see
+\emph{when}, not just \emph{whether}, a run's dynamics changed, which
+the current logs cannot distinguish (an issue already noted for the
+Option-B manipulation check in Section~\ref{sec:temp_calibration}).
+\end{itemize}
+
+None of these were logged for the runs in this appendix, so we cannot
+answer the $G=8$ question with the data already collected -- a repeat
+of just the $G=8$ soft-$R$ configuration with this instrumentation
+added would be the natural next experiment.
+
 \subsection{Implication: the temperatures need dimension-aware calibration}
 \label{sec:temp_calibration}
 
@@ -1152,9 +1350,22 @@ mostly noise-level at $G=6,7$ but real at $G=8$, $\sim$4.6$\times$ pooled
 SD) is far milder than False's worst case (a $\sim$45\% relative
 collapse at $G\ge12$), at the cost of $1.2$--$2.0\times$ more training
 time (Table~\ref{tab:drift_3seed}). The
-main comparison's choice, $G=3$, sits safely in True's dominant regime.
-\textbf{This empirical pattern is solid; the mechanistic account offered
-for it is not.} The kernel-sharpness diagnostic hypothesized to explain
+main comparison's choice, $G=3$, sits safely in True's dominant regime,
+and True's own peak specifically there is now reasonably well
+understood (Section~\ref{sec:why_true_peaks}): a bias-variance trade-off
+in which too few candidates ($G=2$) starve the repulsion term of a
+stable per-step gradient signal, and too many ($G\ge5$) structurally
+dilute the demonstration's share of attraction/repulsion mass. This part
+is not, however, temperature-proof: a confirmatory test found that
+softening $R$ recovers roughly two-thirds of the success-rate gap
+between $G=4$ and $G=8$ (Table~\ref{tab:drift_temp_confirm}), far more
+than our own dilution-ceiling argument predicted, by a mechanism that
+remains only partially understood (Section~\ref{sec:diagnostic_gaps}
+proposes what additional logging would be needed to pin it down). $G=3$
+and $G=12$ are, by contrast, confirmed temperature-invariant, consistent
+with the original argument.
+\textbf{The True-vs-False comparison's mechanistic account, by
+contrast, is less solid.} The kernel-sharpness diagnostic hypothesized to explain
 the low-$G$ advantage moves in roughly the \emph{opposite} direction from
 the success-rate gap it was meant to explain
 (Section~\ref{sec:why_low_g}); the high-$G$ collapse diagnostics largely
@@ -1172,6 +1383,160 @@ Disentangling that -- via the projection/chunking design described in
 Section~\ref{sec:what_ptl_controls} and the softer-$R$ control described
 in Section~\ref{sec:temp_calibration} -- is the natural next step, rather
 than treating the current dimensionality narrative as settled.
+
+\section{PAC-Drift Hyperparameter Sweep: \texttt{kl\_penalty} and \texttt{post\_sigma\_scale}}
+\label{sec:pac_drift_sweep}
+
+PAC-Drift extends Drift Policy (Section~\ref{sec:drift}) with a Bayesian
+neural network backbone: every weight is a Gaussian posterior
+$q(\theta)=\mathcal{N}(\mu,\sigma^2)$ rather than a point estimate, trained
+by minimizing a PAC-Bayes generalization bound on the attraction/repulsion
+loss, with a KL-divergence term $\mathrm{KL}(q(\theta)\,\|\,p(\theta))$
+against a fixed Gaussian prior $p(\theta)$ regularizing the posterior
+towards the prior, weighted by \texttt{kl\_penalty}. This appendix reports
+a screening sweep over \texttt{kl\_penalty} and the posterior's initial
+noise level, run on Tool Hang using the multi-GPU (DDP) training path, with
+$G=3$ and \texttt{per\_timestep\_loss}\,$=$\,True fixed at the values
+Section~\ref{sec:appendix_ablation} found best for plain Drift Policy.
+
+\subsection{From absolute to fan-in-relative posterior noise}
+\label{sec:sigma_scale_motivation}
+
+The posterior/prior standard deviations are parameterized as
+$\sigma=\mathrm{softplus}(\rho)$, and the original sweep varied a single
+scalar \texttt{rho\_post} (with \texttt{rho\_prior} tied to the same value)
+applied identically to every probabilistic weight in the network. This is
+architecture-miscalibrated for a U-Net whose channel widths span
+\texttt{down\_dims}\,$=[256,512,1024]$: each layer's own deterministic
+weight-init scale is $\sigma_{\text{weights}}=1/\sqrt{\text{fan-in}}$, which
+varies by more than $30\times$ between the shallowest and the bottleneck
+layers, so one absolute $\sigma$ leaves the bottleneck proportionally far
+noisier (relative to its own weight scale) than the first layer. Tying
+\texttt{rho\_prior} to \texttt{rho\_post} compounds this: it also shrinks
+the prior in lockstep with whatever posterior noise level is being swept,
+so the KL term's meaning drifts across the grid instead of regularizing
+against a fixed reference. Both issues are fixed by switching to
+\texttt{post\_sigma\_scale}, which sets $\sigma = \texttt{post\_sigma\_scale}
+\times \sigma_{\text{weights}}$ per layer (a fan-in-relative, constant
+noise-to-signal ratio across the whole network), while leaving
+\texttt{prior\_sigma\_scale}/\texttt{rho\_prior} unoverridden so the prior
+stays fixed at its own default ($\sigma_{\text{prior}}=1.0$, absolute) and
+is no longer confounded with the posterior sweep.
+
+\subsection{Experimental setup}
+
+$4\times4$ grid of \texttt{kl\_penalty}$\in\{10^{-6},10^{-5},10^{-4},10^{-3}\}$
+and \texttt{post\_sigma\_scale}$\in\{0.01,0.03,0.1,0.3\}$, extended afterward
+with \texttt{post\_sigma\_scale}$\in\{1.0,3.0\}$ at all four
+\texttt{kl\_penalty} values once the first grid suggested the trend had not
+plateaued. Single seed (100) per combination -- a screening pass, not the
+main comparison's 3-seed protocol -- $5\times10^5$ updates, $200$
+demonstrations, no training rollout, success rate averaged over the last 10
+checkpoints $\times$ 1000 rollout episodes, evaluated both with sampled
+posterior weights (``stochastic'') and at the posterior mean
+(``deterministic''), matching Section~\ref{sec:eval_discussion}'s protocol.
+
+\begin{table}[H]
+\centering
+\caption{PAC-Drift on Tool Hang: success rate vs.\ \texttt{kl\_penalty} and
+\texttt{post\_sigma\_scale} (single seed, $5\times10^5$ updates, no training
+rollout, $G=3$, \texttt{per\_timestep\_loss}\,$=$\,True). $^{a}$: one
+checkpoint's rollout crashed on a MuJoCo NaN/Inf event and was carried
+forward from the previous checkpoint (not zero-replaced; see
+Section~\ref{sec:eval_discussion}). $^{b}$: this run's stochastic-mode
+rollout crashed within the first 2 of 11 checkpoints and the job was later
+OOM-killed during the deterministic-mode pass's teardown (see text); no
+stochastic summary is available, and the deterministic score shown is from
+a pass that did complete all 11 checkpoints.}
+\label{tab:pac_drift_sweep}
+\begin{tabular}{ccccc}
+\toprule
+\texttt{kl\_penalty} & \texttt{post\_sigma\_scale} & Stochastic SR & Deterministic SR & Train+Eval (h) \\
+\midrule
+$10^{-6}$ & $0.01$ & $0.559$       & $0.545$       & $8.69$ \\
+$10^{-6}$ & $0.03$ & $0.548$       & $0.533$       & $7.98$ \\
+$10^{-6}$ & $0.1$  & $0.575$       & $0.545$       & $8.55$ \\
+$10^{-6}$ & $0.3$  & $0.616$       & $0.566^{a}$   & $8.28$ \\
+$10^{-6}$ & $1.0$  & $\mathbf{0.743}$ & $\mathbf{0.656}$ & $8.46$ \\
+$10^{-6}$ & $3.0$  & $0.121$       & $0.178$       & $8.93$ \\
+\midrule
+$10^{-5}$ & $0.01$ & $0.526$       & $0.520$       & $8.46$ \\
+$10^{-5}$ & $0.03$ & $0.598$       & $0.587$       & $8.79$ \\
+$10^{-5}$ & $0.1$  & $0.564$       & $0.537$       & $8.50$ \\
+$10^{-5}$ & $0.3$  & $0.584$       & $0.544$       & $8.62$ \\
+$10^{-5}$ & $1.0$  & $\mathbf{0.739}$ & $\mathbf{0.634}$ & $8.51$ \\
+$10^{-5}$ & $3.0$  & $0.107^{a}$   & $0.041$       & $8.08$ \\
+\midrule
+$10^{-4}$ & $0.01$ & $0.548$       & $0.541$       & $8.01$ \\
+$10^{-4}$ & $0.03$ & $0.556$       & $0.525$       & $8.39$ \\
+$10^{-4}$ & $0.1$  & $0.521$       & $0.513$       & $8.67$ \\
+$10^{-4}$ & $0.3$  & $0.561$       & $0.528$       & $8.15$ \\
+$10^{-4}$ & $1.0$  & $\mathbf{0.729}$ & $0.565$    & $8.74$ \\
+$10^{-4}$ & $3.0$  & $0.063^{a}$   & $0.001$       & $7.77$ \\
+\midrule
+$10^{-3}$ & $0.01$ & $0.585^{a}$   & $0.557$       & $8.10$ \\
+$10^{-3}$ & $0.03$ & $0.541$       & $0.506$       & $8.56$ \\
+$10^{-3}$ & $0.1$  & $0.644$       & $\mathbf{0.576}$ & $8.20$ \\
+$10^{-3}$ & $0.3$  & $\mathbf{0.674}$ & $0.530$     & $8.51$ \\
+$10^{-3}$ & $1.0$  & $0.630$       & $0.091$       & $8.22$ \\
+$10^{-3}$ & $3.0$  & ---$^{b}$     & $0.000$       & $5.11$+(OOM) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Result: a rise-then-collapse pattern}
+
+\texttt{post\_sigma\_scale}$=1.0$ is a sharp improvement over the entire
+$[0.01,0.3]$ range at the three lower \texttt{kl\_penalty} values -- stochastic
+success rises to $0.73$--$0.74$, well above that range's best ($0.616$ at
+\texttt{kl\_penalty}$=10^{-6}$, \texttt{post\_sigma\_scale}$=0.3$) -- before
+collapsing catastrophically at \texttt{post\_sigma\_scale}$=3.0$ to
+$0.06$--$0.18$ stochastic and near-zero deterministic across every
+\texttt{kl\_penalty} tested. At \texttt{kl\_penalty}$=10^{-3}$, the same rise
+does not clearly appear: \texttt{post\_sigma\_scale}$=0.1$ and $0.3$ already
+match or exceed the $1.0$ result on the stochastic metric ($0.644$ and
+$\mathbf{0.674}$ vs.\ $0.630$), and $1.0$'s deterministic score ($0.091$) is
+already far below its own stochastic score -- a stochastic/deterministic gap
+($0.54$) wider than anywhere else in the grid except the collapsed
+\texttt{post\_sigma\_scale}$=3.0$ row. This reads as \texttt{kl\_penalty}$=10^{-3}$
+entering instability \emph{one step earlier} than the other three
+\texttt{kl\_penalty} values, consistent with a stronger KL penalty permitting
+less excess posterior mass before the posterior-mean (deterministic) policy
+starts to degrade, even while sampled-weight (stochastic) rollouts -- which
+average over many noisy draws -- still look acceptable.
+
+The \texttt{kl\_penalty}$=10^{-3}$, \texttt{post\_sigma\_scale}$=3.0$ run
+additionally crashed rather than completing cleanly. Training finished
+normally ($5.11\,\mathrm{h}$), but the stochastic-mode evaluation pass hit a
+MuJoCo NaN/Inf instability within its first 2 of 11 checkpoints and the whole
+evaluation process died (the launch script has no exit-code check between the
+two evaluation passes, unlike the check it does have after training, so the
+deterministic-mode pass ran anyway); that second pass did complete all 11
+checkpoints, reporting a genuine $0.0$ success rate (confirmed not
+zero-replaced), and the job was OOM-killed two seconds after that pass
+finished, most plausibly from vectorized-environment worker processes left
+uncleaned by the earlier crash accumulating memory across the
+$\sim$20 checkpoint evaluations in the run. We read this less as a distinct
+bug than as a second symptom of the same collapse visible in every other
+\texttt{post\_sigma\_scale}$=3.0$ row: at this noise level the policy's
+actions are erratic enough to reliably destabilize the physics simulator,
+and a 1-in-6 crash rate (one $^{a}$-flagged carry-forward per column on
+average, plus this one harder failure) across the sweep is consistent with
+that.
+
+Two design cautions follow. First, \texttt{post\_sigma\_scale} and
+\texttt{kl\_penalty} are not independent along this axis: a value of
+\texttt{post\_sigma\_scale} that is a clear win at low \texttt{kl\_penalty}
+can already show instability symptoms at the highest value tested, so any
+further tuning should treat the pair jointly rather than optimizing
+\texttt{post\_sigma\_scale} once and reusing it across \texttt{kl\_penalty}
+values. Second, the single large jump from $0.3\to1.0\to3.0$ (a
+$10\times$ step at the point the trend changed direction) was sufficient to
+find both a large improvement and a total collapse, but not to localize
+\emph{where} between them the collapse begins -- a narrower follow-up sweep
+over \texttt{post\_sigma\_scale}$\in\{0.5,2.0\}$ at the same four
+\texttt{kl\_penalty} values is in progress to map that boundary more
+precisely before selecting a value for a full 3-seed confirmation run.
 
 \begin{thebibliography}{9}
 
